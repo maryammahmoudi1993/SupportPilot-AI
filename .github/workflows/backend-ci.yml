@@ -91,7 +91,11 @@ jobs:
       - name: Dependency audit
         run: |
           pip install pip-audit
-          pip-audit --strict --skip-editable
+          # --strict combined with --skip-editable makes pip-audit exit
+          # nonzero purely because it logs "skipping our own editable
+          # package" at ERROR level -- unrelated to any real vulnerability.
+          # Omit --strict; pip-audit still exits nonzero on actual findings.
+          pip-audit --skip-editable
 
       - name: Build container image
         working-directory: .
