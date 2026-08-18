@@ -17,6 +17,31 @@ env = environ.Env(
     SECRET_KEY=(str, "dev-key-change-in-production"),
     DATABASE_URL=(str, "postgres://postgres:postgres@localhost:5432/supportpilot"),
     REDIS_URL=(str, "redis://localhost:6379/0"),
+    CORS_ALLOWED_ORIGINS=(
+        list,
+        [
+            "http://localhost:3000",
+            "http://localhost:8000",
+            "http://127.0.0.1:3000",
+            "http://127.0.0.1:8000",
+        ],
+    ),
+    CSRF_TRUSTED_ORIGINS=(
+        list,
+        [
+            "http://localhost:3000",
+            "http://localhost:8000",
+            "http://127.0.0.1:3000",
+            "http://127.0.0.1:8000",
+        ],
+    ),
+    AUTH_REFRESH_COOKIE_NAME=(str, "sp_refresh_token"),
+    AUTH_REFRESH_COOKIE_SECURE=(bool, False),
+    AUTH_REFRESH_COOKIE_SAMESITE=(str, "Lax"),
+    AUTH_REFRESH_COOKIE_PATH=(str, "/api/v1/auth/"),
+    AUTH_REFRESH_COOKIE_MAX_AGE=(int, 60 * 60 * 24 * 7),
+    AUTH_LOGIN_THROTTLE_RATE=(str, "10/min"),
+    AUTH_REFRESH_THROTTLE_RATE=(str, "30/min"),
 )
 
 environ.Env.read_env(os.path.join(BASE_DIR.parent, ".env"))
@@ -40,6 +65,7 @@ INSTALLED_APPS = [
     # Third party
     "corsheaders",
     "rest_framework",
+    "rest_framework_simplejwt.token_blacklist",
     "drf_spectacular",
     "django_filters",
     # Local apps
@@ -171,23 +197,47 @@ REST_FRAMEWORK = {
     ],
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
     "EXCEPTION_HANDLER": "common.exceptions.custom_exception_handler",
+    "DEFAULT_THROTTLE_CLASSES": [],
+    "DEFAULT_THROTTLE_RATES": {
+        "login": env("AUTH_LOGIN_THROTTLE_RATE"),
+        "refresh": env("AUTH_REFRESH_THROTTLE_RATE"),
+    },
 }
 
 # Simple JWT
+#
+# Access tokens are short-lived and returned in the JSON body for the
+# frontend to hold in memory; they never carry authoritative workspace-role
+# claims (see workspaces/permissions.py). Refresh tokens are long-lived,
+# HttpOnly-cookie-only, rotated on every use, and blacklisted after rotation.
 SIMPLE_JWT = {
-    "ACCESS_TOKEN_LIFETIME": timedelta(hours=1),
+    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=15),
     "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
+    "ROTATE_REFRESH_TOKENS": True,
+    "BLACKLIST_AFTER_ROTATION": True,
+    "UPDATE_LAST_LOGIN": True,
     "ALGORITHM": "HS256",
     "SIGNING_KEY": SECRET_KEY,
 }
 
-# CORS
-CORS_ALLOWED_ORIGINS = [
-    "http://localhost:3000",
-    "http://localhost:8000",
-    "http://127.0.0.1:3000",
-    "http://127.0.0.1:8000",
-]
+# Auth refresh cookie. Read from settings/environment, never hard-coded at
+# the call site. SameSite/Secure/Path are all explicit and testable.
+AUTH_REFRESH_COOKIE_NAME = env("AUTH_REFRESH_COOKIE_NAME")
+AUTH_REFRESH_COOKIE_SECURE = env("AUTH_REFRESH_COOKIE_SECURE") or not DEBUG
+AUTH_REFRESH_COOKIE_SAMESITE = env("AUTH_REFRESH_COOKIE_SAMESITE")
+AUTH_REFRESH_COOKIE_PATH = env("AUTH_REFRESH_COOKIE_PATH")
+AUTH_REFRESH_COOKIE_MAX_AGE = env("AUTH_REFRESH_COOKIE_MAX_AGE")
+
+# CORS — no wildcard origin; credentials only enabled for explicitly
+# configured origins so cross-origin browser refresh cookies work as
+# intended and nowhere else.
+CORS_ALLOWED_ORIGINS = env("CORS_ALLOWED_ORIGINS")
+CORS_ALLOW_CREDENTIALS = True
+
+# CSRF — required because refresh/logout authenticate via a browser cookie.
+CSRF_TRUSTED_ORIGINS = env("CSRF_TRUSTED_ORIGINS")
+CSRF_COOKIE_NAME = "sp_csrftoken"
+CSRF_HEADER_NAME = "HTTP_X_CSRFTOKEN"
 
 # Celery
 CELERY_BROKER_URL = env("REDIS_URL")
