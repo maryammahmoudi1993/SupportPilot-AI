@@ -44,6 +44,14 @@ class AuditAction(models.TextChoices):
         "knowledge.document_retry_requested",
         "Knowledge document retry requested",
     )
+    AGENT_DEFINITION_CREATED = "agent.definition_created", "Agent definition created"
+    AGENT_DEFINITION_UPDATED = "agent.definition_updated", "Agent definition updated"
+    AGENT_VERSION_CREATED = "agent.version_created", "Agent version created"
+    AGENT_VERSION_PUBLISHED = "agent.version_published", "Agent version published"
+    AGENT_RUN_STARTED = "agent.run_started", "Agent run started"
+    AGENT_RUN_CANCELLED = "agent.run_cancelled", "Agent run cancelled"
+    AGENT_RUN_FAILED = "agent.run_failed", "Agent run failed"
+    AGENT_RUN_COMPLETED = "agent.run_completed", "Agent run completed"
 
 
 class AuditEvent(BaseModel):

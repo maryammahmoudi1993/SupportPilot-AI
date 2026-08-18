@@ -23,9 +23,9 @@ urlpatterns = [
                     SpectacularSwaggerView.as_view(url_name="api-schema"),
                     name="api-docs",
                 ),
-                # Apps implemented so far. Domain apps without routes yet (agents,
-                # tools, integrations, policies, approvals, notifications,
-                # evaluations, audit, observability) are wired in their own phases.
+                # Apps implemented so far. Domain apps without routes yet (tools,
+                # integrations, policies, approvals, notifications, evaluations,
+                # observability) are wired in their own phases.
                 path("auth/", include("accounts.urls")),
                 path("workspaces/", include("workspaces.urls")),
                 path(
@@ -43,6 +43,14 @@ urlpatterns = [
                 path(
                     "workspaces/<uuid:workspace_id>/knowledge/",
                     include("knowledge.urls"),
+                ),
+                path(
+                    "workspaces/<uuid:workspace_id>/agents/",
+                    include("agents.urls"),
+                ),
+                path(
+                    "workspaces/<uuid:workspace_id>/agent-runs/",
+                    include("agents.run_urls"),
                 ),
             ]
         ),
