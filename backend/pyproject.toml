@@ -88,6 +88,9 @@ warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = false
 plugins = ["mypy_django_plugin.main", "mypy_drf_plugin.main"]
+# Generated migrations are not hand-maintained and re-run through
+# makemigrations on every schema change; type-checking them adds no value.
+exclude = ["migrations/"]
 
 [[tool.mypy.overrides]]
 module = ["celery.*", "environ.*"]
