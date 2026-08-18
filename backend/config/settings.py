@@ -51,6 +51,12 @@ env = environ.Env(
     KNOWLEDGE_INGESTION_MAX_ATTEMPTS=(int, 3),
     AUTH_LOGIN_THROTTLE_RATE=(str, "10/min"),
     AUTH_REFRESH_THROTTLE_RATE=(str, "30/min"),
+    # AI provider layer (Phase 5). The default is the deterministic offline
+    # provider so the application boots and every normal test/CI path runs
+    # without paid credentials. The real provider is strictly opt-in.
+    AGENTS_LLM_PROVIDER=(str, "fake"),
+    AGENTS_OPENAI_API_KEY=(str, ""),
+    AGENTS_OPENAI_BASE_URL=(str, ""),
 )
 
 environ.Env.read_env(os.path.join(BASE_DIR.parent, ".env"))
@@ -228,6 +234,13 @@ SPECTACULAR_SETTINGS = {
         "KnowledgeSourceTypeEnum": "knowledge.models.KnowledgeSourceType.choices",
         "KnowledgeDocumentStatusEnum": "knowledge.models.KnowledgeDocumentStatus.choices",
         "KnowledgeIngestionStatusEnum": "knowledge.models.KnowledgeIngestionStatus.choices",
+        "AgentDefinitionStatusEnum": "agents.models.AgentDefinitionStatus.choices",
+        "AgentVersionStatusEnum": "agents.models.AgentVersionStatus.choices",
+        "AgentProviderEnum": "agents.models.AgentProvider.choices",
+        "AgentRunStatusEnum": "agents.models.AgentRunStatus.choices",
+        "AgentRunTriggerEnum": "agents.models.AgentRunTrigger.choices",
+        "AgentStepTypeEnum": "agents.models.AgentStepType.choices",
+        "AgentStepStatusEnum": "agents.models.AgentStepStatus.choices",
     },
 }
 
@@ -296,6 +309,13 @@ KNOWLEDGE_INGESTION_MAX_ATTEMPTS = env("KNOWLEDGE_INGESTION_MAX_ATTEMPTS")
 
 if not 0 <= KNOWLEDGE_CHUNK_OVERLAP < KNOWLEDGE_CHUNK_SIZE:
     raise ValueError("KNOWLEDGE_CHUNK_OVERLAP must be >= 0 and smaller than chunk size")
+
+# AI provider layer (Phase 5). Never hardcode credentials; the real adapter
+# is only constructed when AGENTS_LLM_PROVIDER=openai and a key is present
+# (see agents/providers/config.py).
+AGENTS_LLM_PROVIDER = env("AGENTS_LLM_PROVIDER")
+AGENTS_OPENAI_API_KEY = env("AGENTS_OPENAI_API_KEY")
+AGENTS_OPENAI_BASE_URL = env("AGENTS_OPENAI_BASE_URL")
 
 # Logging
 LOGGING = {
