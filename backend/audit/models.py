@@ -30,6 +30,20 @@ class AuditAction(models.TextChoices):
     TICKET_STATUS_CHANGED = "ticket.status_changed", "Ticket status changed"
     TICKET_RESOLVED = "ticket.resolved", "Ticket resolved"
     TICKET_REOPENED = "ticket.reopened", "Ticket reopened"
+    KNOWLEDGE_SOURCE_CREATED = "knowledge.source_created", "Knowledge source created"
+    KNOWLEDGE_SOURCE_UPDATED = "knowledge.source_updated", "Knowledge source updated"
+    KNOWLEDGE_SOURCE_DEACTIVATED = (
+        "knowledge.source_deactivated",
+        "Knowledge source deactivated",
+    )
+    KNOWLEDGE_DOCUMENT_UPLOADED = (
+        "knowledge.document_uploaded",
+        "Knowledge document uploaded",
+    )
+    KNOWLEDGE_DOCUMENT_RETRY_REQUESTED = (
+        "knowledge.document_retry_requested",
+        "Knowledge document retry requested",
+    )
 
 
 class AuditEvent(BaseModel):
