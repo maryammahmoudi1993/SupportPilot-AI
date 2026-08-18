@@ -3,7 +3,7 @@
 from rest_framework.exceptions import APIException, NotFound, ValidationError
 from rest_framework.views import APIView
 
-from common.exceptions import custom_exception_handler
+from common.exceptions import ConflictError, custom_exception_handler
 
 
 def _context():
@@ -50,3 +50,10 @@ class TestCustomExceptionHandler:
         assert response.data["error"]["code"] == "internal_server_error"
         # The raw exception message must never leak to the client.
         assert "boom" not in str(response.data)
+
+    def test_conflict_error_maps_to_409(self):
+        response = custom_exception_handler(ConflictError("already exists"), _context())
+
+        assert response is not None
+        assert response.status_code == 409
+        assert "error" in response.data
