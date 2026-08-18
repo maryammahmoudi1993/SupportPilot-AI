@@ -28,9 +28,18 @@ urlpatterns = [
                 # evaluations, audit, observability) are wired in their own phases.
                 path("auth/", include("accounts.urls")),
                 path("workspaces/", include("workspaces.urls")),
-                path("customers/", include("customers.urls")),
-                path("conversations/", include("conversations.urls")),
-                path("tickets/", include("tickets.urls")),
+                path(
+                    "workspaces/<uuid:workspace_id>/customers/",
+                    include("customers.urls"),
+                ),
+                path(
+                    "workspaces/<uuid:workspace_id>/conversations/",
+                    include("conversations.urls"),
+                ),
+                path(
+                    "workspaces/<uuid:workspace_id>/tickets/",
+                    include("tickets.urls"),
+                ),
             ]
         ),
     ),
