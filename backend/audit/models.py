@@ -20,6 +20,16 @@ class AuditAction(models.TextChoices):
     WORKSPACE_MEMBER_ROLE_CHANGED = "workspace.member_role_changed", "Member role changed"
     WORKSPACE_MEMBER_REMOVED = "workspace.member_removed", "Member removed"
     WORKSPACE_OWNERSHIP_TRANSFERRED = "workspace.ownership_transferred", "Ownership transferred"
+    CUSTOMER_DEACTIVATED = "customer.deactivated", "Customer deactivated"
+    CONVERSATION_ASSIGNED = "conversation.assigned", "Conversation assigned"
+    CONVERSATION_REASSIGNED = "conversation.reassigned", "Conversation reassigned"
+    CONVERSATION_CLOSED = "conversation.closed", "Conversation closed"
+    CONVERSATION_REOPENED = "conversation.reopened", "Conversation reopened"
+    TICKET_ASSIGNED = "ticket.assigned", "Ticket assigned"
+    TICKET_REASSIGNED = "ticket.reassigned", "Ticket reassigned"
+    TICKET_STATUS_CHANGED = "ticket.status_changed", "Ticket status changed"
+    TICKET_RESOLVED = "ticket.resolved", "Ticket resolved"
+    TICKET_REOPENED = "ticket.reopened", "Ticket reopened"
 
 
 class AuditEvent(BaseModel):
