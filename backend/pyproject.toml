@@ -39,6 +39,7 @@ dependencies = [
     "drf-spectacular==0.30.0",
     "django-filter==25.1",
     "djangorestframework-simplejwt==5.5.1",
+    "pypdf==6.15.0",
 ]
 
 [project.optional-dependencies]
@@ -68,6 +69,10 @@ exclude = '''
 /(
     \.git
   | \.venv
+  | \.pytest_cache
+  | \.mypy_cache
+  | \.ruff_cache
+  | \.black-cache-phase4
   | venv
   | migrations
   | __pycache__

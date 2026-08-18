@@ -18,6 +18,17 @@ class ConflictError(APIException):
     default_code = "conflict"
 
 
+class SafeAPIError(APIException):
+    """Handled application error with a stable public code and safe message."""
+
+    status_code = status.HTTP_400_BAD_REQUEST
+    api_error_code = "invalid_request"
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        self.api_error_code = code or self.api_error_code
+        super().__init__(message)
+
+
 def custom_exception_handler(exc, context):
     """Normalize every handled DRF exception into a stable error envelope.
 
@@ -42,6 +53,15 @@ def custom_exception_handler(exc, context):
         )
 
     data = response.data
+
+    if isinstance(exc, SafeAPIError):
+        response.data = {
+            "error": {
+                "code": exc.api_error_code,
+                "message": str(exc.detail),
+            }
+        }
+        return response
 
     if isinstance(data, dict) and "error" in data:
         # Already enveloped upstream; leave untouched (idempotent).

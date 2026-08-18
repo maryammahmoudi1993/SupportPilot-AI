@@ -40,6 +40,15 @@ env = environ.Env(
     AUTH_REFRESH_COOKIE_SAMESITE=(str, "Lax"),
     AUTH_REFRESH_COOKIE_PATH=(str, "/api/v1/auth/"),
     AUTH_REFRESH_COOKIE_MAX_AGE=(int, 60 * 60 * 24 * 7),
+    KNOWLEDGE_MAX_UPLOAD_BYTES=(int, 10 * 1024 * 1024),
+    KNOWLEDGE_MAX_PDF_PAGES=(int, 100),
+    KNOWLEDGE_CHUNK_SIZE=(int, 1200),
+    KNOWLEDGE_CHUNK_OVERLAP=(int, 150),
+    KNOWLEDGE_MIN_CHUNK_CHARS=(int, 20),
+    KNOWLEDGE_DEFAULT_TOP_K=(int, 5),
+    KNOWLEDGE_MAX_TOP_K=(int, 20),
+    KNOWLEDGE_MAX_QUERY_LENGTH=(int, 2000),
+    KNOWLEDGE_INGESTION_MAX_ATTEMPTS=(int, 3),
     AUTH_LOGIN_THROTTLE_RATE=(str, "10/min"),
     AUTH_REFRESH_THROTTLE_RATE=(str, "30/min"),
 )
@@ -216,6 +225,9 @@ SPECTACULAR_SETTINGS = {
         "PriorityEnum": "tickets.models.TicketPriority.choices",
         "ConversationStatusEnum": "conversations.models.ConversationStatus.choices",
         "TicketStatusEnum": "tickets.models.TicketStatus.choices",
+        "KnowledgeSourceTypeEnum": "knowledge.models.KnowledgeSourceType.choices",
+        "KnowledgeDocumentStatusEnum": "knowledge.models.KnowledgeDocumentStatus.choices",
+        "KnowledgeIngestionStatusEnum": "knowledge.models.KnowledgeIngestionStatus.choices",
     },
 }
 
@@ -261,6 +273,29 @@ CELERY_ACCEPT_CONTENT = ["application/json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
 CELERY_TIMEZONE = "UTC"
+
+# Knowledge ingestion/retrieval. The vector dimension is a persisted schema
+# decision: changing it requires a migration and re-indexing existing chunks.
+KNOWLEDGE_MAX_UPLOAD_BYTES = env("KNOWLEDGE_MAX_UPLOAD_BYTES")
+KNOWLEDGE_MAX_PDF_PAGES = env("KNOWLEDGE_MAX_PDF_PAGES")
+KNOWLEDGE_ALLOWED_CONTENT_TYPES = {
+    "text/plain": frozenset({".txt"}),
+    "text/markdown": frozenset({".md", ".markdown"}),
+    "application/pdf": frozenset({".pdf"}),
+}
+KNOWLEDGE_CHUNK_SIZE = env("KNOWLEDGE_CHUNK_SIZE")
+KNOWLEDGE_CHUNK_OVERLAP = env("KNOWLEDGE_CHUNK_OVERLAP")
+KNOWLEDGE_MIN_CHUNK_CHARS = env("KNOWLEDGE_MIN_CHUNK_CHARS")
+# This is deliberately not runtime-configurable. VectorField dimensions are
+# schema state; changing 256 requires a migration plus re-indexing.
+KNOWLEDGE_EMBEDDING_DIMENSION = 256
+KNOWLEDGE_DEFAULT_TOP_K = env("KNOWLEDGE_DEFAULT_TOP_K")
+KNOWLEDGE_MAX_TOP_K = env("KNOWLEDGE_MAX_TOP_K")
+KNOWLEDGE_MAX_QUERY_LENGTH = env("KNOWLEDGE_MAX_QUERY_LENGTH")
+KNOWLEDGE_INGESTION_MAX_ATTEMPTS = env("KNOWLEDGE_INGESTION_MAX_ATTEMPTS")
+
+if not 0 <= KNOWLEDGE_CHUNK_OVERLAP < KNOWLEDGE_CHUNK_SIZE:
+    raise ValueError("KNOWLEDGE_CHUNK_OVERLAP must be >= 0 and smaller than chunk size")
 
 # Logging
 LOGGING = {
