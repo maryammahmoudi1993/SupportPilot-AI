@@ -41,10 +41,8 @@ class Workspace(BaseModel):
     class Meta:
         ordering = ["-created_at"]
         constraints = [
-            # `check=` (not `condition=`) is correct for the pinned Django 4.2;
-            # django-stubs' CheckConstraint stub targets a newer Django.
-            models.CheckConstraint(  # type: ignore[call-arg]
-                check=~models.Q(name=""),
+            models.CheckConstraint(
+                condition=~models.Q(name=""),
                 name="workspace_name_not_blank",
             ),
         ]

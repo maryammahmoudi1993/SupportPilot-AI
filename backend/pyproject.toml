@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
+requires = ["setuptools>=83.0.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -13,7 +13,7 @@ authors = [
 ]
 
 dependencies = [
-    "Django==4.2.30",
+    "Django==5.2.17",
     "djangorestframework==3.17.2",
     "django-cors-headers==4.9.0",
     "django-environ==0.14.0",
