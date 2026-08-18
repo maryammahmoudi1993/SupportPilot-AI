@@ -103,8 +103,14 @@ supportpilot-ai/
 ## Architecture
 
 See the architecture notes for [authentication and tenancy](docs/security/authentication-tenancy-rbac.md),
-[customer support core](docs/architecture/customer-support-core.md), and
-[knowledge ingestion/vector retrieval](docs/architecture/knowledge-rag-foundation.md).
+[customer support core](docs/architecture/customer-support-core.md),
+[knowledge ingestion/vector retrieval](docs/architecture/knowledge-rag-foundation.md), and the
+[AI provider layer and agent runtime foundation](docs/architecture/agent-runtime-foundation.md) —
+a vendor-independent LLM provider abstraction (deterministic offline provider by
+default, an opt-in real adapter), versioned agent configuration, and a small,
+bounded LangGraph execution runtime with explicit lifecycle states, budgets, and
+safe structured traces. It does not yet include tool execution, policy
+enforcement, human approval, or full business integrations.
 
 ## Development Guidelines
 
