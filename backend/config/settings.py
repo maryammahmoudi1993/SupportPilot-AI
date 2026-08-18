@@ -204,6 +204,21 @@ REST_FRAMEWORK = {
     },
 }
 
+# drf-spectacular
+#
+# ``role`` appears on several unrelated serializers (workspace membership,
+# conversation/ticket assignee summaries) that all share the same underlying
+# ``WorkspaceRole`` choices — pin the generated enum name explicitly so
+# schema generation does not have to guess and warn about the collision.
+SPECTACULAR_SETTINGS = {
+    "ENUM_NAME_OVERRIDES": {
+        "WorkspaceRoleEnum": "workspaces.models.WorkspaceRole.choices",
+        "PriorityEnum": "tickets.models.TicketPriority.choices",
+        "ConversationStatusEnum": "conversations.models.ConversationStatus.choices",
+        "TicketStatusEnum": "tickets.models.TicketStatus.choices",
+    },
+}
+
 # Simple JWT
 #
 # Access tokens are short-lived and returned in the JSON body for the
