@@ -102,7 +102,9 @@ supportpilot-ai/
 
 ## Architecture
 
-See [docs/architecture/README.md](docs/architecture/README.md) for detailed architecture documentation and ADRs.
+See the architecture notes for [authentication and tenancy](docs/security/authentication-tenancy-rbac.md),
+[customer support core](docs/architecture/customer-support-core.md), and
+[knowledge ingestion/vector retrieval](docs/architecture/knowledge-rag-foundation.md).
 
 ## Development Guidelines
 
