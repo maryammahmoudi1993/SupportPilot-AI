@@ -52,6 +52,9 @@ class AuditAction(models.TextChoices):
     AGENT_RUN_CANCELLED = "agent.run_cancelled", "Agent run cancelled"
     AGENT_RUN_FAILED = "agent.run_failed", "Agent run failed"
     AGENT_RUN_COMPLETED = "agent.run_completed", "Agent run completed"
+    TOOL_BINDING_CREATED = "tool.binding_created", "Tool binding created"
+    TOOL_BINDING_UPDATED = "tool.binding_updated", "Tool binding updated"
+    TOOL_BINDING_DISABLED = "tool.binding_disabled", "Tool binding disabled"
 
 
 class AuditEvent(BaseModel):
