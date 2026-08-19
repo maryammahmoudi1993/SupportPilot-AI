@@ -12,7 +12,7 @@ from integrations.providers.fakes import FakeNotificationProvider
 from tools.errors import ToolError
 from tools.execution import execute_tool
 
-from .factories import IntegrationConnectionFactory, bind_tool, running_run
+from .factories import IntegrationConnectionFactory, allow_all_policy, bind_tool, running_run
 
 
 @pytest.mark.django_db(transaction=True)
@@ -103,6 +103,7 @@ class TestNotificationSend:
         fake = fake or FakeNotificationProvider()
         run = running_run()
         bind_tool(run, "notification.send")
+        allow_all_policy(run.workspace)  # this suite tests provider mechanics, not Phase 8 gating
         IntegrationConnectionFactory(workspace=run.workspace, provider=IntegrationProvider.EMAIL)
         monkeypatch.setattr(
             "integrations.services.get_notification_provider", lambda provider: fake

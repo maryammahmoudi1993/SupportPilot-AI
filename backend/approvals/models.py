@@ -13,6 +13,7 @@ An ``ApprovalDecision`` is a one-per-``ApprovalRequest`` immutable record —
 
 from __future__ import annotations
 
+from django.conf import settings
 from django.db import models
 
 from common.models import BaseModel
@@ -71,7 +72,7 @@ class ApprovalRequest(BaseModel):
     # enforce the self-approval prohibition (section 49). Never the source
     # of authorization itself.
     requested_by = models.ForeignKey(
-        "accounts.User",
+        settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
@@ -124,7 +125,10 @@ class ApprovalDecision(BaseModel):
     )
     decision = models.CharField(max_length=10, choices=ApprovalDecisionValue.choices)
     decided_by = models.ForeignKey(
-        "accounts.User", on_delete=models.SET_NULL, null=True, related_name="approval_decisions"
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name="approval_decisions",
     )
     safe_comment = models.CharField(max_length=MAX_COMMENT_LENGTH, blank=True)
 

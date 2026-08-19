@@ -16,7 +16,7 @@ from integrations.providers.fakes import FakeCalendarProvider
 from tools.errors import ToolError
 from tools.execution import execute_tool
 
-from .factories import IntegrationConnectionFactory, bind_tool, running_run
+from .factories import IntegrationConnectionFactory, allow_all_policy, bind_tool, running_run
 
 
 def _setup(monkeypatch, *, fake=None, busy_slots=None):
@@ -24,6 +24,7 @@ def _setup(monkeypatch, *, fake=None, busy_slots=None):
     run = running_run()
     bind_tool(run, "calendar.check_availability")
     bind_tool(run, "calendar.create_booking")
+    allow_all_policy(run.workspace)  # this suite tests provider mechanics, not Phase 8 gating
     IntegrationConnectionFactory(
         workspace=run.workspace, provider=IntegrationProvider.GOOGLE_CALENDAR
     )

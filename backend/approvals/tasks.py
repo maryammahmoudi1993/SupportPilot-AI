@@ -17,3 +17,12 @@ def resume_approved_action_task(self, approval_request_id: str):
     from agents.services import resume_agent_run_after_approval
 
     return resume_agent_run_after_approval(approval_request_id)
+
+
+@shared_task
+def expire_stale_approvals_task() -> int:
+    """Periodic sweep (section 45) — safe to run on any cadence; each
+    ``ApprovalRequest`` is only ever transitioned to ``expired`` once."""
+    from .services import expire_stale_approvals
+
+    return expire_stale_approvals()

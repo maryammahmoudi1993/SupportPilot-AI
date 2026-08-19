@@ -14,6 +14,7 @@ never a dynamic import.
 
 from __future__ import annotations
 
+from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
 
@@ -76,7 +77,10 @@ class Policy(BaseModel):
         max_length=20, choices=PolicyStatus.choices, default=PolicyStatus.DRAFT
     )
     created_by = models.ForeignKey(
-        "accounts.User", on_delete=models.SET_NULL, null=True, related_name="policies_created"
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name="policies_created",
     )
 
     class Meta:
@@ -112,7 +116,7 @@ class PolicyVersion(BaseModel):
         max_length=20, choices=PolicyVersionStatus.choices, default=PolicyVersionStatus.DRAFT
     )
     created_by = models.ForeignKey(
-        "accounts.User",
+        settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
         null=True,
         related_name="policy_versions_created",
