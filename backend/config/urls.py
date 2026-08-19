@@ -6,6 +6,8 @@ from django.contrib import admin
 from django.urls import include, path
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 
+from tools.urls import tool_binding_urlpatterns
+
 urlpatterns = [
     # Admin
     path("admin/", admin.site.urls),
@@ -49,8 +51,16 @@ urlpatterns = [
                     include("agents.urls"),
                 ),
                 path(
+                    "workspaces/<uuid:workspace_id>/agents/",
+                    include((tool_binding_urlpatterns, "tools"), namespace="tool-bindings"),
+                ),
+                path(
                     "workspaces/<uuid:workspace_id>/agent-runs/",
                     include("agents.run_urls"),
+                ),
+                path(
+                    "workspaces/<uuid:workspace_id>/tools/",
+                    include("tools.urls"),
                 ),
             ]
         ),
