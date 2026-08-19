@@ -35,6 +35,10 @@ from .budgets import Budgets, check_budget
 from .state import RuntimeState, initial_state
 
 StepRecorder = Callable[..., None]
+# Returns a safe outcome dict: {"succeeded", "output_summary", "error_code",
+# "error_message"}. Never raises — the graph only ever sees normalized,
+# already-safe results (agents.services wraps tools.execution.execute_tool).
+ExecuteToolFn = Callable[[str, dict[str, Any], str | None], dict[str, Any]]
 
 
 @dataclass
@@ -48,6 +52,7 @@ class RunContext:
     correlation_id: str | None
     record_step: StepRecorder
     started_monotonic: float
+    execute_tool: ExecuteToolFn | None = None
 
 
 def _prepare_run(ctx: RunContext, state: RuntimeState) -> dict[str, Any]:
@@ -88,6 +93,13 @@ def _generate_response(ctx: RunContext, state: RuntimeState) -> dict[str, Any]:
     if ctx.system_prompt:
         messages.append(LLMMessage(role="system", content=ctx.system_prompt))
     messages.append(LLMMessage(role="user", content=state["input_message"]))
+    if state.get("tool_result_summary"):
+        # Minimal grounding: the model's next call sees a plain-text summary
+        # of the tool result. Full multi-turn tool-call transcripts are
+        # explicitly out of scope for Phase 6 (section 42-43).
+        messages.append(
+            LLMMessage(role="user", content=f"[tool_result] {state['tool_result_summary']}")
+        )
     request = LLMRequest(
         messages=tuple(messages),
         model=ctx.model,
@@ -134,6 +146,10 @@ def _generate_response(ctx: RunContext, state: RuntimeState) -> dict[str, Any]:
             "finish_reason": response.finish_reason,
         },
     )
+    # Only the first proposed tool call is honored — one bounded round-trip
+    # per model turn keeps the graph's termination argument simple (extra
+    # calls in the same turn are ignored, not queued; section 43).
+    tool_call = response.tool_calls[0] if response.tool_calls else None
     return {
         "model_call_count": state["model_call_count"] + 1,
         "step_count": state["step_count"] + 1,
@@ -149,6 +165,16 @@ def _generate_response(ctx: RunContext, state: RuntimeState) -> dict[str, Any]:
         "safe_error_code": None,
         "safe_error_message": None,
         "retryable_error": False,
+        "pending_tool_call": (
+            {
+                "call_id": tool_call.call_id,
+                "tool_name": tool_call.tool_name,
+                "arguments": tool_call.arguments,
+            }
+            if tool_call
+            else None
+        ),
+        "tool_result_summary": None,
     }
 
 
@@ -162,7 +188,31 @@ def _route_after_generate(ctx: RunContext, state: RuntimeState) -> str:
             and state["model_call_count"] < ctx.budgets.max_model_calls
         )
         return "retry" if can_retry else "end"
+    if state.get("pending_tool_call") and ctx.execute_tool is not None:
+        return "tool_request"
     return "continue"
+
+
+def _execute_tool_call(ctx: RunContext, state: RuntimeState) -> dict[str, Any]:
+    call = state.get("pending_tool_call")
+    if not call or ctx.execute_tool is None:  # pragma: no cover - guarded by routing
+        return {"pending_tool_call": None}
+    outcome = ctx.execute_tool(call["tool_name"], call["arguments"], call.get("idempotency_key"))
+    update: dict[str, Any] = {
+        "pending_tool_call": None,
+        "step_count": state["step_count"] + 1,
+    }
+    if outcome.get("succeeded"):
+        update["tool_result_summary"] = outcome.get("output_summary", "")
+    else:
+        update["safe_error_code"] = outcome.get("error_code") or "tool_execution_failed"
+        update["safe_error_message"] = outcome.get("error_message") or "The requested tool failed."
+        update["retryable_error"] = False
+    return update
+
+
+def _route_after_tool(state: RuntimeState) -> str:
+    return "end" if state.get("safe_error_code") else "continue"
 
 
 def _validate_provider_result(ctx: RunContext, state: RuntimeState) -> dict[str, Any]:
@@ -189,6 +239,7 @@ def build_graph(ctx: RunContext):
     graph.add_node("prepare_run", lambda s: _prepare_run(ctx, s))
     graph.add_node("check_budget", lambda s: _check_budget(ctx, s))
     graph.add_node("generate_response", lambda s: _generate_response(ctx, s))
+    graph.add_node("execute_tool_call", lambda s: _execute_tool_call(ctx, s))
     graph.add_node("validate_provider_result", lambda s: _validate_provider_result(ctx, s))
     graph.add_node("finalize_response", lambda s: _finalize_response(ctx, s))
 
@@ -202,7 +253,21 @@ def build_graph(ctx: RunContext):
     graph.add_conditional_edges(
         "generate_response",
         lambda s: _route_after_generate(ctx, s),
-        {"retry": "check_budget", "continue": "validate_provider_result", "end": END},
+        {
+            "retry": "check_budget",
+            "tool_request": "execute_tool_call",
+            "continue": "validate_provider_result",
+            "end": END,
+        },
+    )
+    # Bounded continuation: a successful tool call routes back through
+    # check_budget (which re-checks model_call_count/step_count/wall time,
+    # all strictly increasing) before another provider call is scheduled —
+    # never straight back to generate_response.
+    graph.add_conditional_edges(
+        "execute_tool_call",
+        lambda s: _route_after_tool(s),
+        {"continue": "check_budget", "end": END},
     )
     graph.add_conditional_edges(
         "validate_provider_result",
@@ -229,6 +294,7 @@ def new_run_context(
     system_prompt: str,
     correlation_id: str | None,
     record_step: StepRecorder,
+    execute_tool: ExecuteToolFn | None = None,
 ) -> RunContext:
     return RunContext(
         provider=provider,
@@ -240,4 +306,5 @@ def new_run_context(
         correlation_id=correlation_id,
         record_step=record_step,
         started_monotonic=time.monotonic(),
+        execute_tool=execute_tool,
     )

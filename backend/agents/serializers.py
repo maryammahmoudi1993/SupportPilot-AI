@@ -60,6 +60,7 @@ class AgentVersionSerializer(serializers.ModelSerializer):
             "max_total_tokens",
             "max_estimated_cost_usd",
             "max_retry_attempts",
+            "max_tool_calls",
             "runtime_config",
             "published_at",
             "created_at",
@@ -87,6 +88,7 @@ class AgentVersionWriteSerializer(serializers.Serializer):
         required=False, allow_null=True, max_digits=10, decimal_places=4, min_value=0
     )
     max_retry_attempts = serializers.IntegerField(required=False, min_value=1, max_value=5)
+    max_tool_calls = serializers.IntegerField(required=False, min_value=0, max_value=20)
     runtime_config = serializers.JSONField(required=False, validators=[_validate_metadata_size])
 
 
@@ -116,6 +118,7 @@ class AgentRunSerializer(serializers.ModelSerializer):
             "failure_message_safe",
             "model_call_count",
             "step_count",
+            "tool_call_count",
             "input_tokens",
             "output_tokens",
             "total_tokens",

@@ -42,6 +42,22 @@ class LLMUsage:
 
 
 @dataclass(frozen=True)
+class ToolCallRequest:
+    """A vendor-neutral tool-call request normalized out of a provider
+    response (section 44-45). Provider adapters (e.g. the OpenAI adapter's
+    function/tool-call representation) must translate into this type — the
+    tool execution boundary never sees a vendor SDK object.
+
+    ``tool_name``/``arguments`` are the model's untrusted proposal; nothing
+    here is treated as authoritative execution context (section 20).
+    """
+
+    call_id: str
+    tool_name: str
+    arguments: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class LLMResponse:
     """A normalized response. Never carries raw vendor SDK objects or hidden
     reasoning — only the final user-visible text, optional structured output,
@@ -56,3 +72,4 @@ class LLMResponse:
     provider_request_id: str | None = None
     structured_output: dict[str, Any] | None = None
     estimated_cost_usd: float | None = None
+    tool_calls: tuple[ToolCallRequest, ...] = ()

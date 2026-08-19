@@ -9,6 +9,7 @@ reopening safe (see ``docs/adr`` and section 18/26 of the Phase 5 brief).
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from collections.abc import Mapping
@@ -132,6 +133,7 @@ def create_agent_version(
             max_total_tokens=data.get("max_total_tokens"),
             max_estimated_cost_usd=data.get("max_estimated_cost_usd"),
             max_retry_attempts=data.get("max_retry_attempts", 1),
+            max_tool_calls=data.get("max_tool_calls", 3),
             runtime_config=data.get("runtime_config", {}),
             created_by=actor,
         )
@@ -290,6 +292,33 @@ def _record_step_factory(run: AgentRun):
     return record_step
 
 
+def _execute_tool_factory(run: AgentRun):
+    """Bind ``tools.execution.execute_tool`` to this run and normalize every
+    ``ToolError`` into the safe outcome dict the graph expects — the
+    runtime never sees a raw tool exception (section 27, 44-45)."""
+
+    def execute_tool(tool_name: str, arguments: dict[str, Any], idempotency_key: str | None):
+        from tools.errors import ToolError
+        from tools.execution import execute_tool as run_tool
+
+        try:
+            result = run_tool(
+                agent_run=run,
+                tool_key=tool_name,
+                arguments=arguments,
+                idempotency_key=idempotency_key,
+                record_step=_record_step_factory(run),
+            )
+        except ToolError as exc:
+            return {"succeeded": False, "error_code": exc.code, "error_message": exc.safe_message}
+        return {
+            "succeeded": True,
+            "output_summary": json.dumps(result.output, default=str)[:500],
+        }
+
+    return execute_tool
+
+
 def _version_budgets(agent_version: AgentVersion) -> Budgets:
     return Budgets(
         max_model_calls=agent_version.max_model_calls,
@@ -331,6 +360,7 @@ def execute_agent_run(run_id: uuid.UUID | str) -> AgentRun:
         system_prompt=agent_version.system_prompt,
         correlation_id=run.correlation_id or None,
         record_step=_record_step_factory(run),
+        execute_tool=_execute_tool_factory(run),
     )
 
     try:

@@ -68,6 +68,13 @@ class AgentStepType(models.TextChoices):
     RUN_COMPLETED = "run_completed", "Run completed"
     RUN_FAILED = "run_failed", "Run failed"
     RUN_CANCELLED = "run_cancelled", "Run cancelled"
+    TOOL_REQUESTED = "tool_requested", "Tool requested"
+    TOOL_VALIDATION_FAILED = "tool_validation_failed", "Tool validation failed"
+    TOOL_EXECUTION_STARTED = "tool_execution_started", "Tool execution started"
+    TOOL_EXECUTION_SUCCEEDED = "tool_execution_succeeded", "Tool execution succeeded"
+    TOOL_EXECUTION_FAILED = "tool_execution_failed", "Tool execution failed"
+    TOOL_EXECUTION_TIMED_OUT = "tool_execution_timed_out", "Tool execution timed out"
+    TOOL_IDEMPOTENCY_REUSED = "tool_idempotency_reused", "Tool idempotency reused"
 
 
 class AgentStepStatus(models.TextChoices):
@@ -137,6 +144,12 @@ class AgentVersion(BaseModel):
         max_digits=10, decimal_places=4, null=True, blank=True
     )
     max_retry_attempts = models.PositiveIntegerField(default=1)
+
+    # Bounds how many distinct tool-call round-trips one run may take
+    # (section 41 of the Phase 6 brief). A dedicated counter — rather than
+    # overloading ``max_steps`` — because a tool round-trip is a distinct,
+    # policy-relevant unit from a generic trace step.
+    max_tool_calls = models.PositiveIntegerField(default=3)
 
     runtime_config = models.JSONField(default=dict, blank=True)
 
@@ -208,6 +221,7 @@ class AgentRun(BaseModel):
 
     model_call_count = models.PositiveIntegerField(default=0)
     step_count = models.PositiveIntegerField(default=0)
+    tool_call_count = models.PositiveIntegerField(default=0)
     input_tokens = models.PositiveIntegerField(default=0)
     output_tokens = models.PositiveIntegerField(default=0)
     total_tokens = models.PositiveIntegerField(default=0)
