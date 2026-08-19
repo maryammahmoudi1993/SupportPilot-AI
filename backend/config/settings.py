@@ -266,7 +266,9 @@ SPECTACULAR_SETTINGS = {
         "AgentStepStatusEnum": "agents.models.AgentStepStatus.choices",
         "IntegrationProviderEnum": "integrations.models.IntegrationProvider.choices",
         "IntegrationEnvironmentEnum": "integrations.models.IntegrationEnvironment.choices",
-        "IntegrationConnectionStatusEnum": "integrations.models.IntegrationConnectionStatus.choices",
+        "IntegrationConnectionStatusEnum": (
+            "integrations.models.IntegrationConnectionStatus.choices"
+        ),
     },
 }
 
