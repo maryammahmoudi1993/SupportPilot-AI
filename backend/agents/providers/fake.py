@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .errors import ProviderError
-from .schemas import LLMRequest, LLMResponse, LLMUsage
+from .schemas import LLMRequest, LLMResponse, LLMUsage, ToolCallRequest
 
 
 @dataclass(frozen=True)
@@ -22,7 +22,8 @@ class FakeLLMScenario:
     """One deterministic outcome for a single ``generate`` call.
 
     Set ``error`` to a ``ProviderError`` subclass to simulate a failure
-    instead of a successful response.
+    instead of a successful response. Set ``tool_calls`` to make this
+    scenario propose a bounded tool round-trip instead of a final answer.
     """
 
     response: str = "This is a deterministic fake response."
@@ -35,6 +36,7 @@ class FakeLLMScenario:
     provider_request_id: str = "fake-request-id"
     error: type[ProviderError] | None = None
     error_message: str | None = None
+    tool_calls: tuple[ToolCallRequest, ...] = ()
 
     @property
     def total_tokens(self) -> int:
@@ -79,4 +81,5 @@ class DeterministicFakeLLMProvider:
             provider_request_id=scenario.provider_request_id,
             structured_output=scenario.structured_output,
             estimated_cost_usd=scenario.estimated_cost_usd,
+            tool_calls=scenario.tool_calls,
         )

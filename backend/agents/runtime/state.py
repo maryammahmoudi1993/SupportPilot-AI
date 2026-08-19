@@ -29,6 +29,11 @@ class RuntimeState(TypedDict, total=False):
     safe_error_code: str | None
     safe_error_message: str | None
     retryable_error: bool
+    # Bounded tool round-trip (section 42-43): at most one pending tool call
+    # is carried at a time and it is always cleared before the next
+    # provider call, so the graph can never accumulate an unbounded queue.
+    pending_tool_call: dict[str, Any] | None
+    tool_result_summary: str | None
 
 
 def initial_state(*, input_message: str) -> RuntimeState:
@@ -50,4 +55,6 @@ def initial_state(*, input_message: str) -> RuntimeState:
         safe_error_code=None,
         safe_error_message=None,
         retryable_error=False,
+        pending_tool_call=None,
+        tool_result_summary=None,
     )
