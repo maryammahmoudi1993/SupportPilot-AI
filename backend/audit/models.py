@@ -80,6 +80,18 @@ class AuditAction(models.TextChoices):
         "Integration connection tested",
     )
     PAYMENT_REFUND_EXECUTED = "payment.refund_executed", "Payment refund executed"
+    POLICY_CREATED = "policy.created", "Policy created"
+    POLICY_UPDATED = "policy.updated", "Policy updated"
+    POLICY_VERSION_CREATED = "policy.version_created", "Policy version created"
+    POLICY_VERSION_PUBLISHED = "policy.version_published", "Policy version published"
+    POLICY_ACTIVATED = "policy.activated", "Policy activated"
+    POLICY_DEACTIVATED = "policy.deactivated", "Policy deactivated"
+    POLICY_ACTION_DENIED = "policy.action_denied", "Action denied by policy"
+    APPROVAL_REQUESTED = "approval.requested", "Approval requested"
+    APPROVAL_APPROVED = "approval.approved", "Approval approved"
+    APPROVAL_REJECTED = "approval.rejected", "Approval rejected"
+    APPROVAL_EXPIRED = "approval.expired", "Approval expired"
+    APPROVAL_CANCELLED = "approval.cancelled", "Approval cancelled"
 
 
 class AuditEvent(BaseModel):

@@ -29,6 +29,22 @@ class ToolExecutionStatus(models.TextChoices):
     FAILED = "failed", "Failed"
     TIMED_OUT = "timed_out", "Timed out"
     CANCELLED = "cancelled", "Cancelled"
+    # Phase 8: the deterministic policy gate paused this execution pending a
+    # human decision. Non-terminal — the only status besides PENDING that
+    # may transition to RUNNING (see tools/execution.py::resume_after_approval).
+    WAITING_FOR_APPROVAL = "waiting_for_approval", "Waiting for approval"
+    # Phase 8: the deterministic policy gate denied this action outright.
+    # Terminal — the handler was never invoked (section 60).
+    BLOCKED_BY_POLICY = "blocked_by_policy", "Blocked by policy"
+    # Phase 8: a pending approval was rejected, expired, or cancelled before
+    # a decision could resume execution. Terminal — kept distinct from plain
+    # CANCELLED (a directly cancelled run/execution) so that the same
+    # idempotency key never re-enters the policy gate with a stale
+    # RiskAssessment/PolicyEvaluation/ApprovalRequest already attached to
+    # this row (see ``_resolve_existing``). The specific reason is recorded
+    # in ``error_code`` (``approval_rejected`` / ``approval_expired`` /
+    # ``approval_cancelled``).
+    APPROVAL_TERMINATED = "approval_terminated", "Approval terminated"
 
 
 TOOL_EXECUTION_TERMINAL_STATUSES = frozenset(
@@ -37,14 +53,23 @@ TOOL_EXECUTION_TERMINAL_STATUSES = frozenset(
         ToolExecutionStatus.FAILED,
         ToolExecutionStatus.TIMED_OUT,
         ToolExecutionStatus.CANCELLED,
+        ToolExecutionStatus.BLOCKED_BY_POLICY,
+        ToolExecutionStatus.APPROVAL_TERMINATED,
     }
 )
 
-# pending -> running, pending -> cancelled, running -> {succeeded, failed,
-# timed_out, cancelled}. Terminal states never reopen (section 26).
+# Terminal states never reopen (section 26). WAITING_FOR_APPROVAL is the one
+# non-terminal pause state Phase 8 adds: it may resume to RUNNING (approved),
+# terminate at APPROVAL_TERMINATED (rejected/expired), or CANCELLED (the
+# underlying run/execution was cancelled outright while waiting, section 46).
 TOOL_EXECUTION_ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
     ToolExecutionStatus.PENDING: frozenset(
-        {ToolExecutionStatus.RUNNING, ToolExecutionStatus.CANCELLED}
+        {
+            ToolExecutionStatus.RUNNING,
+            ToolExecutionStatus.CANCELLED,
+            ToolExecutionStatus.WAITING_FOR_APPROVAL,
+            ToolExecutionStatus.BLOCKED_BY_POLICY,
+        }
     ),
     ToolExecutionStatus.RUNNING: frozenset(
         {
@@ -54,10 +79,19 @@ TOOL_EXECUTION_ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
             ToolExecutionStatus.CANCELLED,
         }
     ),
+    ToolExecutionStatus.WAITING_FOR_APPROVAL: frozenset(
+        {
+            ToolExecutionStatus.RUNNING,
+            ToolExecutionStatus.APPROVAL_TERMINATED,
+            ToolExecutionStatus.CANCELLED,
+        }
+    ),
     ToolExecutionStatus.SUCCEEDED: frozenset(),
     ToolExecutionStatus.FAILED: frozenset(),
     ToolExecutionStatus.TIMED_OUT: frozenset(),
     ToolExecutionStatus.CANCELLED: frozenset(),
+    ToolExecutionStatus.BLOCKED_BY_POLICY: frozenset(),
+    ToolExecutionStatus.APPROVAL_TERMINATED: frozenset(),
 }
 
 

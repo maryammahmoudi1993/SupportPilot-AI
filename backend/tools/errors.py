@@ -87,3 +87,41 @@ class ToolConfigurationError(ToolError):
 class ToolRunNotExecutableError(ToolError):
     code = "tool_run_not_executable"
     safe_message = "The agent run is not in a state that allows tool execution."
+
+
+# ---------------------------------------------------------------------------
+# Phase 8: the deterministic policy gate's outcomes, bridged into the same
+# ToolError taxonomy the rest of execute_tool already raises. Model output is
+# never authorization — every one of these is raised by server-owned code in
+# tools/execution.py, never by a tool handler.
+# ---------------------------------------------------------------------------
+
+
+class ToolPolicyDeniedError(ToolError):
+    code = "policy_action_denied"
+    safe_message = "This action is denied by workspace policy."
+
+
+class ToolPolicyEvaluationFailedError(ToolError):
+    code = "policy_evaluation_failed"
+    safe_message = "The action could not be safely evaluated against workspace policy."
+
+
+class ToolApprovalRequiredError(ToolError):
+    code = "approval_required"
+    safe_message = "This action requires human approval before it can execute."
+
+
+class ToolApprovalRejectedError(ToolError):
+    code = "approval_rejected"
+    safe_message = "This action was rejected by an approver."
+
+
+class ToolApprovalExpiredError(ToolError):
+    code = "approval_expired"
+    safe_message = "The approval request for this action expired before it was decided."
+
+
+class ToolApprovalCancelledError(ToolError):
+    code = "approval_cancelled"
+    safe_message = "The approval request for this action was cancelled."

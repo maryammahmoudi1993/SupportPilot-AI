@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 
 from django.db import IntegrityError, transaction
 from django.utils import timezone
@@ -30,6 +30,10 @@ from workspaces.models import Workspace
 
 from .contracts import Tool, ToolExecutionContext
 from .errors import (
+    ToolApprovalCancelledError,
+    ToolApprovalExpiredError,
+    ToolApprovalRejectedError,
+    ToolApprovalRequiredError,
     ToolBudgetExceededError,
     ToolConfigurationError,
     ToolDisabledError,
@@ -40,14 +44,38 @@ from .errors import (
     ToolInvalidInputError,
     ToolInvalidOutputError,
     ToolNotBoundError,
+    ToolPolicyDeniedError,
+    ToolPolicyEvaluationFailedError,
     ToolRetryExhaustedError,
     ToolRunNotExecutableError,
     ToolTimeoutError,
 )
 from .idempotency import MAX_IDEMPOTENCY_KEY_LENGTH, fingerprint_arguments
-from .models import ToolBinding, ToolDefinition, ToolExecution, ToolExecutionStatus
+from .models import (
+    ToolBinding,
+    ToolDefinition,
+    ToolDefinitionStatus,
+    ToolExecution,
+    ToolExecutionStatus,
+)
 from .registry import registry as default_registry
 from .selectors import resolve_enabled_binding
+
+# Terminal statuses reached only through the Phase 8 policy gate (never
+# through ordinary handler failure) — an idempotency-key retry against one
+# of these replays the stored outcome rather than resetting to PENDING,
+# because each already owns a one-to-one RiskAssessment/PolicyEvaluation
+# (and, for approvals, ApprovalRequest) row that must never be recreated for
+# the same ToolExecution (see tools/models.py's status docstring).
+_POLICY_TERMINAL_STATUSES = frozenset(
+    {ToolExecutionStatus.BLOCKED_BY_POLICY, ToolExecutionStatus.APPROVAL_TERMINATED}
+)
+
+_APPROVAL_TERMINATION_ERRORS: dict[str, type[ToolError]] = {
+    "approval_rejected": ToolApprovalRejectedError,
+    "approval_expired": ToolApprovalExpiredError,
+    "approval_cancelled": ToolApprovalCancelledError,
+}
 
 logger = logging.getLogger("supportpilot")
 
@@ -153,18 +181,53 @@ def execute_tool(
     )
 
     if reused:
-        _step(
-            AgentStepType.TOOL_IDEMPOTENCY_REUSED,
-            AgentStepStatus.SUCCEEDED,
-            safe_metadata={"tool_key": tool_key, "tool_execution_id": str(execution.id)},
-        )
-        return ToolExecutionResult(
-            execution=execution, output=execution.result_redacted, reused=True
-        )
+        if execution.status == ToolExecutionStatus.SUCCEEDED:
+            _step(
+                AgentStepType.TOOL_IDEMPOTENCY_REUSED,
+                AgentStepStatus.SUCCEEDED,
+                safe_metadata={"tool_key": tool_key, "tool_execution_id": str(execution.id)},
+            )
+            return ToolExecutionResult(
+                execution=execution, output=execution.result_redacted, reused=True
+            )
+        # A prior attempt with this exact idempotency key was already denied
+        # or approval-terminated (section 10-11) — replay that outcome
+        # rather than silently re-entering the policy gate for the same
+        # ToolExecution row (see ``_POLICY_TERMINAL_STATUSES`` above).
+        _raise_policy_terminal_outcome(execution)
+
+    if execution.status == ToolExecutionStatus.WAITING_FOR_APPROVAL:
+        # A retry (same idempotency key) against an action that already has
+        # a pending approval — never a second RiskAssessment/PolicyEvaluation
+        # /ApprovalRequest for the same execution (section 61).
+        raise ToolApprovalRequiredError()
 
     if not should_execute:  # pragma: no cover - defensive, unreachable in practice
         return ToolExecutionResult(
             execution=execution, output=execution.result_redacted, reused=False
+        )
+
+    # 6.5. Deterministic risk assessment + policy evaluation (section 9,
+    # 21-29). Model output is never authorization: everything the gate
+    # inspects comes from the trusted ToolDefinition and the already
+    # schema-validated arguments, never from a client-suppliable field.
+    #
+    # The gate runs at most once per ToolExecution row — its RiskAssessment/
+    # PolicyEvaluation are OneToOneField to this row (section 24: immutable
+    # snapshots, never recalculated in place). An ALLOW-decided row that
+    # later failed at the *handler* level (an ordinary timeout/provider
+    # error) and was idempotency-key-reset back to PENDING for a normal
+    # Phase 6 retry must reuse that stored ALLOW rather than re-entering the
+    # gate — only a row that has never been evaluated skips straight to
+    # execution once this check confirms no evaluation exists yet.
+    if not _already_policy_evaluated(execution):
+        _run_policy_gate(
+            execution=execution,
+            tool=tool,
+            tool_definition=tool_definition,
+            agent_run=agent_run,
+            validated_arguments=validated_arguments,
+            step=_step,
         )
 
     _transition_running(execution)
@@ -317,11 +380,24 @@ def _resolve_existing(
         raise ToolIdempotencyConflictError()
     if existing.status in (ToolExecutionStatus.PENDING, ToolExecutionStatus.RUNNING):
         raise ToolExecutionInProgressError()
-    if existing.status == ToolExecutionStatus.SUCCEEDED:
+    if existing.status == ToolExecutionStatus.WAITING_FOR_APPROVAL:
+        # Caller handles this specially (re-raises approval_required) —
+        # never re-enters the gate for a row that already has an
+        # ApprovalRequest attached.
+        return existing, False, False
+    if existing.status in (ToolExecutionStatus.SUCCEEDED, *_POLICY_TERMINAL_STATUSES):
+        # SUCCEEDED replays its stored result; the two policy-terminal
+        # statuses replay their stored denial/rejection (section 10-11,
+        # 24) — neither is eligible for the idempotency-key retry-reset
+        # below, because both already own one-to-one policy-gate rows for
+        # this exact ToolExecution.
         return existing, False, True
-    # Terminal failure/timeout/cancellation: the same idempotency key may be
-    # retried (bounded by the tool's total attempt budget), rather than
-    # permanently burning the key on a transient failure (section 77).
+    # Ordinary terminal failure/timeout/cancellation: the same idempotency
+    # key may be retried (bounded by the tool's total attempt budget),
+    # rather than permanently burning the key on a transient failure
+    # (section 77). This execution has never been through the policy gate
+    # (or was cancelled before reaching it), so resetting it to PENDING is
+    # safe — the gate runs fresh, exactly once, on the reset row.
     if existing.attempt_count >= tool.spec.retry_policy.max_retries + 1:
         raise ToolRetryExhaustedError()
     existing.status = ToolExecutionStatus.PENDING
@@ -342,13 +418,337 @@ def _resolve_existing(
 def _transition_running(execution: ToolExecution) -> None:
     with transaction.atomic():
         locked = ToolExecution.objects.select_for_update().get(pk=execution.pk)
-        if locked.status != ToolExecutionStatus.PENDING:
+        if locked.status not in (
+            ToolExecutionStatus.PENDING,
+            ToolExecutionStatus.WAITING_FOR_APPROVAL,
+        ):
             raise ToolExecutionInProgressError()
         locked.status = ToolExecutionStatus.RUNNING
         locked.started_at = timezone.now()
         locked.save(update_fields=["status", "started_at", "updated_at"])
     execution.status = locked.status
     execution.started_at = locked.started_at
+
+
+def _raise_policy_terminal_outcome(execution: ToolExecution) -> NoReturn:
+    if execution.status == ToolExecutionStatus.BLOCKED_BY_POLICY:
+        raise ToolPolicyDeniedError(execution.error_message_safe or None)
+    error_cls = _APPROVAL_TERMINATION_ERRORS.get(execution.error_code)
+    if error_cls is None:  # pragma: no cover - defensive, every write path sets a known code
+        raise ToolApprovalRejectedError(execution.error_message_safe or None)
+    raise error_cls(execution.error_message_safe or None)
+
+
+# ---------------------------------------------------------------------------
+# Phase 8: deterministic risk assessment + policy evaluation gate
+# ---------------------------------------------------------------------------
+
+
+def _already_policy_evaluated(execution: ToolExecution) -> bool:
+    from policies.models import PolicyEvaluation
+
+    return PolicyEvaluation.objects.filter(tool_execution=execution).exists()
+
+
+def _run_policy_gate(
+    *,
+    execution: ToolExecution,
+    tool: Tool,
+    tool_definition: ToolDefinition,
+    agent_run: AgentRun,
+    validated_arguments: Any,
+    step: StepRecorder,
+) -> None:
+    from approvals.services import create_or_reuse_approval_request
+    from policies.errors import PolicyEvaluationFailedError
+    from policies.evaluator import evaluate_policy, resolve_active_version
+    from policies.models import PolicyEffect
+    from policies.risk import assess_risk
+    from policies.services import persist_policy_evaluation, persist_risk_assessment
+
+    canonical_arguments = validated_arguments.model_dump(mode="json")
+    risk = assess_risk(
+        tool_key=tool.spec.key,
+        base_risk=tool_definition.risk_level,
+        side_effect_type=tool_definition.side_effect_type,
+        arguments=canonical_arguments,
+    )
+    step(
+        AgentStepType.RISK_ASSESSED,
+        AgentStepStatus.SUCCEEDED,
+        safe_metadata={"tool_key": tool.spec.key, "effective_risk": risk.effective_risk},
+    )
+
+    # Everything below is one atomic unit: the RiskAssessment/PolicyEvaluation
+    # (/ApprovalRequest) rows and the execution's status transition either
+    # all commit together or none do. This is what makes a crash between
+    # "row persisted" and "status transitioned" impossible to observe — a
+    # retry of the same idempotency key would otherwise find an orphaned
+    # RiskAssessment already attached to a still-PENDING execution and fail
+    # with an IntegrityError on the next attempt's OneToOneField create.
+    #
+    # Deliberately no exception is raised from inside the ``atomic()`` block
+    # below: Django rolls back a block the moment any exception propagates
+    # out of it, which would silently discard the very decision being
+    # recorded. Every branch instead sets ``outcome``/``reason`` and falls
+    # through normally so the block commits; the control-flow exception
+    # (denied/approval-required/evaluation-failed) is raised only after
+    # that commit has already happened.
+    outcome = "allow"
+    reason = ""
+    with transaction.atomic():
+        active_version = resolve_active_version(workspace=execution.workspace)
+        try:
+            decision = evaluate_policy(
+                tool_key=tool.spec.key,
+                risk=risk,
+                arguments=canonical_arguments,
+                active_version=active_version,
+            )
+        except PolicyEvaluationFailedError as exc:
+            # Fail closed (section 27): an evaluation that cannot safely
+            # complete is never treated as ALLOW.
+            risk_row = persist_risk_assessment(execution=execution, risk=risk)
+            persist_policy_evaluation(
+                execution=execution,
+                risk_assessment=risk_row,
+                policy_version=None,
+                decision=PolicyEffect.DENY,
+                decision_code="policy_evaluation_failed",
+                safe_reason=exc.safe_message,
+                matched_rule_ids=[],
+            )
+            _transition_blocked_by_policy(execution, message=exc.safe_message)
+            outcome, reason = "evaluation_failed", exc.safe_message
+        else:
+            risk_row = persist_risk_assessment(execution=execution, risk=risk)
+            evaluation_row = persist_policy_evaluation(
+                execution=execution,
+                risk_assessment=risk_row,
+                policy_version=decision.policy_version,
+                decision=decision.decision,
+                decision_code=decision.decision_code,
+                safe_reason=decision.safe_reason,
+                matched_rule_ids=decision.matched_rule_ids,
+            )
+            if decision.decision == PolicyEffect.ALLOW:
+                outcome, reason = "allow", decision.safe_reason
+            elif decision.decision == PolicyEffect.DENY:
+                _transition_blocked_by_policy(execution, message=decision.safe_reason)
+                outcome, reason = "deny", decision.safe_reason
+            else:
+                # REQUIRE_APPROVAL — the handler is never invoked (section 61).
+                create_or_reuse_approval_request(
+                    execution=execution,
+                    agent_run=agent_run,
+                    evaluation=evaluation_row,
+                    risk_assessment=risk_row,
+                    required_role=decision.required_role,
+                    ttl_seconds=decision.approval_ttl_seconds,
+                    canonical_arguments=canonical_arguments,
+                    tool=tool,
+                )
+                _transition_waiting_for_approval(execution)
+                outcome, reason = "require_approval", decision.safe_reason
+    # transaction.atomic() committed here — outcome/reason now safe to act on.
+
+    if outcome == "allow":
+        step(
+            AgentStepType.POLICY_EVALUATED,
+            AgentStepStatus.SUCCEEDED,
+            safe_metadata={"tool_key": tool.spec.key, "decision": "allow"},
+        )
+        return
+    if outcome == "evaluation_failed":
+        step(
+            AgentStepType.POLICY_EVALUATED,
+            AgentStepStatus.FAILED,
+            error_code="policy_evaluation_failed",
+            safe_metadata={"tool_key": tool.spec.key},
+        )
+        raise ToolPolicyEvaluationFailedError(reason)
+    if outcome == "deny":
+        step(
+            AgentStepType.POLICY_EVALUATED,
+            AgentStepStatus.SUCCEEDED,
+            safe_metadata={"tool_key": tool.spec.key, "decision": "deny"},
+        )
+        raise ToolPolicyDeniedError(reason)
+    step(
+        AgentStepType.POLICY_EVALUATED,
+        AgentStepStatus.SUCCEEDED,
+        safe_metadata={"tool_key": tool.spec.key, "decision": "require_approval"},
+    )
+    step(
+        AgentStepType.APPROVAL_REQUESTED,
+        AgentStepStatus.SUCCEEDED,
+        safe_metadata={"tool_key": tool.spec.key},
+    )
+    raise ToolApprovalRequiredError(reason)
+
+
+def _transition_blocked_by_policy(execution: ToolExecution, *, message: str) -> None:
+    with transaction.atomic():
+        locked = ToolExecution.objects.select_for_update().get(pk=execution.pk)
+        if locked.status != ToolExecutionStatus.PENDING:
+            raise ToolExecutionInProgressError()  # pragma: no cover - defensive
+        locked.status = ToolExecutionStatus.BLOCKED_BY_POLICY
+        locked.error_code = "policy_action_denied"
+        locked.error_message_safe = message[:500]
+        locked.completed_at = timezone.now()
+        locked.save(
+            update_fields=[
+                "status",
+                "error_code",
+                "error_message_safe",
+                "completed_at",
+                "updated_at",
+            ]
+        )
+    execution.status = locked.status
+
+
+def _transition_waiting_for_approval(execution: ToolExecution) -> None:
+    with transaction.atomic():
+        locked = ToolExecution.objects.select_for_update().get(pk=execution.pk)
+        if locked.status != ToolExecutionStatus.PENDING:
+            raise ToolExecutionInProgressError()  # pragma: no cover - defensive
+        locked.status = ToolExecutionStatus.WAITING_FOR_APPROVAL
+        locked.save(update_fields=["status", "updated_at"])
+    execution.status = locked.status
+
+
+# ---------------------------------------------------------------------------
+# Phase 8: resume after an approved decision
+# ---------------------------------------------------------------------------
+
+
+def resume_after_approval(
+    *, tool_execution_id: str, record_step: StepRecorder | None = None, tool_registry=None
+) -> ToolExecutionResult:
+    """Execute the handler for a ``ToolExecution`` whose approval was just
+    granted. Called only from the approvals resume task/service — never from
+    a tool handler, never from client input (section 62, 66-67, 127-128).
+
+    Re-checks only the hard safety invariants that may have changed while
+    waiting (binding still enabled, tool still registered) — the policy
+    snapshot recorded at approval time remains authoritative for this exact
+    approved action (section 62). Executes using the *stored* redacted
+    argument snapshot, never fresh model-generated arguments (TOCTOU
+    protection, section 54-55): no current approval-gated tool has a
+    sensitive input field (see docs/architecture note), so the redacted
+    snapshot equals the original canonical arguments; if a future tool did
+    have one, ``model_validate`` below would fail closed on the redaction
+    placeholder rather than silently using the wrong value.
+    """
+    tool_registry = tool_registry or default_registry
+
+    def _step(step_type: str, status: str, **kwargs: Any) -> None:
+        if record_step is not None:
+            record_step(step_type=step_type, status=status, **kwargs)
+
+    execution = ToolExecution.objects.select_related(
+        "workspace", "agent_run", "agent_version", "tool_definition", "tool_binding"
+    ).get(pk=tool_execution_id)
+
+    claimed = _claim_resume(execution)
+    if claimed is None:
+        # Already resumed by a concurrent/redelivered call, or no longer
+        # resumable (section 67, 128) — return current state, never a
+        # second handler invocation.
+        execution.refresh_from_db()
+        if execution.status == ToolExecutionStatus.SUCCEEDED:
+            return ToolExecutionResult(
+                execution=execution, output=execution.result_redacted, reused=True
+            )
+        _raise_policy_terminal_outcome(execution)
+    execution = claimed
+
+    tool = tool_registry.get(execution.tool_definition.key)
+    if (
+        not execution.tool_binding.enabled
+        or execution.tool_definition.status != ToolDefinitionStatus.ACTIVE
+    ):
+        _finalize_failure(
+            execution,
+            status=ToolExecutionStatus.FAILED,
+            code="tool_disabled",
+            message="The tool was disabled while this action was awaiting approval.",
+        )
+        raise ToolDisabledError()
+
+    try:
+        validated_arguments = tool.spec.input_model.model_validate(execution.arguments_redacted)
+    except PydanticValidationError as exc:
+        _finalize_failure(
+            execution,
+            status=ToolExecutionStatus.FAILED,
+            code="tool_invalid_input",
+            message="The approved action's arguments could not be safely reconstructed.",
+        )
+        raise ToolInvalidInputError() from exc
+
+    effective_timeout = min(tool.spec.default_timeout_seconds, tool.spec.max_timeout_seconds)
+    context = ToolExecutionContext(
+        workspace_id=str(execution.workspace_id),
+        tool_execution_id=str(execution.id),
+        correlation_id=execution.agent_run.correlation_id or None,
+        deadline=timezone.now() + timedelta(seconds=effective_timeout),
+        agent_run_id=str(execution.agent_run_id),
+        agent_version_id=str(execution.agent_version_id),
+        actor_user_id=(
+            str(execution.agent_run.created_by_id) if execution.agent_run.created_by_id else None
+        ),
+    )
+
+    _step(
+        AgentStepType.EXECUTION_RESUMED,
+        AgentStepStatus.STARTED,
+        safe_metadata={"tool_execution_id": str(execution.id)},
+    )
+
+    try:
+        output = _run_with_retries(
+            execution=execution,
+            tool=tool,
+            context=context,
+            arguments=validated_arguments,
+            timeout_seconds=effective_timeout,
+        )
+    except ToolTimeoutError as exc:
+        _finalize_failure(
+            execution, status=ToolExecutionStatus.TIMED_OUT, code=exc.code, message=exc.safe_message
+        )
+        _increment_tool_call_count(execution.agent_run)
+        raise
+    except ToolError as exc:
+        _finalize_failure(
+            execution, status=ToolExecutionStatus.FAILED, code=exc.code, message=exc.safe_message
+        )
+        _increment_tool_call_count(execution.agent_run)
+        raise
+
+    _finalize_success(execution, output=output)
+    _increment_tool_call_count(execution.agent_run)
+    _step(
+        AgentStepType.TOOL_EXECUTION_SUCCEEDED,
+        AgentStepStatus.SUCCEEDED,
+        safe_metadata={"tool_execution_id": str(execution.id)},
+    )
+    return ToolExecutionResult(execution=execution, output=output, reused=False)
+
+
+def _claim_resume(execution: ToolExecution) -> ToolExecution | None:
+    """Race-safe single-resume claim (section 67-68, 90-91): only the first
+    caller for a given ``ToolExecution`` transitions it to RUNNING."""
+    with transaction.atomic():
+        locked = ToolExecution.objects.select_for_update().get(pk=execution.pk)
+        if locked.status != ToolExecutionStatus.WAITING_FOR_APPROVAL:
+            return None
+        locked.status = ToolExecutionStatus.RUNNING
+        locked.started_at = timezone.now()
+        locked.save(update_fields=["status", "started_at", "updated_at"])
+    return locked
 
 
 def _finalize_success(execution: ToolExecution, *, output: dict[str, Any]) -> None:
