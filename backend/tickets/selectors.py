@@ -60,3 +60,20 @@ def ticket_get_for_workspace_or_404(*, workspace: Workspace, ticket_id: UUID | s
     if ticket is None:
         raise Http404("Ticket not found.")
     return ticket
+
+
+def ticket_get_by_id_for_workspace(*, workspace: Workspace, ticket_id: str) -> Ticket | None:
+    """Like ``ticket_get_for_workspace_or_404`` but returns ``None`` instead
+    of raising — used by ``integrations.tools`` ticket handlers, which
+    normalize "not found" into their own stable tool error code."""
+    if not ticket_id:
+        return None
+    try:
+        UUID(str(ticket_id))
+    except (ValueError, AttributeError):
+        return None
+    return (
+        Ticket.objects.filter(workspace=workspace, pk=ticket_id)
+        .select_related("customer", "assigned_to", "assigned_to__user", "conversation")
+        .first()
+    )

@@ -27,6 +27,11 @@ SENSITIVE_KEY_MARKERS = (
     "cvv",
     "ssn",
     "credential",
+    # Broad marker: catches provider-specific secret names not covered above
+    # (e.g. "stripe_key", "encryption_key"). Deliberately over-inclusive —
+    # false positives (over-redaction) are safe, false negatives are not
+    # (section 19 of the Phase 7 brief).
+    "key",
 )
 
 

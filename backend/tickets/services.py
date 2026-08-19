@@ -257,6 +257,75 @@ def resolve_ticket(
     )
 
 
+#: Fields an agent-triggered ``ticket.update`` tool may set directly (a
+#: strict subset of ``WRITABLE_TICKET_FIELDS`` — no ``due_at``/``metadata``
+#: free-form mutation from a model-proposed action).
+AGENT_WRITABLE_TICKET_FIELDS = frozenset({"priority"})
+
+
+@transaction.atomic
+def apply_agent_ticket_update(
+    *,
+    workspace,
+    ticket: Ticket,
+    actor: User | None,
+    priority: str | None = None,
+    status: str | None = None,
+    note: str | None = None,
+) -> Ticket:
+    """Apply a bounded ticket mutation on behalf of an agent run.
+
+    Distinct from ``update_ticket``/``change_ticket_status`` (which require a
+    human ``actor_membership`` to enforce agent/manager-vs-self-assignment
+    rules): an agent-triggered mutation's authorization boundary is the
+    Phase 6 ``ToolBinding`` on the agent version, not a workspace membership,
+    so this path never requires or fabricates one. It still reuses the same
+    domain constants (``TICKET_STATUS_TRANSITIONS``,
+    ``AGENT_WRITABLE_TICKET_FIELDS``) so behavior never diverges from the
+    human-driven paths (CLAUDE.md tool-execution rule: tool -> existing
+    ticket service, never a second copy of ticket business logic).
+    """
+    if priority is not None:
+        ticket.priority = priority
+    if note:
+        # Append-only, bounded note — never overwrites prior description.
+        separator = "\n\n" if ticket.description else ""
+        ticket.description = f"{ticket.description}{separator}{note}"[:20000]
+    if status is not None and status != ticket.status:
+        allowed = TICKET_STATUS_TRANSITIONS.get(ticket.status, frozenset())
+        if status not in allowed:
+            raise ValidationError(
+                {"status": f"Cannot transition from {ticket.status} to {status}."}
+            )
+        old_status = ticket.status
+        ticket.status = status
+        if status == TicketStatus.RESOLVED:
+            ticket.resolved_at = timezone.now()
+        elif old_status == TicketStatus.RESOLVED:
+            ticket.resolved_at = None
+        ticket.save()
+        action = (
+            AuditAction.TICKET_RESOLVED
+            if status == TicketStatus.RESOLVED
+            else (
+                AuditAction.TICKET_REOPENED
+                if old_status == TicketStatus.RESOLVED and status == TicketStatus.OPEN
+                else AuditAction.TICKET_STATUS_CHANGED
+            )
+        )
+        record_event(
+            action=action,
+            target_type="ticket",
+            target_id=ticket.id,
+            actor=actor,
+            workspace=workspace,
+            metadata={"old_status": old_status, "new_status": status, "via": "agent_tool"},
+        )
+    else:
+        ticket.save()
+    return ticket
+
+
 def reopen_ticket(
     *,
     workspace,

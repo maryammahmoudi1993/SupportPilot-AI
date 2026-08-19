@@ -55,6 +55,31 @@ class AuditAction(models.TextChoices):
     TOOL_BINDING_CREATED = "tool.binding_created", "Tool binding created"
     TOOL_BINDING_UPDATED = "tool.binding_updated", "Tool binding updated"
     TOOL_BINDING_DISABLED = "tool.binding_disabled", "Tool binding disabled"
+    INTEGRATION_CONNECTION_CREATED = (
+        "integration.connection_created",
+        "Integration connection created",
+    )
+    INTEGRATION_CONNECTION_UPDATED = (
+        "integration.connection_updated",
+        "Integration connection updated",
+    )
+    INTEGRATION_CREDENTIALS_ROTATED = (
+        "integration.credentials_rotated",
+        "Integration credentials rotated",
+    )
+    INTEGRATION_CONNECTION_DISABLED = (
+        "integration.connection_disabled",
+        "Integration connection disabled",
+    )
+    INTEGRATION_CONNECTION_ENABLED = (
+        "integration.connection_enabled",
+        "Integration connection enabled",
+    )
+    INTEGRATION_CONNECTION_TESTED = (
+        "integration.connection_tested",
+        "Integration connection tested",
+    )
+    PAYMENT_REFUND_EXECUTED = "payment.refund_executed", "Payment refund executed"
 
 
 class AuditEvent(BaseModel):
