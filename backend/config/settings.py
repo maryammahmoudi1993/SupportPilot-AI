@@ -57,6 +57,29 @@ env = environ.Env(
     AGENTS_LLM_PROVIDER=(str, "fake"),
     AGENTS_OPENAI_API_KEY=(str, ""),
     AGENTS_OPENAI_BASE_URL=(str, ""),
+    # Business integrations (Phase 7). Credential encryption always defaults
+    # to a fixed development key so the app boots and every normal test/CI
+    # path runs without a production secret (mirrors SECRET_KEY's pattern);
+    # this default MUST be overridden in any real deployment (section 84).
+    # A comma-separated list supports key rotation: the first key is used for
+    # new encryption, all keys are tried on decryption (section 85).
+    INTEGRATIONS_CREDENTIAL_ENCRYPTION_KEYS=(
+        list,
+        ["yhZU1ULKEp92EMdgREGFYEePxDsf_ytYwcmbrNOwhdo="],
+    ),
+    # Real, side-effecting provider adapters (Stripe, Google Calendar, SMTP)
+    # are never constructed unless explicitly enabled. Default/CI is always
+    # the deterministic fake — this flag exists so a real adapter can never
+    # be reached by accident (section 26, 90, 109).
+    INTEGRATIONS_LIVE_PROVIDERS_ENABLED=(bool, False),
+    INTEGRATIONS_DEFAULT_TIMEOUT_SECONDS=(float, 8.0),
+    INTEGRATIONS_MAX_TIMEOUT_SECONDS=(float, 15.0),
+    # Bounded scheduling horizon / limits for calendar.create_booking.
+    INTEGRATIONS_CALENDAR_MAX_HORIZON_DAYS=(int, 90),
+    INTEGRATIONS_CALENDAR_MAX_TITLE_LENGTH=(int, 200),
+    # Bounded content limits for notification.send (section 129).
+    INTEGRATIONS_NOTIFICATION_MAX_SUBJECT_LENGTH=(int, 200),
+    INTEGRATIONS_NOTIFICATION_MAX_BODY_LENGTH=(int, 5000),
 )
 
 environ.Env.read_env(os.path.join(BASE_DIR.parent, ".env"))
@@ -241,6 +264,9 @@ SPECTACULAR_SETTINGS = {
         "AgentRunTriggerEnum": "agents.models.AgentRunTrigger.choices",
         "AgentStepTypeEnum": "agents.models.AgentStepType.choices",
         "AgentStepStatusEnum": "agents.models.AgentStepStatus.choices",
+        "IntegrationProviderEnum": "integrations.models.IntegrationProvider.choices",
+        "IntegrationEnvironmentEnum": "integrations.models.IntegrationEnvironment.choices",
+        "IntegrationConnectionStatusEnum": "integrations.models.IntegrationConnectionStatus.choices",
     },
 }
 
@@ -316,6 +342,19 @@ if not 0 <= KNOWLEDGE_CHUNK_OVERLAP < KNOWLEDGE_CHUNK_SIZE:
 AGENTS_LLM_PROVIDER = env("AGENTS_LLM_PROVIDER")
 AGENTS_OPENAI_API_KEY = env("AGENTS_OPENAI_API_KEY")
 AGENTS_OPENAI_BASE_URL = env("AGENTS_OPENAI_BASE_URL")
+
+# Business integrations (Phase 7). See ``integrations/crypto.py`` and
+# ``integrations/providers/factory.py``. Real/live-mode execution is
+# strictly opt-in; the default is always the deterministic fake provider
+# path, matching the AI provider layer's pattern above.
+INTEGRATIONS_CREDENTIAL_ENCRYPTION_KEYS = env("INTEGRATIONS_CREDENTIAL_ENCRYPTION_KEYS")
+INTEGRATIONS_LIVE_PROVIDERS_ENABLED = env("INTEGRATIONS_LIVE_PROVIDERS_ENABLED")
+INTEGRATIONS_DEFAULT_TIMEOUT_SECONDS = env("INTEGRATIONS_DEFAULT_TIMEOUT_SECONDS")
+INTEGRATIONS_MAX_TIMEOUT_SECONDS = env("INTEGRATIONS_MAX_TIMEOUT_SECONDS")
+INTEGRATIONS_CALENDAR_MAX_HORIZON_DAYS = env("INTEGRATIONS_CALENDAR_MAX_HORIZON_DAYS")
+INTEGRATIONS_CALENDAR_MAX_TITLE_LENGTH = env("INTEGRATIONS_CALENDAR_MAX_TITLE_LENGTH")
+INTEGRATIONS_NOTIFICATION_MAX_SUBJECT_LENGTH = env("INTEGRATIONS_NOTIFICATION_MAX_SUBJECT_LENGTH")
+INTEGRATIONS_NOTIFICATION_MAX_BODY_LENGTH = env("INTEGRATIONS_NOTIFICATION_MAX_BODY_LENGTH")
 
 # Logging
 LOGGING = {

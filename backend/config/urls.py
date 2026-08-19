@@ -62,6 +62,10 @@ urlpatterns = [
                     "workspaces/<uuid:workspace_id>/tools/",
                     include("tools.urls"),
                 ),
+                path(
+                    "workspaces/<uuid:workspace_id>/integrations/",
+                    include("integrations.urls"),
+                ),
             ]
         ),
     ),
