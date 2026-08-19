@@ -49,3 +49,27 @@ def customer_get_for_workspace_or_404(*, workspace: Workspace, customer_id: UUID
     if customer is None:
         raise Http404("Customer not found.")
     return customer
+
+
+def customer_get_by_id_for_workspace(*, workspace: Workspace, customer_id: str) -> Customer | None:
+    """Like ``customer_get_for_workspace_or_404`` but returns ``None``
+    instead of raising — used by tool handlers (integrations.tools) that
+    normalize "not found" into their own stable error code rather than an
+    HTTP concern."""
+    if not customer_id:
+        return None
+    try:
+        UUID(str(customer_id))
+    except (ValueError, AttributeError):
+        return None
+    return Customer.objects.filter(workspace=workspace, pk=customer_id).first()
+
+
+def customer_get_by_email_for_workspace(*, workspace: Workspace, email: str) -> Customer | None:
+    return Customer.objects.filter(workspace=workspace, email=email.strip().lower()).first()
+
+
+def customer_get_by_external_id_for_workspace(
+    *, workspace: Workspace, external_id: str
+) -> Customer | None:
+    return Customer.objects.filter(workspace=workspace, external_id=external_id).first()
