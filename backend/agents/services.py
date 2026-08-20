@@ -42,6 +42,7 @@ from .models import (
 )
 from .providers.config import get_llm_provider
 from .providers.errors import ProviderConfigurationError
+from .providers.schemas import LLMMessage
 from .runtime.budgets import Budgets
 from .runtime.graph import (
     RunContext,
@@ -348,6 +349,17 @@ def _record_step_factory(run: AgentRun):
     return record_step
 
 
+def record_agent_operational_step(
+    *, run: AgentRun, event: str, safe_metadata: dict[str, Any]
+) -> None:
+    """Persist a safe orchestration event without storing prompt content."""
+    _record_step_factory(run)(
+        step_type=AgentStepType.REQUEST_NORMALIZED,
+        status=AgentStepStatus.SUCCEEDED,
+        safe_metadata={"event": event, **safe_metadata},
+    )
+
+
 def _execute_tool_factory(run: AgentRun):
     """Bind ``tools.execution.execute_tool`` to this run and normalize every
     ``ToolError`` into the safe outcome dict the graph expects — the
@@ -397,6 +409,16 @@ def execute_agent_run(run_id: uuid.UUID | str) -> AgentRun:
     run = claim_agent_run(run_id)
     if run is None:
         return AgentRun.objects.get(pk=run_id)
+    return execute_claimed_agent_run(run)
+
+
+def execute_claimed_agent_run(
+    run: AgentRun,
+    *,
+    initial_messages: tuple[LLMMessage, ...] | None = None,
+    output_metadata: dict[str, Any] | None = None,
+) -> AgentRun:
+    """Execute a run already claimed by the orchestration boundary."""
 
     agent_version = run.agent_version
     try:
@@ -417,6 +439,7 @@ def execute_agent_run(run_id: uuid.UUID | str) -> AgentRun:
         correlation_id=run.correlation_id or None,
         record_step=_record_step_factory(run),
         execute_tool=_execute_tool_factory(run),
+        initial_messages=initial_messages,
     )
 
     try:
@@ -445,7 +468,12 @@ def execute_agent_run(run_id: uuid.UUID | str) -> AgentRun:
             message=result.get("safe_error_message") or "The agent run failed.",
             result=result,
         )
-    return _complete_run(run, result)
+    return _complete_run(run, result, output_metadata=output_metadata)
+
+
+def fail_claimed_agent_run(*, run: AgentRun, code: str, message: str) -> AgentRun:
+    """Fail a claimed run through the normal safe terminal transition."""
+    return _fail_run(run, code=code, message=message)
 
 
 def _pause_run_for_approval(run: AgentRun, result: Mapping[str, Any]) -> AgentRun:
@@ -606,7 +634,12 @@ def _apply_usage(run: AgentRun, result: Mapping[str, Any]) -> None:
     run.estimated_cost_usd = Decimal(str(cost)) if cost is not None else None
 
 
-def _complete_run(run: AgentRun, result: Mapping[str, Any]) -> AgentRun:
+def _complete_run(
+    run: AgentRun,
+    result: Mapping[str, Any],
+    *,
+    output_metadata: dict[str, Any] | None = None,
+) -> AgentRun:
     with transaction.atomic():
         locked = AgentRun.objects.select_for_update().get(pk=run.pk)
         if locked.status != AgentRunStatus.RUNNING:
@@ -630,7 +663,7 @@ def _complete_run(run: AgentRun, result: Mapping[str, Any]) -> AgentRun:
                 workspace=locked.workspace,
                 conversation=conversation,
                 body=locked.final_response,
-                metadata={"agent_run_id": str(locked.id)},
+                metadata={"agent_run_id": str(locked.id), **(output_metadata or {})},
             )
             locked.output_message = message
         locked.save()

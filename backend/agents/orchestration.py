@@ -22,6 +22,8 @@ writes is already a safe, structured field on ``AgentRun``/``Message``.
 
 from __future__ import annotations
 
+import logging
+import time
 import uuid
 
 from accounts.models import User
@@ -29,8 +31,17 @@ from conversations.models import Conversation, Message
 from workspaces.models import Workspace
 
 from . import services
+from .context import (
+    InvalidTriggerMessageError,
+    build_conversation_context,
+    validate_trigger_message,
+)
 from .errors import AgentError
+from .llm_context import build_agent_llm_context
 from .models import AgentRun, AgentRunTrigger, AgentVersion
+from .rag import retrieve_agent_knowledge
+
+logger = logging.getLogger("supportpilot")
 
 __all__ = [
     "start_support_agent_run",
@@ -68,6 +79,9 @@ def start_support_agent_run(
         raise TriggerMessageMismatchError()
     if conversation.workspace_id != workspace.id:
         raise TriggerMessageMismatchError()
+    validate_trigger_message(
+        workspace=workspace, conversation=conversation, trigger_message=trigger_message
+    )
 
     return services.create_agent_run(
         workspace=workspace,
@@ -87,7 +101,103 @@ def execute_support_agent_run(run_id: uuid.UUID | str) -> AgentRun:
     Safe to call more than once for the same ``run_id`` — see
     ``agents.services.execute_agent_run``.
     """
-    return services.execute_agent_run(run_id)
+    run = services.claim_agent_run(run_id)
+    if run is None:
+        return AgentRun.objects.get(pk=run_id)
+
+    conversation = run.conversation
+    trigger_message = run.trigger_message
+    if conversation is None or trigger_message is None:
+        return services.execute_claimed_agent_run(run)
+
+    try:
+        conversation_context = build_conversation_context(
+            workspace=run.workspace,
+            conversation=conversation,
+            trigger_message=trigger_message,
+        )
+    except InvalidTriggerMessageError as exc:
+        return services.fail_claimed_agent_run(run=run, code=exc.code, message=exc.safe_message)
+    services.record_agent_operational_step(
+        run=run,
+        event="conversation_context_prepared",
+        safe_metadata={
+            "message_count": len(conversation_context.messages),
+            "available_message_count": conversation_context.available_message_count,
+            "character_count": conversation_context.character_count,
+            "truncated": conversation_context.truncated,
+        },
+    )
+
+    retrieval_started = time.monotonic()
+    try:
+        knowledge_context = retrieve_agent_knowledge(
+            workspace=run.workspace,
+            query=trigger_message.body,
+            actor=run.created_by,
+        )
+    except Exception:
+        logger.exception(
+            "agent_knowledge_retrieval_failed",
+            extra={
+                "workspace_id": str(run.workspace_id),
+                "conversation_id": str(conversation.id),
+                "trigger_message_id": str(trigger_message.id),
+                "agent_run_id": str(run.id),
+            },
+        )
+        return services.fail_claimed_agent_run(
+            run=run,
+            code="knowledge_retrieval_failed",
+            message="Knowledge retrieval failed safely.",
+        )
+    retrieval_duration_ms = int((time.monotonic() - retrieval_started) * 1000)
+    services.record_agent_operational_step(
+        run=run,
+        event="knowledge_retrieved",
+        safe_metadata={
+            "retrieval_event_id": str(knowledge_context.retrieval_event_id),
+            "retrieval_count": len(knowledge_context.references),
+            "rag_character_count": knowledge_context.character_count,
+            "truncated": knowledge_context.truncated,
+            "chunk_ids": [str(item.chunk_id) for item in knowledge_context.references],
+            "source_ids": [str(item.source_id) for item in knowledge_context.references],
+            "duration_ms": retrieval_duration_ms,
+        },
+    )
+
+    llm_context = build_agent_llm_context(
+        agent_version=run.agent_version,
+        conversation=conversation_context,
+        knowledge=knowledge_context,
+    )
+    services.record_agent_operational_step(
+        run=run,
+        event="llm_context_prepared",
+        safe_metadata={
+            "message_count": len(llm_context.messages),
+            "citation_count": len(llm_context.citations),
+            "rag_character_count": llm_context.rag_character_count,
+        },
+    )
+    logger.info(
+        "agent_context_prepared",
+        extra={
+            "workspace_id": str(run.workspace_id),
+            "conversation_id": str(conversation.id),
+            "trigger_message_id": str(trigger_message.id),
+            "agent_run_id": str(run.id),
+            "context_message_count": len(conversation_context.messages),
+            "context_truncated": conversation_context.truncated,
+            "retrieval_count": len(knowledge_context.references),
+            "retrieval_duration_ms": retrieval_duration_ms,
+        },
+    )
+    return services.execute_claimed_agent_run(
+        run,
+        initial_messages=llm_context.messages,
+        output_metadata={"citations": list(llm_context.citations)},
+    )
 
 
 def resume_support_agent_run(approval_request_id: uuid.UUID | str) -> str:

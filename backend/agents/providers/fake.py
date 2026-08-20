@@ -57,6 +57,7 @@ class DeterministicFakeLLMProvider:
             scenarios = [scenarios]
         self._scenarios: list[FakeLLMScenario] = list(scenarios)
         self.call_count = 0
+        self.requests: list[LLMRequest] = []
 
     def _next_scenario(self) -> FakeLLMScenario:
         index = min(self.call_count, len(self._scenarios) - 1)
@@ -64,6 +65,7 @@ class DeterministicFakeLLMProvider:
 
     def generate(self, request: LLMRequest) -> LLMResponse:
         scenario = self._next_scenario()
+        self.requests.append(request)
         self.call_count += 1
         if scenario.error is not None:
             raise scenario.error(scenario.error_message)

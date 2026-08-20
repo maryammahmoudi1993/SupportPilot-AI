@@ -53,6 +53,7 @@ class RunContext:
     record_step: StepRecorder
     started_monotonic: float
     execute_tool: ExecuteToolFn | None = None
+    initial_messages: tuple[LLMMessage, ...] | None = None
 
 
 def _prepare_run(ctx: RunContext, state: RuntimeState) -> dict[str, Any]:
@@ -90,9 +91,12 @@ def _generate_response(ctx: RunContext, state: RuntimeState) -> dict[str, Any]:
     if state.get("budget_exceeded"):
         return {}
     messages: list[LLMMessage] = []
-    if ctx.system_prompt:
-        messages.append(LLMMessage(role="system", content=ctx.system_prompt))
-    messages.append(LLMMessage(role="user", content=state["input_message"]))
+    if ctx.initial_messages is not None:
+        messages.extend(ctx.initial_messages)
+    else:
+        if ctx.system_prompt:
+            messages.append(LLMMessage(role="system", content=ctx.system_prompt))
+        messages.append(LLMMessage(role="user", content=state["input_message"]))
     if state.get("tool_result_summary"):
         # Minimal grounding: the model's next call sees a plain-text summary
         # of the tool result. Full multi-turn tool-call transcripts are
@@ -385,6 +389,7 @@ def new_run_context(
     correlation_id: str | None,
     record_step: StepRecorder,
     execute_tool: ExecuteToolFn | None = None,
+    initial_messages: tuple[LLMMessage, ...] | None = None,
 ) -> RunContext:
     return RunContext(
         provider=provider,
@@ -397,4 +402,5 @@ def new_run_context(
         record_step=record_step,
         started_monotonic=time.monotonic(),
         execute_tool=execute_tool,
+        initial_messages=initial_messages,
     )
