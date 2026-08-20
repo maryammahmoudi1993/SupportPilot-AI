@@ -128,3 +128,38 @@ class TestMessageListForConversation:
         results = list(selectors.message_list_for_conversation(conversation=conversation))
 
         assert results == []
+
+
+@pytest.mark.django_db
+class TestMessageGetForWorkspaceOr404:
+    def test_returns_a_message_in_scope(self):
+        conversation = ConversationFactory()
+        message = MessageFactory(conversation=conversation)
+
+        result = selectors.message_get_for_workspace_or_404(
+            workspace=conversation.workspace, conversation=conversation, message_id=message.id
+        )
+
+        assert result == message
+
+    def test_raises_404_for_a_message_in_another_conversation_same_workspace(self):
+        workspace = WorkspaceFactory()
+        conversation = ConversationFactory(workspace=workspace)
+        other_conversation = ConversationFactory(workspace=workspace)
+        foreign_message = MessageFactory(conversation=other_conversation)
+
+        with pytest.raises(Http404):
+            selectors.message_get_for_workspace_or_404(
+                workspace=workspace, conversation=conversation, message_id=foreign_message.id
+            )
+
+    def test_raises_404_for_a_message_in_another_workspace(self):
+        conversation = ConversationFactory()
+        foreign_message = MessageFactory()
+
+        with pytest.raises(Http404):
+            selectors.message_get_for_workspace_or_404(
+                workspace=conversation.workspace,
+                conversation=conversation,
+                message_id=foreign_message.id,
+            )
