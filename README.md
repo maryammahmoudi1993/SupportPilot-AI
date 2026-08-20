@@ -109,13 +109,23 @@ See the architecture notes for [authentication and tenancy](docs/security/authen
 a vendor-independent LLM provider abstraction (deterministic offline provider by
 default, an opt-in real adapter), versioned agent configuration, and a small,
 bounded LangGraph execution runtime with explicit lifecycle states, budgets, and
-safe structured traces — and the
+safe structured traces — the
 [typed tool registry and execution boundary](docs/architecture/typed-tool-execution.md):
 a server-owned tool registry, agent-version tool bindings, a single validated
 execution service with idempotent, timeout- and retry-bounded execution
-records, and one bounded tool round-trip integrated into the agent runtime.
-It does not yet include policy enforcement, human approval, or real business
-integrations (Stripe, Calendar, CRM, email).
+records, and one bounded tool round-trip integrated into the agent runtime; the
+[business integrations layer](docs/architecture/business-integrations.md):
+provider-independent Stripe (test-mode)/Google Calendar/email adapters
+reachable only through the typed tool boundary, encrypted per-workspace
+credentials, and provider-level idempotency; and the
+[deterministic policy engine and human approval workflow](docs/architecture/policy-approval-engine.md):
+workspace-scoped, versioned policy rules with a trusted predicate registry,
+deterministic risk assessment, a fail-closed policy gate inside the same tool
+execution boundary, and a pause/resume approval lifecycle that lets a
+high-risk action (a refund, a calendar booking) execute only after a
+deterministic ALLOW or a real human decision — never merely because the
+model requested it. Frontend UI, richer approval notifications (Slack/email),
+and evaluation/analytics remain future phases.
 
 ## Development Guidelines
 
