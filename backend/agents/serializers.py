@@ -106,6 +106,8 @@ class AgentRunSerializer(serializers.ModelSerializer):
             "agent_definition_id",
             "conversation_id",
             "ticket_id",
+            "trigger_message_id",
+            "output_message_id",
             "trigger",
             "status",
             "input_message",
@@ -132,11 +134,30 @@ class AgentRunSerializer(serializers.ModelSerializer):
 
 class AgentRunCreateSerializer(serializers.Serializer):
     agent_version_id = serializers.UUIDField()
-    input_message = serializers.CharField(max_length=MAX_INPUT_MESSAGE_CHARS)
+    input_message = serializers.CharField(
+        max_length=MAX_INPUT_MESSAGE_CHARS, required=False, allow_blank=True
+    )
     trigger = serializers.ChoiceField(choices=AgentRunTrigger.choices, required=False)
     conversation_id = serializers.UUIDField(required=False, allow_null=True)
     ticket_id = serializers.UUIDField(required=False, allow_null=True)
+    # Phase 9 (section 17, 97): when set, this run is the orchestrated
+    # response to one existing conversation message rather than a raw
+    # manual/API run — ``conversation_id`` must also be set, and the message
+    # must belong to it (enforced in the view/orchestration service, never
+    # trusted from this field alone).
+    trigger_message_id = serializers.UUIDField(required=False, allow_null=True)
     input_metadata = serializers.JSONField(required=False, validators=[_validate_metadata_size])
+
+    def validate(self, attrs):
+        if attrs.get("trigger_message_id") and not attrs.get("conversation_id"):
+            raise serializers.ValidationError(
+                {"conversation_id": "conversation_id is required when trigger_message_id is set."}
+            )
+        if not attrs.get("trigger_message_id") and not attrs.get("input_message"):
+            raise serializers.ValidationError(
+                {"input_message": "input_message is required unless trigger_message_id is set."}
+            )
+        return attrs
 
 
 class AgentStepSerializer(serializers.ModelSerializer):

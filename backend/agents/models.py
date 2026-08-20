@@ -217,6 +217,31 @@ class AgentRun(BaseModel):
         blank=True,
         related_name="agent_runs",
     )
+    # Phase 9 (section 17-19): the customer message that triggered this run,
+    # if any. A ``OneToOneField`` is the run-idempotency invariant itself —
+    # "one logical AgentRun per triggering message" is a database uniqueness
+    # constraint, not just an application-level check, so a duplicate
+    # HTTP/worker/webhook redelivery of the same message can never spawn a
+    # second run (see ``agents.orchestration.start_support_agent_run``).
+    trigger_message = models.OneToOneField(
+        "conversations.Message",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="agent_run",
+    )
+    # Phase 9 (section 56): the assistant-facing Message this run's final
+    # response was persisted as, if any. A ``OneToOneField`` makes "at most
+    # one final message per run" a database invariant, so a worker retry
+    # after the response was generated but before completion was
+    # acknowledged can never create a duplicate customer-visible message.
+    output_message = models.OneToOneField(
+        "conversations.Message",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="agent_run_output",
+    )
     trigger = models.CharField(
         max_length=20, choices=AgentRunTrigger.choices, default=AgentRunTrigger.MANUAL
     )
@@ -265,6 +290,16 @@ class AgentRun(BaseModel):
         ):
             raise ValidationError(
                 {"agent_version": "Agent version must belong to the run workspace."}
+            )
+        trigger_message = self.trigger_message
+        if trigger_message is not None and trigger_message.workspace_id != self.workspace_id:
+            raise ValidationError(
+                {"trigger_message": "Trigger message must belong to the run workspace."}
+            )
+        output_message = self.output_message
+        if output_message is not None and output_message.workspace_id != self.workspace_id:
+            raise ValidationError(
+                {"output_message": "Output message must belong to the run workspace."}
             )
 
     def __str__(self) -> str:

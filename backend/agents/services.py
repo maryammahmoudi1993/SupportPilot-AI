@@ -16,7 +16,7 @@ from collections.abc import Mapping
 from decimal import Decimal
 from typing import Any
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from accounts.models import User
@@ -191,24 +191,51 @@ def create_agent_run(
     trigger: str,
     conversation=None,
     ticket=None,
+    trigger_message=None,
     input_metadata: dict[str, Any] | None = None,
     request_id: str | None = None,
 ) -> AgentRun:
+    """Create (or, for a ``trigger_message``-triggered run, idempotently
+    reuse) an ``AgentRun``.
+
+    Phase 9 (section 18-19, 110-111): a ``trigger_message`` makes "one
+    logical AgentRun per triggering customer message" a database invariant
+    (``AgentRun.trigger_message`` is a ``OneToOneField``), not just an
+    application-level check. Two callers racing to start a run for the same
+    message — an HTTP retry, a redelivered webhook, concurrent workers —
+    resolve to exactly one created run; the loser returns the winner's row
+    unchanged rather than raising or creating a second run.
+    """
     if agent_version.status != AgentVersionStatus.PUBLISHED:
         raise AgentVersionNotPublishedError()
     with transaction.atomic():
-        run = AgentRun.objects.create(
-            workspace=workspace,
-            agent_version=agent_version,
-            conversation=conversation,
-            ticket=ticket,
-            trigger=trigger,
-            status=AgentRunStatus.PENDING,
-            input_message=input_message[:MAX_INPUT_MESSAGE_CHARS],
-            input_metadata=input_metadata or {},
-            correlation_id=request_id or "",
-            created_by=actor,
-        )
+        if trigger_message is not None:
+            existing = (
+                AgentRun.objects.select_for_update().filter(trigger_message=trigger_message).first()
+            )
+            if existing is not None:
+                return existing
+        try:
+            with transaction.atomic():
+                run = AgentRun.objects.create(
+                    workspace=workspace,
+                    agent_version=agent_version,
+                    conversation=conversation,
+                    ticket=ticket,
+                    trigger_message=trigger_message,
+                    trigger=trigger,
+                    status=AgentRunStatus.PENDING,
+                    input_message=input_message[:MAX_INPUT_MESSAGE_CHARS],
+                    input_metadata=input_metadata or {},
+                    correlation_id=request_id or "",
+                    created_by=actor,
+                )
+        except IntegrityError:
+            if trigger_message is None:  # pragma: no cover - defensive, unreachable
+                raise
+            # Lost a concurrent race for this trigger_message's one-run slot
+            # (no existing row to lock before the create above).
+            return AgentRun.objects.get(trigger_message=trigger_message)
         transaction.on_commit(lambda: _dispatch_run(run.id))
     return run
 
@@ -284,6 +311,13 @@ def cancel_agent_run(
                 execution.status = ToolExecutionStatus.CANCELLED
                 execution.completed_at = timezone.now()
                 execution.save(update_fields=["status", "completed_at", "updated_at"])
+        # Section 113: a still-active human handoff for a now-cancelled run
+        # becomes non-actionable too — imported locally to avoid a
+        # module-level agents<->tickets import cycle, matching the approvals
+        # import above.
+        from tickets.services import cancel_handoffs_for_run
+
+        cancel_handoffs_for_run(agent_run=locked, reason="run_cancelled")
     return locked
 
 
@@ -581,6 +615,24 @@ def _complete_run(run: AgentRun, result: Mapping[str, Any]) -> AgentRun:
         locked.final_response = result.get("final_response", "")
         locked.status = AgentRunStatus.SUCCEEDED
         locked.completed_at = timezone.now()
+        # Phase 9 (section 54-56): persist the customer-visible response as a
+        # Conversation Message, not only on the run row. Guarded by the
+        # ``status != RUNNING`` check above and the row lock: a worker retry
+        # that re-enters this function for an already-SUCCEEDED run returns
+        # early without creating a second message, and
+        # ``AgentRun.output_message`` (a OneToOneField) makes "at most one
+        # final message per run" a database invariant on top of that.
+        conversation = locked.conversation
+        if conversation is not None and locked.final_response and locked.output_message_id is None:
+            from conversations.services import create_ai_agent_message
+
+            message = create_ai_agent_message(
+                workspace=locked.workspace,
+                conversation=conversation,
+                body=locked.final_response,
+                metadata={"agent_run_id": str(locked.id)},
+            )
+            locked.output_message = message
         locked.save()
         record_event(
             action=AuditAction.AGENT_RUN_COMPLETED,
