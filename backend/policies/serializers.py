@@ -83,7 +83,7 @@ class PolicyRuleCreateSerializer(serializers.Serializer):
     side_effect_types = serializers.ListField(
         child=serializers.CharField(max_length=20), required=False, default=list
     )
-    condition_config = serializers.JSONField(required=False)
+    condition_config = serializers.JSONField(required=False, default=dict)
     effect = serializers.ChoiceField(choices=PolicyEffect.choices)
     required_role = serializers.CharField(
         max_length=32, required=False, allow_blank=True, default=""
@@ -93,7 +93,7 @@ class PolicyRuleCreateSerializer(serializers.Serializer):
     )
 
     def validate_condition_config(self, value):
-        if value is None:
+        if not value:
             return {"all": []}
         if not isinstance(value, dict) or set(value) - {"all"}:
             raise serializers.ValidationError("condition_config must be an object with only 'all'.")

@@ -144,99 +144,115 @@ def decide_approval(
     comment: str = "",
     request_id: str | None = None,
 ) -> ApprovalRequest:
+    # Deliberately no exception is raised from inside the ``atomic()`` block
+    # below, mirroring the same fix applied to the Phase 8 tool-execution
+    # gate (tools/execution.py::_run_policy_gate): Django rolls back the
+    # whole block the moment any exception propagates out of it, which would
+    # silently discard an expiry transition (or a decision) the instant
+    # before reporting it. Every branch sets ``pending_error`` (or returns
+    # normally) and the block commits; the control-flow exception is raised
+    # only after that commit has already happened.
+    pending_error: Exception | None = None
     with transaction.atomic():
         locked = ApprovalRequest.objects.select_for_update().get(pk=approval_request.pk)
-        _enforce_expiry(locked)
 
-        if locked.status == ApprovalStatus.CANCELLED:
-            raise ApprovalCancelledError()
-        if locked.status in (ApprovalStatus.APPROVED, ApprovalStatus.REJECTED):
+        if _expire_if_stale(locked):
+            pending_error = ApprovalExpiredError()
+        elif locked.status == ApprovalStatus.CANCELLED:
+            pending_error = ApprovalCancelledError()
+        elif locked.status in (ApprovalStatus.APPROVED, ApprovalStatus.REJECTED):
             resolved_value = (
                 ApprovalDecisionValue.APPROVE
                 if locked.status == ApprovalStatus.APPROVED
                 else ApprovalDecisionValue.REJECT
             )
-            if resolved_value == decision:
-                # Idempotent replay (section 42): a duplicate identical
-                # decision from a network retry is not an error.
-                return locked
-            raise ApprovalAlreadyResolvedError()
-
-        # status == PENDING — current DB membership is authoritative, never
-        # a cached/stale role (section 50).
-        if locked.requested_by_id and locked.requested_by_id == actor.id:
-            raise ApprovalSelfApprovalForbiddenError()
-        if not role_satisfies_requirement(
-            actor_role=actor_role, required_role=locked.required_role
-        ):
-            raise ApprovalPermissionDeniedError()
-
-        try:
-            with transaction.atomic():
-                ApprovalDecision.objects.create(
-                    approval_request=locked,
-                    decision=decision,
-                    decided_by=actor,
-                    safe_comment=comment[:1000],
-                )
-        except IntegrityError:
-            # Lost a concurrent race for the one-decision-per-request slot
-            # (section 41, 90-91) — the winning decision is authoritative.
-            locked.refresh_from_db()
-            raise ApprovalAlreadyResolvedError() from None
-
-        locked.status = (
-            ApprovalStatus.APPROVED
-            if decision == ApprovalDecisionValue.APPROVE
-            else ApprovalStatus.REJECTED
-        )
-        locked.resolved_at = timezone.now()
-        locked.save(update_fields=["status", "resolved_at", "updated_at"])
-        record_event(
-            action=(
-                AuditAction.APPROVAL_APPROVED
-                if decision == ApprovalDecisionValue.APPROVE
-                else AuditAction.APPROVAL_REJECTED
-            ),
-            target_type="approval_request",
-            target_id=locked.id,
-            actor=actor,
-            workspace=workspace,
-            metadata={"approval_request_id": str(locked.id)},
-            request_id=request_id,
-        )
-
-        if decision == ApprovalDecisionValue.REJECT:
-            _terminate_execution(
-                locked, error_code="approval_rejected", error_message="This action was rejected."
-            )
+            if resolved_value != decision:
+                pending_error = ApprovalAlreadyResolvedError()
+            # else: idempotent replay (section 42) — fall through and
+            # return the already-resolved row below, no error.
         else:
-            transaction.on_commit(lambda: _dispatch_resume(locked.id))
+            # status == PENDING — current DB membership is authoritative,
+            # never a cached/stale role (section 50).
+            if locked.requested_by_id and locked.requested_by_id == actor.id:
+                pending_error = ApprovalSelfApprovalForbiddenError()
+            elif not role_satisfies_requirement(
+                actor_role=actor_role, required_role=locked.required_role
+            ):
+                pending_error = ApprovalPermissionDeniedError()
+            else:
+                try:
+                    with transaction.atomic():
+                        ApprovalDecision.objects.create(
+                            approval_request=locked,
+                            decision=decision,
+                            decided_by=actor,
+                            safe_comment=comment[:1000],
+                        )
+                except IntegrityError:
+                    # Lost a concurrent race for the one-decision-per-request
+                    # slot (section 41, 90-91) — the winning decision is
+                    # authoritative.
+                    locked.refresh_from_db()
+                    pending_error = ApprovalAlreadyResolvedError()
 
+                if pending_error is None:
+                    locked.status = (
+                        ApprovalStatus.APPROVED
+                        if decision == ApprovalDecisionValue.APPROVE
+                        else ApprovalStatus.REJECTED
+                    )
+                    locked.resolved_at = timezone.now()
+                    locked.save(update_fields=["status", "resolved_at", "updated_at"])
+                    record_event(
+                        action=(
+                            AuditAction.APPROVAL_APPROVED
+                            if decision == ApprovalDecisionValue.APPROVE
+                            else AuditAction.APPROVAL_REJECTED
+                        ),
+                        target_type="approval_request",
+                        target_id=locked.id,
+                        actor=actor,
+                        workspace=workspace,
+                        metadata={"approval_request_id": str(locked.id)},
+                        request_id=request_id,
+                    )
+                    if decision == ApprovalDecisionValue.REJECT:
+                        _terminate_execution(
+                            locked,
+                            error_code="approval_rejected",
+                            error_message="This action was rejected.",
+                        )
+                    else:
+                        transaction.on_commit(lambda: _dispatch_resume(locked.id))
+    # transaction.atomic() committed here — safe to raise now.
+    if pending_error is not None:
+        raise pending_error
     return locked
 
 
-def _enforce_expiry(locked: ApprovalRequest) -> None:
+def _expire_if_stale(locked: ApprovalRequest) -> bool:
     """Section 44: expiry is checked from the wall clock, never trusted from
-    stale ``status`` alone."""
+    stale ``status`` alone. Returns ``True`` (and performs the transition)
+    if this call just discovered the request is expired."""
     if locked.status != ApprovalStatus.PENDING:
-        return
-    if timezone.now() >= locked.expires_at:
-        locked.status = ApprovalStatus.EXPIRED
-        locked.resolved_at = timezone.now()
-        locked.save(update_fields=["status", "resolved_at", "updated_at"])
-        _terminate_execution(
-            locked, error_code="approval_expired", error_message="The approval request expired."
-        )
-        record_event(
-            action=AuditAction.APPROVAL_EXPIRED,
-            target_type="approval_request",
-            target_id=locked.id,
-            actor=None,
-            workspace=locked.workspace,
-            metadata={"approval_request_id": str(locked.id)},
-        )
-        raise ApprovalExpiredError()
+        return False
+    if timezone.now() < locked.expires_at:
+        return False
+    locked.status = ApprovalStatus.EXPIRED
+    locked.resolved_at = timezone.now()
+    locked.save(update_fields=["status", "resolved_at", "updated_at"])
+    _terminate_execution(
+        locked, error_code="approval_expired", error_message="The approval request expired."
+    )
+    record_event(
+        action=AuditAction.APPROVAL_EXPIRED,
+        target_type="approval_request",
+        target_id=locked.id,
+        actor=None,
+        workspace=locked.workspace,
+        metadata={"approval_request_id": str(locked.id)},
+    )
+    return True
 
 
 def expire_stale_approvals(*, now=None) -> int:
@@ -277,10 +293,12 @@ def cancel_approval_for_execution(
 ) -> None:
     """Section 46: if the underlying run/execution is cancelled while an
     approval is pending, the approval becomes non-actionable."""
-    approval = ApprovalRequest.objects.filter(tool_execution=execution).select_for_update().first()
-    if approval is None or approval.status != ApprovalStatus.PENDING:
-        return
     with transaction.atomic():
+        approval = (
+            ApprovalRequest.objects.filter(tool_execution=execution).select_for_update().first()
+        )
+        if approval is None or approval.status != ApprovalStatus.PENDING:
+            return
         approval.status = ApprovalStatus.CANCELLED
         approval.resolved_at = timezone.now()
         approval.save(update_fields=["status", "resolved_at", "updated_at"])
