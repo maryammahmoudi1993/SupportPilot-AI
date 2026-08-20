@@ -1,7 +1,10 @@
 """Audit foundation tests: the write path, safe metadata, and the absence
 of any update/delete path."""
 
+from datetime import timedelta
+
 import pytest
+from django.utils import timezone
 
 from audit.models import AuditAction, AuditEvent
 from audit.services import record_event
@@ -74,6 +77,12 @@ class TestAuditEventModel:
         second = record_event(
             action=AuditAction.WORKSPACE_CREATED, target_type="workspace", target_id="2"
         )
+        # Do not rely on the database clock resolving two adjacent inserts to
+        # distinct timestamps. The model contract is ordering by created_at,
+        # so give that contract deterministic values to exercise.
+        now = timezone.now()
+        AuditEvent.objects.filter(pk=first.pk).update(created_at=now - timedelta(seconds=1))
+        AuditEvent.objects.filter(pk=second.pk).update(created_at=now)
         ordered = list(AuditEvent.objects.all())
         assert ordered[0] == second
         assert ordered[1] == first
