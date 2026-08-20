@@ -19,9 +19,11 @@ from workspaces.selectors import get_workspace_member_or_404
 from workspaces.views import WorkspaceScopedMixin
 
 from . import selectors, services
-from .models import Ticket
-from .permissions import CanMutateTickets
+from .models import HumanHandoff, Ticket
+from .permissions import CanManageHandoffs, CanMutateTickets
 from .serializers import (
+    HumanHandoffAssignSerializer,
+    HumanHandoffSerializer,
     TicketAssignSerializer,
     TicketCreateSerializer,
     TicketSerializer,
@@ -231,3 +233,88 @@ class TicketReopenView(WorkspaceScopedMixin, APIView):
             request_id=_request_id(request),
         )
         return Response(TicketSerializer(ticket).data)
+
+
+# ---------------------------------------------------------------------------
+# Human handoff (Phase 9, section 53)
+# ---------------------------------------------------------------------------
+
+
+class HumanHandoffListView(WorkspaceScopedMixin, generics.ListAPIView):
+    """GET only: no direct-create endpoint. Handoffs are always created by
+    orchestration (``agents.orchestration``), never by a raw client POST."""
+
+    queryset = HumanHandoff.objects.none()
+    serializer_class = HumanHandoffSerializer
+
+    def get_permissions(self):
+        return [IsWorkspaceMember()]
+
+    def get_queryset(self):
+        if getattr(self, "swagger_fake_view", False):
+            return HumanHandoff.objects.none()
+        params = self.request.query_params
+        return selectors.handoff_list_for_workspace(
+            workspace=self.workspace,
+            status=params.get("status"),
+            conversation_id=params.get("conversation"),
+        )
+
+
+class HumanHandoffDetailView(WorkspaceScopedMixin, APIView):
+    def get_permissions(self):
+        return [IsWorkspaceMember()]
+
+    @extend_schema(responses=HumanHandoffSerializer)
+    def get(self, request, workspace_id, handoff_id):
+        handoff = selectors.handoff_get_for_workspace_or_404(
+            workspace=self.workspace, handoff_id=handoff_id
+        )
+        return Response(HumanHandoffSerializer(handoff).data)
+
+
+class HumanHandoffAssignView(WorkspaceScopedMixin, APIView):
+    def get_permissions(self):
+        return [IsWorkspaceMember(), CanManageHandoffs()]
+
+    @extend_schema(request=HumanHandoffAssignSerializer, responses=HumanHandoffSerializer)
+    def post(self, request, workspace_id, handoff_id):
+        handoff = selectors.handoff_get_for_workspace_or_404(
+            workspace=self.workspace, handoff_id=handoff_id
+        )
+        serializer = HumanHandoffAssignSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        membership_id = serializer.validated_data.get("membership_id")
+        target = (
+            get_workspace_member_or_404(workspace=self.workspace, membership_id=membership_id)
+            if membership_id is not None
+            else self.membership
+        )
+        handoff = services.assign_handoff(
+            workspace=self.workspace,
+            actor=request.user,
+            actor_membership=self.membership,
+            handoff=handoff,
+            target_membership=target,
+            request_id=_request_id(request),
+        )
+        return Response(HumanHandoffSerializer(handoff).data)
+
+
+class HumanHandoffResolveView(WorkspaceScopedMixin, APIView):
+    def get_permissions(self):
+        return [IsWorkspaceMember(), CanManageHandoffs()]
+
+    @extend_schema(request=None, responses=HumanHandoffSerializer)
+    def post(self, request, workspace_id, handoff_id):
+        handoff = selectors.handoff_get_for_workspace_or_404(
+            workspace=self.workspace, handoff_id=handoff_id
+        )
+        handoff = services.resolve_handoff(
+            workspace=self.workspace,
+            actor=request.user,
+            actor_membership=self.membership,
+            handoff=handoff,
+            request_id=_request_id(request),
+        )
+        return Response(HumanHandoffSerializer(handoff).data)

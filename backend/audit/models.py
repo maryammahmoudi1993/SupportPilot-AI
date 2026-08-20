@@ -92,6 +92,10 @@ class AuditAction(models.TextChoices):
     APPROVAL_REJECTED = "approval.rejected", "Approval rejected"
     APPROVAL_EXPIRED = "approval.expired", "Approval expired"
     APPROVAL_CANCELLED = "approval.cancelled", "Approval cancelled"
+    HUMAN_HANDOFF_CREATED = "human_handoff.created", "Human handoff created"
+    HUMAN_HANDOFF_ASSIGNED = "human_handoff.assigned", "Human handoff assigned"
+    HUMAN_HANDOFF_RESOLVED = "human_handoff.resolved", "Human handoff resolved"
+    HUMAN_HANDOFF_CANCELLED = "human_handoff.cancelled", "Human handoff cancelled"
 
 
 class AuditEvent(BaseModel):

@@ -74,6 +74,10 @@ urlpatterns = [
                     "workspaces/<uuid:workspace_id>/approvals/",
                     include("approvals.urls"),
                 ),
+                path(
+                    "workspaces/<uuid:workspace_id>/handoffs/",
+                    include("tickets.handoff_urls"),
+                ),
             ]
         ),
     ),

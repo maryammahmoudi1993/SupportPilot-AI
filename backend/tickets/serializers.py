@@ -10,7 +10,7 @@ from rest_framework import serializers
 
 from conversations.serializers import MembershipSummarySerializer
 
-from .models import Ticket, TicketPriority, TicketStatus
+from .models import HumanHandoff, Ticket, TicketPriority, TicketStatus
 
 
 class TicketSerializer(serializers.ModelSerializer):
@@ -66,3 +66,31 @@ class TicketAssignSerializer(serializers.Serializer):
 
 class TicketStatusSerializer(serializers.Serializer):
     status = serializers.ChoiceField(choices=TicketStatus.choices)
+
+
+class HumanHandoffSerializer(serializers.ModelSerializer):
+    assigned_to = MembershipSummarySerializer(read_only=True)
+    conversation_id = serializers.UUIDField(source="conversation.id", read_only=True)
+    agent_run_id = serializers.UUIDField(source="agent_run.id", read_only=True, allow_null=True)
+    ticket_id = serializers.UUIDField(source="ticket.id", read_only=True, allow_null=True)
+
+    class Meta:
+        model = HumanHandoff
+        fields = [
+            "id",
+            "conversation_id",
+            "agent_run_id",
+            "ticket_id",
+            "status",
+            "reason_code",
+            "safe_summary",
+            "assigned_to",
+            "resolved_at",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = fields
+
+
+class HumanHandoffAssignSerializer(serializers.Serializer):
+    membership_id = serializers.UUIDField(required=False)

@@ -9,7 +9,7 @@ from django.http import Http404
 
 from workspaces.models import Workspace
 
-from .models import Ticket, TicketPriority
+from .models import HumanHandoff, Ticket, TicketPriority
 
 #: Urgent/high priority sort first, independent of alphabetic enum order.
 _PRIORITY_ORDER = Case(
@@ -77,3 +77,32 @@ def ticket_get_by_id_for_workspace(*, workspace: Workspace, ticket_id: str) -> T
         .select_related("customer", "assigned_to", "assigned_to__user", "conversation")
         .first()
     )
+
+
+def handoff_list_for_workspace(
+    *,
+    workspace: Workspace,
+    status: str | None = None,
+    conversation_id: UUID | str | None = None,
+) -> QuerySet[HumanHandoff]:
+    qs = HumanHandoff.objects.filter(workspace=workspace).select_related(
+        "conversation", "agent_run", "ticket", "assigned_to", "assigned_to__user"
+    )
+    if status is not None:
+        qs = qs.filter(status=status)
+    if conversation_id is not None:
+        qs = qs.filter(conversation_id=conversation_id)
+    return qs
+
+
+def handoff_get_for_workspace_or_404(
+    *, workspace: Workspace, handoff_id: UUID | str
+) -> HumanHandoff:
+    handoff = (
+        HumanHandoff.objects.filter(workspace=workspace, pk=handoff_id)
+        .select_related("conversation", "agent_run", "ticket", "assigned_to", "assigned_to__user")
+        .first()
+    )
+    if handoff is None:
+        raise Http404("Handoff not found.")
+    return handoff

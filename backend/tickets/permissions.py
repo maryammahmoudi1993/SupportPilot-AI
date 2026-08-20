@@ -31,3 +31,18 @@ class CanMutateTickets(BasePermission):
     def has_permission(self, request, view) -> bool:
         membership = _membership(request)
         return membership is not None and membership.role in NON_VIEWER_ROLES
+
+
+#: Manager+ only (Phase 9, section 52-53) — a plain support agent may view
+#: the handoff queue but not assign/resolve/cancel entries in it.
+HANDOFF_MANAGE_ROLES = frozenset(
+    {WorkspaceRole.OWNER, WorkspaceRole.ADMIN, WorkspaceRole.SUPPORT_MANAGER}
+)
+
+
+class CanManageHandoffs(BasePermission):
+    message = "You do not have permission to manage human handoffs."
+
+    def has_permission(self, request, view) -> bool:
+        membership = _membership(request)
+        return membership is not None and membership.role in HANDOFF_MANAGE_ROLES
