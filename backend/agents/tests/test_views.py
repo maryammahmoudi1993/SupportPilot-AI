@@ -241,6 +241,76 @@ class TestAgentRunApi:
         assert str(response.data["conversation_id"]) == str(conversation.id)
         assert str(response.data["ticket_id"]) == str(ticket.id)
 
+    @pytest.mark.django_db(transaction=True)
+    def test_orchestrated_run_via_trigger_message_persists_the_final_message(
+        self, settings, monkeypatch
+    ):
+        from conversations.models import Message, MessageSenderType
+        from conversations.tests.factories import ConversationFactory, MessageFactory
+
+        settings.CELERY_TASK_ALWAYS_EAGER = True
+        settings.CELERY_TASK_EAGER_PROPAGATES = True
+        provider = DeterministicFakeLLMProvider(FakeLLMScenario(response="It ships tomorrow."))
+        monkeypatch.setattr("agents.services.get_llm_provider", lambda: provider)
+
+        membership = WorkspaceMembershipFactory(role=WorkspaceRole.SUPPORT_AGENT)
+        version = PublishedAgentVersionFactory(agent_definition__workspace=membership.workspace)
+        conversation = ConversationFactory(workspace=membership.workspace)
+        message = MessageFactory(conversation=conversation, body="Where is my order?")
+
+        response = _client(membership.user).post(
+            f"{_runs_base(membership.workspace)}/",
+            {
+                "agent_version_id": str(version.id),
+                "conversation_id": str(conversation.id),
+                "trigger_message_id": str(message.id),
+            },
+            format="json",
+        )
+        assert response.status_code == 201
+        run_id = response.data["id"]
+        detail = _client(membership.user).get(f"{_runs_base(membership.workspace)}/{run_id}/")
+        assert detail.data["status"] == AgentRunStatus.SUCCEEDED
+        assert (
+            Message.objects.filter(
+                conversation=conversation, sender_type=MessageSenderType.AI_AGENT
+            ).count()
+            == 1
+        )
+
+        # A client retry of the same trigger message reuses the one logical
+        # run rather than starting a second one (section 19, 110-111).
+        retry = _client(membership.user).post(
+            f"{_runs_base(membership.workspace)}/",
+            {
+                "agent_version_id": str(version.id),
+                "conversation_id": str(conversation.id),
+                "trigger_message_id": str(message.id),
+            },
+            format="json",
+        )
+        assert retry.status_code == 201
+        assert retry.data["id"] == response.data["id"]
+
+    def test_trigger_message_from_another_conversation_404s(self):
+        from conversations.tests.factories import ConversationFactory, MessageFactory
+
+        membership = WorkspaceMembershipFactory(role=WorkspaceRole.SUPPORT_AGENT)
+        version = PublishedAgentVersionFactory(agent_definition__workspace=membership.workspace)
+        conversation = ConversationFactory(workspace=membership.workspace)
+        foreign_message = MessageFactory()
+
+        response = _client(membership.user).post(
+            f"{_runs_base(membership.workspace)}/",
+            {
+                "agent_version_id": str(version.id),
+                "conversation_id": str(conversation.id),
+                "trigger_message_id": str(foreign_message.id),
+            },
+            format="json",
+        )
+        assert response.status_code == 404
+
     def test_run_with_foreign_conversation_404s(self):
         from conversations.tests.factories import ConversationFactory
 

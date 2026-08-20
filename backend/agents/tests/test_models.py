@@ -106,6 +106,32 @@ class TestAgentRun:
         run = AgentRunFactory()
         assert str(run) == f"{run.id}:{run.status}"
 
+    def test_trigger_message_uniqueness_across_runs(self):
+        from conversations.tests.factories import MessageFactory
+
+        run = AgentRunFactory()
+        message = MessageFactory(conversation__workspace=run.workspace)
+        run.trigger_message = message
+        run.save(update_fields=["trigger_message"])
+
+        second = AgentRunFactory.build(workspace=run.workspace, trigger_message=message)
+        with pytest.raises(IntegrityError):
+            second.save()
+
+    def test_rejects_trigger_message_from_a_different_workspace(self):
+        from conversations.tests.factories import MessageFactory
+
+        run = AgentRunFactory.build(trigger_message=MessageFactory())
+        with pytest.raises(ValidationError):
+            run.full_clean()
+
+    def test_rejects_output_message_from_a_different_workspace(self):
+        from conversations.tests.factories import MessageFactory
+
+        run = AgentRunFactory.build(output_message=MessageFactory())
+        with pytest.raises(ValidationError):
+            run.full_clean()
+
 
 @pytest.mark.django_db
 class TestAgentStep:
