@@ -80,6 +80,17 @@ env = environ.Env(
     # Bounded content limits for notification.send (section 129).
     INTEGRATIONS_NOTIFICATION_MAX_SUBJECT_LENGTH=(int, 200),
     INTEGRATIONS_NOTIFICATION_MAX_BODY_LENGTH=(int, 5000),
+    # Deterministic policy engine and human-approval workflow (Phase 8).
+    # Approval requests expire in 24h by default (section 43, 65).
+    POLICIES_DEFAULT_APPROVAL_TTL_SECONDS=(int, 60 * 60 * 24),
+    POLICIES_MAX_RULES_PER_VERSION=(int, 50),
+    # $1000.00 — a financial action at/above this amount is escalated one
+    # risk tier (section 22).
+    POLICIES_RISK_BUMP_FINANCIAL_AMOUNT_MINOR=(int, 100_000),
+    # System default refund policy (section 32): auto-allow up to $50.00,
+    # require approval up to $500.00, deny above that — USD only.
+    POLICIES_DEFAULT_REFUND_AUTO_ALLOW_MAX_MINOR=(int, 5_000),
+    POLICIES_DEFAULT_REFUND_APPROVAL_MAX_MINOR=(int, 50_000),
 )
 
 environ.Env.read_env(os.path.join(BASE_DIR.parent, ".env"))
@@ -266,7 +277,16 @@ SPECTACULAR_SETTINGS = {
         "AgentStepStatusEnum": "agents.models.AgentStepStatus.choices",
         "IntegrationProviderEnum": "integrations.models.IntegrationProvider.choices",
         "IntegrationEnvironmentEnum": "integrations.models.IntegrationEnvironment.choices",
-        "IntegrationConnectionStatusEnum": "integrations.models.IntegrationConnectionStatus.choices",
+        "IntegrationConnectionStatusEnum": (
+            "integrations.models.IntegrationConnectionStatus.choices"
+        ),
+        "RiskLevelEnum": "tools.contracts.RiskLevel.choices",
+        "SideEffectTypeEnum": "tools.contracts.SideEffectType.choices",
+        "PolicyStatusEnum": "policies.models.PolicyStatus.choices",
+        "PolicyVersionStatusEnum": "policies.models.PolicyVersionStatus.choices",
+        "PolicyEffectEnum": "policies.models.PolicyEffect.choices",
+        "ApprovalStatusEnum": "approvals.models.ApprovalStatus.choices",
+        "ApprovalDecisionValueEnum": "approvals.models.ApprovalDecisionValue.choices",
     },
 }
 
@@ -355,6 +375,22 @@ INTEGRATIONS_CALENDAR_MAX_HORIZON_DAYS = env("INTEGRATIONS_CALENDAR_MAX_HORIZON_
 INTEGRATIONS_CALENDAR_MAX_TITLE_LENGTH = env("INTEGRATIONS_CALENDAR_MAX_TITLE_LENGTH")
 INTEGRATIONS_NOTIFICATION_MAX_SUBJECT_LENGTH = env("INTEGRATIONS_NOTIFICATION_MAX_SUBJECT_LENGTH")
 INTEGRATIONS_NOTIFICATION_MAX_BODY_LENGTH = env("INTEGRATIONS_NOTIFICATION_MAX_BODY_LENGTH")
+
+# Deterministic policy engine and human-approval workflow (Phase 8). See
+# ``docs/architecture/policy-approval-engine.md``. Every value here is a
+# server-owned default a workspace policy can only ever be *evaluated
+# against*, never a value client input can override (section 6, 79-80).
+POLICIES_DEFAULT_APPROVAL_TTL_SECONDS = env("POLICIES_DEFAULT_APPROVAL_TTL_SECONDS")
+POLICIES_MAX_RULES_PER_VERSION = env("POLICIES_MAX_RULES_PER_VERSION")
+# Dynamic risk adjustment (section 22-23): a financial action at or above
+# this amount is escalated by one risk tier regardless of its static base
+# risk. Independent of the refund auto-allow/approval thresholds below.
+POLICIES_RISK_BUMP_FINANCIAL_AMOUNT_MINOR = env("POLICIES_RISK_BUMP_FINANCIAL_AMOUNT_MINOR")
+# The system default refund policy (section 32-34) — USD only; any other
+# currency always requires approval under the default policy until a
+# workspace configures its own currency-specific rule.
+POLICIES_DEFAULT_REFUND_AUTO_ALLOW_MAX_MINOR = env("POLICIES_DEFAULT_REFUND_AUTO_ALLOW_MAX_MINOR")
+POLICIES_DEFAULT_REFUND_APPROVAL_MAX_MINOR = env("POLICIES_DEFAULT_REFUND_APPROVAL_MAX_MINOR")
 
 # Logging
 LOGGING = {

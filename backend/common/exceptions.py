@@ -21,7 +21,10 @@ class ConflictError(APIException):
 class SafeAPIError(APIException):
     """Handled application error with a stable public code and safe message."""
 
-    status_code = status.HTTP_400_BAD_REQUEST
+    # Annotated ``int`` (not left to Literal[400] inference) so a subclass
+    # may safely override it with a different status code, matching
+    # ``ConflictError`` above and any per-error-family subclasses elsewhere.
+    status_code: int = status.HTTP_400_BAD_REQUEST
     api_error_code = "invalid_request"
 
     def __init__(self, message: str, *, code: str | None = None) -> None:

@@ -284,6 +284,96 @@ def run_graph(ctx: RunContext, *, input_message: str) -> RuntimeState:
     return cast(RuntimeState, result)
 
 
+def build_resume_graph(ctx: RunContext):
+    """The same bounded graph as :func:`build_graph`, entered directly at
+    ``check_budget`` instead of ``prepare_run`` (section 57-58, 66).
+
+    Used only after a paused tool action's approval is granted: the tool
+    call has already been resolved by ``tools.execution.resume_after_approval``
+    (never replayed here), so the graph resumes exactly where Phase 6's
+    normal successful-tool-call path already routes to — through
+    ``check_budget`` (which re-checks the run's *persisted* counters, all
+    strictly increasing, so termination still holds) and on to a bounded
+    follow-up model turn. Every node function is identical to the main
+    graph's — only the entry edge and the omission of ``prepare_run``
+    (which only records a step and increments ``step_count`` for the very
+    first entry) differ.
+    """
+    graph = StateGraph(RuntimeState)
+    graph.add_node("check_budget", lambda s: _check_budget(ctx, s))
+    graph.add_node("generate_response", lambda s: _generate_response(ctx, s))
+    graph.add_node("execute_tool_call", lambda s: _execute_tool_call(ctx, s))
+    graph.add_node("validate_provider_result", lambda s: _validate_provider_result(ctx, s))
+    graph.add_node("finalize_response", lambda s: _finalize_response(ctx, s))
+
+    graph.add_edge(START, "check_budget")
+    graph.add_conditional_edges(
+        "check_budget",
+        lambda s: "exceeded" if s.get("budget_exceeded") else "proceed",
+        {"exceeded": END, "proceed": "generate_response"},
+    )
+    graph.add_conditional_edges(
+        "generate_response",
+        lambda s: _route_after_generate(ctx, s),
+        {
+            "retry": "check_budget",
+            "tool_request": "execute_tool_call",
+            "continue": "validate_provider_result",
+            "end": END,
+        },
+    )
+    graph.add_conditional_edges(
+        "execute_tool_call",
+        lambda s: _route_after_tool(s),
+        {"continue": "check_budget", "end": END},
+    )
+    graph.add_conditional_edges(
+        "validate_provider_result",
+        lambda s: "error" if s.get("safe_error_code") else "ok",
+        {"error": END, "ok": "finalize_response"},
+    )
+    graph.add_edge("finalize_response", END)
+    return graph.compile()
+
+
+def resume_state_after_tool(
+    *,
+    input_message: str,
+    model_call_count: int,
+    step_count: int,
+    input_tokens: int,
+    output_tokens: int,
+    total_tokens: int,
+    estimated_cost_usd: float | None,
+    tool_result_summary: str,
+) -> RuntimeState:
+    """Reconstruct the graph state as it would look immediately after a
+    successful, non-paused tool call — the exact point Phase 6's own
+    ``execute_tool_call`` node hands off to ``check_budget`` on its
+    "continue" edge. Every counter comes from the run's own persisted
+    values (section 153-155: waiting for approval, and the resume itself,
+    must never reset or inflate the run's budget)."""
+    state = initial_state(input_message=input_message)
+    state.update(
+        {
+            "model_call_count": model_call_count,
+            "step_count": step_count,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": total_tokens,
+            "estimated_cost_usd": estimated_cost_usd,
+            "tool_result_summary": tool_result_summary,
+        }
+    )
+    return state
+
+
+def run_resume_graph(ctx: RunContext, *, state: RuntimeState) -> RuntimeState:
+    graph = build_resume_graph(ctx)
+    result: Any = graph.invoke(state)
+    return cast(RuntimeState, result)
+
+
 def new_run_context(
     *,
     provider: LLMProvider,

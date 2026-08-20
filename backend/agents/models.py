@@ -38,6 +38,11 @@ class AgentRunStatus(models.TextChoices):
     FAILED = "failed", "Failed"
     CANCELLED = "cancelled", "Cancelled"
     BUDGET_EXCEEDED = "budget_exceeded", "Budget exceeded"
+    # Phase 8: the run's one bounded tool round-trip was gated by policy and
+    # is paused pending a human decision. Deliberately non-terminal and
+    # excluded from busy-waiting (section 57-58) — nothing holds a worker
+    # thread, Celery worker, or DB transaction open while a run sits here.
+    WAITING_FOR_APPROVAL = "waiting_for_approval", "Waiting for approval"
 
 
 AGENT_RUN_TERMINAL_STATUSES = frozenset(
@@ -75,6 +80,16 @@ class AgentStepType(models.TextChoices):
     TOOL_EXECUTION_FAILED = "tool_execution_failed", "Tool execution failed"
     TOOL_EXECUTION_TIMED_OUT = "tool_execution_timed_out", "Tool execution timed out"
     TOOL_IDEMPOTENCY_REUSED = "tool_idempotency_reused", "Tool idempotency reused"
+    # Phase 8: safe, structured policy/approval trace events. Never hidden
+    # chain-of-thought — only operational facts (section 85).
+    RISK_ASSESSED = "risk_assessed", "Risk assessed"
+    POLICY_EVALUATED = "policy_evaluated", "Policy evaluated"
+    APPROVAL_REQUESTED = "approval_requested", "Approval requested"
+    APPROVAL_APPROVED = "approval_approved", "Approval approved"
+    APPROVAL_REJECTED = "approval_rejected", "Approval rejected"
+    APPROVAL_EXPIRED = "approval_expired", "Approval expired"
+    RUN_WAITING_FOR_APPROVAL = "run_waiting_for_approval", "Run waiting for approval"
+    EXECUTION_RESUMED = "execution_resumed", "Execution resumed"
 
 
 class AgentStepStatus(models.TextChoices):
