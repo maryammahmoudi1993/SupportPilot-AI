@@ -2,6 +2,7 @@
 mocked; the internal runtime implementation is not. No test in this module
 performs a real HTTP request."""
 
+import hashlib
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -20,7 +21,7 @@ from agents.providers.errors import (
     ProviderTimeoutError,
 )
 from agents.providers.openai_adapter import OpenAIProvider
-from agents.providers.schemas import LLMMessage, LLMRequest
+from agents.providers.schemas import LLMMessage, LLMRequest, ToolDescriptor
 
 
 def _request():
@@ -86,6 +87,55 @@ class TestOpenAIProviderSuccess:
         provider = _provider_with_client(client)
         with pytest.raises(ProviderMalformedResponseError):
             provider.generate(_request())
+
+    def test_bound_descriptor_is_adapted_and_tool_call_is_normalized(self):
+        client = MagicMock()
+        descriptor = ToolDescriptor(
+            key="order.lookup",
+            display_name="Order lookup",
+            description="Look up one order.",
+            input_schema={
+                "type": "object",
+                "properties": {"order_id": {"type": "string"}},
+                "required": ["order_id"],
+                "additionalProperties": False,
+            },
+        )
+        request = LLMRequest(
+            messages=(LLMMessage(role="user", content="where"),),
+            model="gpt-test",
+            tools=(descriptor,),
+        )
+        client.chat.completions.create.return_value = SimpleNamespace(
+            id="cmpl-tools",
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=None,
+                        tool_calls=[
+                            SimpleNamespace(
+                                id="call-1",
+                                function=SimpleNamespace(
+                                    name="order_lookup_"
+                                    + hashlib.sha256(b"order.lookup").hexdigest()[:8],
+                                    arguments='{"order_id":"ord-1"}',
+                                ),
+                            )
+                        ],
+                    ),
+                    finish_reason="tool_calls",
+                )
+            ],
+            usage=SimpleNamespace(prompt_tokens=2, completion_tokens=1, total_tokens=3),
+        )
+
+        response = _provider_with_client(client).generate(request)
+
+        sent = client.chat.completions.create.call_args.kwargs["tools"][0]["function"]
+        assert sent["description"] == descriptor.description
+        assert sent["parameters"] == descriptor.input_schema
+        assert response.tool_calls[0].tool_name == "order.lookup"
+        assert response.tool_calls[0].arguments == {"order_id": "ord-1"}
 
 
 class TestOpenAIProviderErrorMapping:

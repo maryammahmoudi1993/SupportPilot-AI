@@ -18,6 +18,8 @@ both of which are strictly increasing, so the graph always terminates.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -29,7 +31,8 @@ from langgraph.graph import END, START, StateGraph
 from agents.models import AgentStepStatus, AgentStepType
 from agents.providers.errors import ProviderError
 from agents.providers.protocol import LLMProvider
-from agents.providers.schemas import LLMMessage, LLMRequest
+from agents.providers.schemas import LLMMessage, LLMRequest, ToolDescriptor
+from agents.tool_runtime import ToolResultContext
 
 from .budgets import Budgets, check_budget
 from .state import RuntimeState, initial_state
@@ -39,6 +42,7 @@ StepRecorder = Callable[..., None]
 # "error_message"}. Never raises — the graph only ever sees normalized,
 # already-safe results (agents.services wraps tools.execution.execute_tool).
 ExecuteToolFn = Callable[[str, dict[str, Any], str | None], dict[str, Any]]
+CancellationCheck = Callable[[], bool]
 
 
 @dataclass
@@ -54,6 +58,9 @@ class RunContext:
     started_monotonic: float
     execute_tool: ExecuteToolFn | None = None
     initial_messages: tuple[LLMMessage, ...] | None = None
+    tool_descriptors: tuple[ToolDescriptor, ...] = ()
+    agent_run_id: str | None = None
+    is_cancelled: CancellationCheck | None = None
 
 
 def _prepare_run(ctx: RunContext, state: RuntimeState) -> dict[str, Any]:
@@ -66,6 +73,8 @@ def _prepare_run(ctx: RunContext, state: RuntimeState) -> dict[str, Any]:
 
 
 def _check_budget(ctx: RunContext, state: RuntimeState) -> dict[str, Any]:
+    if ctx.is_cancelled is not None and ctx.is_cancelled():
+        return {"cancelled": True}
     cost = Decimal(str(state["estimated_cost_usd"])) if state.get("estimated_cost_usd") else None
     result = check_budget(
         budgets=ctx.budgets,
@@ -107,6 +116,7 @@ def _generate_response(ctx: RunContext, state: RuntimeState) -> dict[str, Any]:
     request = LLMRequest(
         messages=tuple(messages),
         model=ctx.model,
+        tools=ctx.tool_descriptors,
         temperature=ctx.temperature,
         max_output_tokens=ctx.max_output_tokens,
         timeout_seconds=ctx.budgets.provider_timeout_seconds,
@@ -148,12 +158,39 @@ def _generate_response(ctx: RunContext, state: RuntimeState) -> dict[str, Any]:
             "input_tokens": response.usage.input_tokens,
             "output_tokens": response.usage.output_tokens,
             "finish_reason": response.finish_reason,
+            "tool_calls_received": len(response.tool_calls),
+            "tool_calls_considered": min(1, len(response.tool_calls)),
+            "ignored_tool_call_count": max(0, len(response.tool_calls) - 1),
         },
     )
     # Only the first proposed tool call is honored — one bounded round-trip
     # per model turn keeps the graph's termination argument simple (extra
     # calls in the same turn are ignored, not queued; section 43).
     tool_call = response.tool_calls[0] if response.tool_calls else None
+    if response.tool_calls:
+        ctx.record_step(
+            step_type=AgentStepType.REQUEST_NORMALIZED,
+            status=AgentStepStatus.SUCCEEDED,
+            safe_metadata={
+                "event": "tool_call_received",
+                "tool_key": tool_call.tool_name if tool_call else "",
+                "tool_calls_received": len(response.tool_calls),
+                "ignored_tool_call_count": max(0, len(response.tool_calls) - 1),
+            },
+        )
+    model_turn = state["model_call_count"] + 1
+    idempotency_key = None
+    if tool_call is not None:
+        canonical = json.dumps(tool_call.arguments, sort_keys=True, separators=(",", ":"))
+        digest = hashlib.sha256(f"{tool_call.tool_name}:{canonical}".encode()).hexdigest()[:24]
+        idempotency_key = f"agent:{ctx.agent_run_id or 'unknown'}:turn:{model_turn}:{digest}"
+    prior_cost = state.get("estimated_cost_usd")
+    turn_cost = response.estimated_cost_usd
+    accumulated_cost = (
+        float(Decimal(str(prior_cost or 0)) + Decimal(str(turn_cost or 0)))
+        if prior_cost is not None or turn_cost is not None
+        else None
+    )
     return {
         "model_call_count": state["model_call_count"] + 1,
         "step_count": state["step_count"] + 1,
@@ -161,7 +198,7 @@ def _generate_response(ctx: RunContext, state: RuntimeState) -> dict[str, Any]:
         "input_tokens": state["input_tokens"] + response.usage.input_tokens,
         "output_tokens": state["output_tokens"] + response.usage.output_tokens,
         "total_tokens": state["total_tokens"] + response.usage.total_tokens,
-        "estimated_cost_usd": response.estimated_cost_usd,
+        "estimated_cost_usd": accumulated_cost,
         "final_response": response.text,
         "finish_reason": response.finish_reason,
         "structured_output": response.structured_output,
@@ -174,6 +211,8 @@ def _generate_response(ctx: RunContext, state: RuntimeState) -> dict[str, Any]:
                 "call_id": tool_call.call_id,
                 "tool_name": tool_call.tool_name,
                 "arguments": tool_call.arguments,
+                "normalization_error": tool_call.normalization_error,
+                "idempotency_key": idempotency_key,
             }
             if tool_call
             else None
@@ -201,22 +240,68 @@ def _execute_tool_call(ctx: RunContext, state: RuntimeState) -> dict[str, Any]:
     call = state.get("pending_tool_call")
     if not call or ctx.execute_tool is None:  # pragma: no cover - guarded by routing
         return {"pending_tool_call": None}
+    if ctx.is_cancelled is not None and ctx.is_cancelled():
+        return {"pending_tool_call": None, "cancelled": True}
+    if call.get("normalization_error"):
+        result_context = ToolResultContext(
+            tool_key=call["tool_name"],
+            status="failed",
+            error_code=call["normalization_error"],
+        )
+        model_result = result_context.as_model_message()
+        ctx.record_step(
+            step_type=AgentStepType.REQUEST_NORMALIZED,
+            status=AgentStepStatus.SUCCEEDED,
+            safe_metadata={
+                "event": "tool_result_prepared",
+                "tool_key": call["tool_name"],
+                "status": "failed",
+                "error_code": call["normalization_error"],
+            },
+        )
+        return {
+            "pending_tool_call": None,
+            "step_count": state["step_count"] + 1,
+            "tool_result_summary": model_result,
+        }
     outcome = ctx.execute_tool(call["tool_name"], call["arguments"], call.get("idempotency_key"))
     update: dict[str, Any] = {
         "pending_tool_call": None,
         "step_count": state["step_count"] + 1,
     }
-    if outcome.get("succeeded"):
-        update["tool_result_summary"] = outcome.get("output_summary", "")
-    else:
+    if outcome.get("approval_required"):
         update["safe_error_code"] = outcome.get("error_code") or "tool_execution_failed"
         update["safe_error_message"] = outcome.get("error_message") or "The requested tool failed."
         update["retryable_error"] = False
+    elif outcome.get("budget_exceeded"):
+        update["budget_exceeded"] = True
+        update["budget_exceeded_reason"] = outcome.get("budget_reason")
+    elif outcome.get("terminal"):
+        update["safe_error_code"] = outcome.get("error_code") or "tool_execution_failed"
+        update["safe_error_message"] = outcome.get("error_message") or "The requested tool failed."
+        update["retryable_error"] = False
+    else:
+        update["tool_result_summary"] = outcome.get("model_result", "")
+        ctx.record_step(
+            step_type=AgentStepType.REQUEST_NORMALIZED,
+            status=AgentStepStatus.SUCCEEDED,
+            safe_metadata={
+                "event": "tool_result_prepared",
+                "tool_key": call["tool_name"],
+                "status": outcome.get("result_status", "failed"),
+                "error_code": outcome.get("error_code", ""),
+                "reused": bool(outcome.get("reused", False)),
+            },
+        )
     return update
 
 
 def _route_after_tool(state: RuntimeState) -> str:
-    return "end" if state.get("safe_error_code") else "continue"
+    return (
+        "end"
+        if state.get("safe_error_code") or state.get("budget_exceeded") or state.get("cancelled")
+        else "continue"
+    )
 
 
 def _validate_provider_result(ctx: RunContext, state: RuntimeState) -> dict[str, Any]:
@@ -251,7 +336,7 @@ def build_graph(ctx: RunContext):
     graph.add_edge("prepare_run", "check_budget")
     graph.add_conditional_edges(
         "check_budget",
-        lambda s: "exceeded" if s.get("budget_exceeded") else "proceed",
+        lambda s: "exceeded" if s.get("budget_exceeded") or s.get("cancelled") else "proceed",
         {"exceeded": END, "proceed": "generate_response"},
     )
     graph.add_conditional_edges(
@@ -284,7 +369,10 @@ def build_graph(ctx: RunContext):
 
 def run_graph(ctx: RunContext, *, input_message: str) -> RuntimeState:
     graph = build_graph(ctx)
-    result: Any = graph.invoke(initial_state(input_message=input_message))
+    recursion_limit = max(25, ctx.budgets.max_steps * 4 + ctx.budgets.max_model_calls * 4)
+    result: Any = graph.invoke(
+        initial_state(input_message=input_message), config={"recursion_limit": recursion_limit}
+    )
     return cast(RuntimeState, result)
 
 
@@ -313,7 +401,7 @@ def build_resume_graph(ctx: RunContext):
     graph.add_edge(START, "check_budget")
     graph.add_conditional_edges(
         "check_budget",
-        lambda s: "exceeded" if s.get("budget_exceeded") else "proceed",
+        lambda s: "exceeded" if s.get("budget_exceeded") or s.get("cancelled") else "proceed",
         {"exceeded": END, "proceed": "generate_response"},
     )
     graph.add_conditional_edges(
@@ -374,7 +462,8 @@ def resume_state_after_tool(
 
 def run_resume_graph(ctx: RunContext, *, state: RuntimeState) -> RuntimeState:
     graph = build_resume_graph(ctx)
-    result: Any = graph.invoke(state)
+    recursion_limit = max(25, ctx.budgets.max_steps * 4 + ctx.budgets.max_model_calls * 4)
+    result: Any = graph.invoke(state, config={"recursion_limit": recursion_limit})
     return cast(RuntimeState, result)
 
 
@@ -390,6 +479,9 @@ def new_run_context(
     record_step: StepRecorder,
     execute_tool: ExecuteToolFn | None = None,
     initial_messages: tuple[LLMMessage, ...] | None = None,
+    tool_descriptors: tuple[ToolDescriptor, ...] = (),
+    agent_run_id: str | None = None,
+    is_cancelled: CancellationCheck | None = None,
 ) -> RunContext:
     return RunContext(
         provider=provider,
@@ -403,4 +495,7 @@ def new_run_context(
         started_monotonic=time.monotonic(),
         execute_tool=execute_tool,
         initial_messages=initial_messages,
+        tool_descriptors=tool_descriptors,
+        agent_run_id=agent_run_id,
+        is_cancelled=is_cancelled,
     )

@@ -7,6 +7,7 @@ import pytest
 from agents import orchestration, services
 from agents.models import AgentRunStatus, AgentStep, AgentStepType
 from agents.providers.fake import DeterministicFakeLLMProvider, FakeLLMScenario
+from agents.providers.schemas import NormalizedToolCall
 from agents.tests.factories import AgentRunFactory, PublishedAgentVersionFactory
 from approvals.models import ApprovalRequest
 from conversations.models import Message
@@ -21,6 +22,7 @@ from knowledge.tests.factories import (
 )
 from policies.models import PolicyEvaluation
 from tools.models import ToolExecution
+from tools.tests.factories import ToolBindingFactory, ToolDefinitionFactory
 from workspaces.tests.factories import WorkspaceFactory
 
 
@@ -108,6 +110,44 @@ class TestKnowledgeOrchestration:
         assert provider.call_count == 1
         assert result.output_message.metadata["citations"] == []
 
+    def test_rag_context_and_bound_tool_results_share_one_bounded_run(self, monkeypatch):
+        conversation = ConversationFactory()
+        trigger = MessageFactory(conversation=conversation, body="Check the refund timing")
+        chunk = _chunk(workspace=conversation.workspace, text="Refunds take five business days.")
+        version = PublishedAgentVersionFactory(
+            agent_definition__workspace=conversation.workspace,
+            max_model_calls=2,
+            max_tool_calls=1,
+        )
+        definition = ToolDefinitionFactory(key="demo.echo", handler_key="demo.echo")
+        ToolBindingFactory(agent_version=version, tool_definition=definition)
+        run = _run_for_trigger(trigger, version=version)
+        provider = DeterministicFakeLLMProvider(
+            [
+                FakeLLMScenario(
+                    tool_calls=(
+                        NormalizedToolCall(
+                            call_id="1",
+                            tool_name="demo.echo",
+                            arguments={"message": "five days"},
+                        ),
+                    )
+                ),
+                FakeLLMScenario(response="Refunds take five business days."),
+            ]
+        )
+        monkeypatch.setattr(services, "get_llm_provider", lambda: provider)
+
+        result = orchestration.execute_support_agent_run(run.id)
+
+        first_text = "\n".join(item.content for item in provider.requests[0].messages)
+        second_text = "\n".join(item.content for item in provider.requests[1].messages)
+        assert result.status == AgentRunStatus.SUCCEEDED
+        assert chunk.text in first_text
+        assert [item.key for item in provider.requests[0].tools] == ["demo.echo"]
+        assert "TOOL RESULT — UNTRUSTED EXTERNAL DATA" in second_text
+        assert result.output_message.metadata["citations"][0]["chunk_id"] == str(chunk.id)
+
     def test_cross_tenant_perfect_match_never_reaches_request_trace_or_citations(self, monkeypatch):
         workspace_a = WorkspaceFactory()
         workspace_b = WorkspaceFactory()
@@ -185,6 +225,7 @@ class TestKnowledgeOrchestration:
         ).order_by("sequence")
         assert [step.safe_metadata["event"] for step in context_steps] == [
             "conversation_context_prepared",
+            "tool_catalog_prepared",
             "knowledge_retrieved",
             "llm_context_prepared",
         ]

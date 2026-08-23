@@ -42,7 +42,7 @@ from .models import (
 )
 from .providers.config import get_llm_provider
 from .providers.errors import ProviderConfigurationError
-from .providers.schemas import LLMMessage
+from .providers.schemas import LLMMessage, ToolDescriptor
 from .runtime.budgets import Budgets
 from .runtime.graph import (
     RunContext,
@@ -51,6 +51,8 @@ from .runtime.graph import (
     run_graph,
     run_resume_graph,
 )
+from .tool_catalog import ToolCatalogConfigurationError, get_bound_tool_descriptors
+from .tool_runtime import ToolResultContext, ToolResultStatus
 
 logger = logging.getLogger("supportpilot")
 
@@ -366,7 +368,12 @@ def _execute_tool_factory(run: AgentRun):
     runtime never sees a raw tool exception (section 27, 44-45)."""
 
     def execute_tool(tool_name: str, arguments: dict[str, Any], idempotency_key: str | None):
-        from tools.errors import ToolError
+        from tools.errors import (
+            ToolApprovalRequiredError,
+            ToolBudgetExceededError,
+            ToolError,
+            ToolPolicyDeniedError,
+        )
         from tools.execution import execute_tool as run_tool
 
         try:
@@ -377,11 +384,53 @@ def _execute_tool_factory(run: AgentRun):
                 idempotency_key=idempotency_key,
                 record_step=_record_step_factory(run),
             )
+        except ToolApprovalRequiredError as exc:
+            return {
+                "approval_required": True,
+                "error_code": exc.code,
+                "error_message": exc.safe_message,
+            }
+        except ToolBudgetExceededError:
+            return {"budget_exceeded": True, "budget_reason": "max_tool_calls_reached"}
         except ToolError as exc:
-            return {"succeeded": False, "error_code": exc.code, "error_message": exc.safe_message}
+            terminal_codes = {
+                "tool_configuration_error",
+                "tool_invalid_output",
+                "tool_idempotency_conflict",
+                "tool_execution_in_progress",
+                "tool_run_not_executable",
+                "policy_evaluation_failed",
+            }
+            if exc.code in terminal_codes:
+                return {
+                    "terminal": True,
+                    "error_code": exc.code,
+                    "error_message": exc.safe_message,
+                }
+            status: ToolResultStatus = (
+                "denied" if isinstance(exc, ToolPolicyDeniedError) else "failed"
+            )
+            result_context = ToolResultContext(
+                tool_key=tool_name,
+                status=status,
+                error_code=exc.code,
+            )
+            return {
+                "model_result": result_context.as_model_message(),
+                "error_code": exc.code,
+                "result_status": status,
+            }
+        result_context = ToolResultContext(
+            tool_key=tool_name,
+            status="succeeded",
+            result=result.output,
+            tool_execution_id=str(result.execution.id),
+        )
         return {
-            "succeeded": True,
-            "output_summary": json.dumps(result.output, default=str)[:500],
+            "model_result": result_context.as_model_message(),
+            "tool_execution_id": str(result.execution.id),
+            "result_status": "succeeded",
+            "reused": result.reused,
         }
 
     return execute_tool
@@ -417,10 +466,18 @@ def execute_claimed_agent_run(
     *,
     initial_messages: tuple[LLMMessage, ...] | None = None,
     output_metadata: dict[str, Any] | None = None,
+    tool_descriptors: tuple[ToolDescriptor, ...] | None = None,
 ) -> AgentRun:
     """Execute a run already claimed by the orchestration boundary."""
 
     agent_version = run.agent_version
+    if tool_descriptors is None:
+        try:
+            tool_descriptors = get_bound_tool_descriptors(
+                agent_version=agent_version, workspace=run.workspace
+            )
+        except ToolCatalogConfigurationError as exc:
+            return _fail_run(run, code=exc.code, message=exc.safe_message)
     try:
         provider = (
             get_llm_provider() if agent_version.provider == "fake" else _provider_for(agent_version)
@@ -440,6 +497,11 @@ def execute_claimed_agent_run(
         record_step=_record_step_factory(run),
         execute_tool=_execute_tool_factory(run),
         initial_messages=initial_messages,
+        tool_descriptors=tool_descriptors,
+        agent_run_id=str(run.id),
+        is_cancelled=lambda: AgentRun.objects.filter(
+            pk=run.pk, status=AgentRunStatus.CANCELLED
+        ).exists(),
     )
 
     try:
@@ -451,6 +513,8 @@ def execute_claimed_agent_run(
             run, code="agent_internal_error", message="The agent run failed unexpectedly."
         )
 
+    if result.get("cancelled"):
+        return AgentRun.objects.get(pk=run.pk)
     if result.get("budget_exceeded"):
         return _budget_exceeded_run(run, reason=result.get("budget_exceeded_reason"), result=result)
     error_code = result.get("safe_error_code")

@@ -40,6 +40,7 @@ from .errors import AgentError
 from .llm_context import build_agent_llm_context
 from .models import AgentRun, AgentRunTrigger, AgentVersion
 from .rag import retrieve_agent_knowledge
+from .tool_catalog import ToolCatalogConfigurationError, get_bound_tool_descriptors
 
 logger = logging.getLogger("supportpilot")
 
@@ -129,6 +130,21 @@ def execute_support_agent_run(run_id: uuid.UUID | str) -> AgentRun:
         },
     )
 
+    try:
+        tool_descriptors = get_bound_tool_descriptors(
+            agent_version=run.agent_version, workspace=run.workspace
+        )
+    except ToolCatalogConfigurationError as exc:
+        return services.fail_claimed_agent_run(run=run, code=exc.code, message=exc.safe_message)
+    services.record_agent_operational_step(
+        run=run,
+        event="tool_catalog_prepared",
+        safe_metadata={
+            "tool_count": len(tool_descriptors),
+            "tool_keys": [descriptor.key for descriptor in tool_descriptors],
+        },
+    )
+
     retrieval_started = time.monotonic()
     try:
         knowledge_context = retrieve_agent_knowledge(
@@ -197,6 +213,7 @@ def execute_support_agent_run(run_id: uuid.UUID | str) -> AgentRun:
         run,
         initial_messages=llm_context.messages,
         output_metadata={"citations": list(llm_context.citations)},
+        tool_descriptors=tool_descriptors,
     )
 
 

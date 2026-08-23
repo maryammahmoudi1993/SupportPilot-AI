@@ -99,8 +99,10 @@ class TestFinalResponsePersistence:
     def test_a_successful_run_persists_one_assistant_message(self, monkeypatch):
         _use_fake_provider(monkeypatch, FakeLLMScenario(response="Your order ships tomorrow."))
         conversation = ConversationFactory()
+        version = PublishedAgentVersionFactory(agent_definition__workspace=conversation.workspace)
         run = AgentRunFactory(
             workspace=conversation.workspace,
+            agent_version=version,
             conversation=conversation,
             input_message="Where is my order?",
         )
@@ -123,7 +125,10 @@ class TestFinalResponsePersistence:
     def test_redelivered_execution_does_not_duplicate_the_message(self, monkeypatch):
         _use_fake_provider(monkeypatch, FakeLLMScenario(response="answer"))
         conversation = ConversationFactory()
-        run = AgentRunFactory(workspace=conversation.workspace, conversation=conversation)
+        version = PublishedAgentVersionFactory(agent_definition__workspace=conversation.workspace)
+        run = AgentRunFactory(
+            workspace=conversation.workspace, agent_version=version, conversation=conversation
+        )
 
         first = orchestration.execute_support_agent_run(run.id)
         # A redelivered Celery task calling execute again for an

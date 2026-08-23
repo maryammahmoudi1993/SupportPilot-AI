@@ -43,8 +43,10 @@ class TestFullToolRoundtrip:
         provider = _use_fake_provider(monkeypatch, scenarios)
 
         result = services.execute_agent_run(run.id)
+        replayed = services.execute_agent_run(run.id)
 
         assert result.status == AgentRunStatus.SUCCEEDED
+        assert replayed.id == result.id
         assert result.final_response == "Done: hi"
         assert provider.call_count == 2
         assert result.tool_call_count == 1
@@ -61,7 +63,7 @@ class TestFullToolRoundtrip:
 
 @pytest.mark.django_db
 class TestToolFailureAgentIntegration:
-    def test_failing_tool_ends_the_run_safely(self, monkeypatch):
+    def test_failing_tool_is_safely_reported_for_a_follow_up(self, monkeypatch):
         version = PublishedAgentVersionFactory(max_model_calls=2, max_tool_calls=3)
         tool_definition = ToolDefinitionFactory(key="demo.flaky", handler_key="demo.flaky")
         ToolBindingFactory(agent_version=version, tool_definition=tool_definition)
@@ -75,14 +77,16 @@ class TestToolFailureAgentIntegration:
                         call_id="1", tool_name="demo.flaky", arguments={"fail_attempts": 5}
                     ),
                 ),
-            )
+            ),
+            FakeLLMScenario(response="I could not complete that action."),
         ]
-        _use_fake_provider(monkeypatch, scenarios)
+        provider = _use_fake_provider(monkeypatch, scenarios)
 
         result = services.execute_agent_run(run.id)
 
-        assert result.status == AgentRunStatus.FAILED
-        assert result.failure_code == "tool_retry_exhausted"
+        assert result.status == AgentRunStatus.SUCCEEDED
+        assert result.final_response == "I could not complete that action."
+        assert "tool_retry_exhausted" in _useful_request_text(provider.requests[1])
 
         execution = ToolExecution.objects.get(agent_run=run)
         assert execution.status == ToolExecutionStatus.FAILED
@@ -104,14 +108,15 @@ class TestUnknownToolAgentIntegration:
             FakeLLMScenario(
                 response="",
                 tool_calls=(ToolCallRequest(call_id="1", tool_name="system.shell", arguments={}),),
-            )
+            ),
+            FakeLLMScenario(response="That tool is unavailable."),
         ]
-        _use_fake_provider(monkeypatch, scenarios)
+        provider = _use_fake_provider(monkeypatch, scenarios)
 
         result = services.execute_agent_run(run.id)
 
-        assert result.status == AgentRunStatus.FAILED
-        assert result.failure_code == "tool_not_registered"
+        assert result.status == AgentRunStatus.SUCCEEDED
+        assert "tool_not_registered" in _useful_request_text(provider.requests[1])
         assert not ToolExecution.objects.filter(agent_run=run).exists()
 
 
@@ -127,14 +132,15 @@ class TestUnboundToolAgentIntegration:
                 tool_calls=(
                     ToolCallRequest(call_id="1", tool_name="demo.add", arguments={"a": 1, "b": 2}),
                 ),
-            )
+            ),
+            FakeLLMScenario(response="That action is unavailable."),
         ]
-        _use_fake_provider(monkeypatch, scenarios)
+        provider = _use_fake_provider(monkeypatch, scenarios)
 
         result = services.execute_agent_run(run.id)
 
-        assert result.status == AgentRunStatus.FAILED
-        assert result.failure_code == "tool_not_bound"
+        assert result.status == AgentRunStatus.SUCCEEDED
+        assert "tool_not_bound" in _useful_request_text(provider.requests[1])
 
 
 @pytest.mark.django_db
@@ -183,6 +189,10 @@ class TestToolCallBudgetAgentIntegration:
 
         result = services.execute_agent_run(run.id)
 
-        assert result.status == AgentRunStatus.FAILED
-        assert result.failure_code == "tool_budget_exceeded"
+        assert result.status == AgentRunStatus.BUDGET_EXCEEDED
+        assert result.failure_code == "budget_exceeded:max_tool_calls_reached"
         assert ToolExecution.objects.filter(agent_run=run).count() == 1
+
+
+def _useful_request_text(request):
+    return "\n".join(message.content for message in request.messages)
