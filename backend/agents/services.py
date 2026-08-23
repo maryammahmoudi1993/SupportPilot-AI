@@ -9,7 +9,6 @@ reopening safe (see ``docs/adr`` and section 18/26 of the Phase 5 brief).
 
 from __future__ import annotations
 
-import json
 import logging
 import uuid
 from collections.abc import Mapping
@@ -305,15 +304,25 @@ def cancel_agent_run(
             # Imported locally (like the tools imports below) to avoid a
             # module-level agents<->tools/approvals import cycle.
             from approvals.services import cancel_approval_for_execution
-            from tools.models import ToolExecutionStatus
+            from tools.models import ToolExecution, ToolExecutionStatus
 
             for execution in locked.tool_executions.filter(
                 status=ToolExecutionStatus.WAITING_FOR_APPROVAL
             ):
                 cancel_approval_for_execution(execution=execution, reason="run_cancelled")
-                execution.status = ToolExecutionStatus.CANCELLED
-                execution.completed_at = timezone.now()
-                execution.save(update_fields=["status", "completed_at", "updated_at"])
+                # Section 21, 130: a conditional UPDATE, not a blind
+                # overwrite — a racing approve-resume may have already
+                # claimed this exact row (WAITING_FOR_APPROVAL -> RUNNING,
+                # possibly all the way to SUCCEEDED) between the queryset
+                # above and here. This never clobbers that outcome back to
+                # CANCELLED; it only cancels a row still genuinely waiting.
+                ToolExecution.objects.filter(
+                    pk=execution.pk, status=ToolExecutionStatus.WAITING_FOR_APPROVAL
+                ).update(
+                    status=ToolExecutionStatus.CANCELLED,
+                    completed_at=timezone.now(),
+                    updated_at=timezone.now(),
+                )
         # Section 113: a still-active human handoff for a now-cancelled run
         # becomes non-actionable too — imported locally to avoid a
         # module-level agents<->tickets import cycle, matching the approvals
@@ -575,24 +584,56 @@ def _claim_run_for_resume(run_id) -> AgentRun | None:
     return run
 
 
+# Phase 9 Block 4 (section 41-45, 127): the safe, model-visible outcome codes
+# a resumed run's continuation may carry for a decision that never executes a
+# handler. Deliberately not the tool's own error taxonomy — a rejected or
+# expired action is a business/authorization outcome, not a tool failure.
+_CONTINUATION_OUTCOME_CODES: dict[str, str] = {
+    "rejected": "approval_rejected",
+    "expired": "approval_expired",
+}
+
+
 def resume_agent_run_after_approval(approval_request_id: uuid.UUID | str) -> str:
-    """Resume the exact paused tool action an approval just granted, then
-    continue the run's bounded graph from where it left off.
+    """Continue the run an approval decision (or its expiry) just resolved,
+    from the exact paused tool-call boundary — never a new run, never a
+    replay of the original customer request (section 4-6).
+
+    * **Approved**: execute the one frozen ``ToolExecution`` the approval
+      references, then feed its (untrusted, section 36) result to a bounded
+      LLM follow-up.
+    * **Rejected** / **Expired**: no handler is ever invoked; the LLM
+      follow-up instead sees a safe, structured denial outcome (section
+      41-47) — never the approver's private comment (section 43).
+    * **Cancelled** (or anything else): the underlying run was already
+      terminated by ``cancel_agent_run`` in the same transaction that
+      cancelled this approval (section 50-51) — nothing to continue.
 
     Grant is single-use and single-action scoped (section 156-158): this
     function only ever touches the one ``ToolExecution`` the approval
-    references, never any other tool call, run, or workspace.
+    references, never any other tool call, run, or workspace. Safe to call
+    more than once for the same ``approval_request_id`` (duplicate Celery
+    delivery, section 24, 95) — the resume claim below is the single point
+    of idempotency for *all* of these outcomes, not just the approved one.
     """
     from approvals.models import ApprovalRequest, ApprovalStatus
     from tools.errors import ToolError
     from tools.execution import resume_after_approval
 
     approval = ApprovalRequest.objects.select_related(
-        "tool_execution", "tool_execution__agent_run", "tool_execution__agent_run__agent_version"
+        "tool_execution",
+        "tool_execution__agent_run",
+        "tool_execution__agent_run__agent_version",
+        "tool_execution__tool_definition",
     ).get(pk=approval_request_id)
-    if approval.status != ApprovalStatus.APPROVED:
-        # Rejected/expired/cancelled, or a race already handled elsewhere —
-        # nothing to resume (section 92-93).
+    if approval.status not in (
+        ApprovalStatus.APPROVED,
+        ApprovalStatus.REJECTED,
+        ApprovalStatus.EXPIRED,
+    ):
+        # PENDING (should never reach here) or CANCELLED — a cancelled
+        # approval's run was already terminated, never resumed to the LLM
+        # (section 51).
         return "skipped"
 
     run = approval.tool_execution.agent_run
@@ -600,17 +641,44 @@ def resume_agent_run_after_approval(approval_request_id: uuid.UUID | str) -> str
     if claimed is None:
         return "already_resumed"
     run = claimed
+    tool_key = approval.tool_execution.tool_definition.key
+    record_step = _record_step_factory(run)
 
-    try:
-        tool_result = resume_after_approval(
+    if approval.status == ApprovalStatus.APPROVED:
+        record_step(step_type=AgentStepType.APPROVAL_APPROVED, status=AgentStepStatus.SUCCEEDED)
+        try:
+            tool_result = resume_after_approval(
+                tool_execution_id=str(approval.tool_execution_id), record_step=record_step
+            )
+        except ToolError as exc:
+            return _fail_run(run, code=exc.code, message=exc.safe_message).status
+        # Section 35-36, 60: the approved result is normalized through the
+        # same safe, untrusted-data ``ToolResultContext`` wrapper the
+        # ordinary ALLOW path uses — a human approving the *action* grants
+        # it no special trust as *data* fed back to the model.
+        tool_result_summary = ToolResultContext(
+            tool_key=tool_key,
+            status="succeeded",
+            result=tool_result.output,
             tool_execution_id=str(approval.tool_execution_id),
-            record_step=_record_step_factory(run),
+        ).as_model_message()
+    else:
+        outcome = "rejected" if approval.status == ApprovalStatus.REJECTED else "expired"
+        error_code = _CONTINUATION_OUTCOME_CODES[outcome]
+        step_type = (
+            AgentStepType.APPROVAL_REJECTED
+            if outcome == "rejected"
+            else AgentStepType.APPROVAL_EXPIRED
         )
-    except ToolError as exc:
-        return _fail_run(run, code=exc.code, message=exc.safe_message).status
+        record_step(step_type=step_type, status=AgentStepStatus.SUCCEEDED)
+        # No handler is ever invoked for a rejected/expired action (section
+        # 41, 46-47, 58-59) — the LLM only ever sees a safe denial code,
+        # never the approver's private comment (section 43, 76, 103).
+        tool_result_summary = ToolResultContext(
+            tool_key=tool_key, status="denied", error_code=error_code
+        ).as_model_message()
 
-    outcome_summary = json.dumps(tool_result.output, default=str)[:500]
-    return _continue_run_after_resumed_tool(run, tool_result_summary=outcome_summary).status
+    return _continue_run_after_resumed_tool(run, tool_result_summary=tool_result_summary).status
 
 
 def _continue_run_after_resumed_tool(run: AgentRun, *, tool_result_summary: str) -> AgentRun:

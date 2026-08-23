@@ -45,5 +45,5 @@ policy details. Configuration, persistence, and graph-corruption failures termin
 
 A `REQUIRE_APPROVAL` decision creates/reuses the existing `ApprovalRequest`, moves the run to
 `WAITING_FOR_APPROVAL`, and exits without invoking the handler or scheduling another model call.
-Block 3 preserves the existing resume machinery but does not add Block 4's complete approval,
-rejection, expiry, and cancellation continuations.
+See `approval-resume-continuations.md` for how Block 4 completes the approve, reject, expiry, and
+cancellation continuations out of this pause.

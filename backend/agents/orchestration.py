@@ -218,7 +218,8 @@ def execute_support_agent_run(run_id: uuid.UUID | str) -> AgentRun:
 
 
 def resume_support_agent_run(approval_request_id: uuid.UUID | str) -> str:
-    """Resume the run a just-granted approval belongs to.
+    """Continue the run an approval decision (approve or reject) or its
+    expiry just resolved (Phase 9 Block 4).
 
     Safe to call more than once for the same ``approval_request_id`` — see
     ``agents.services.resume_agent_run_after_approval``.
