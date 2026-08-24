@@ -288,8 +288,8 @@ def apply_agent_ticket_update(
     so this path never requires or fabricates one. It still reuses the same
     domain constants (``TICKET_STATUS_TRANSITIONS``,
     ``AGENT_WRITABLE_TICKET_FIELDS``) so behavior never diverges from the
-    human-driven paths (CLAUDE.md tool-execution rule: tool -> existing
-    ticket service, never a second copy of ticket business logic).
+    human-driven paths: reuse the existing ticket service rather than
+    duplicating ticket business logic in a second, tool-specific copy.
     """
     if priority is not None:
         ticket.priority = priority
