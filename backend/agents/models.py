@@ -43,6 +43,11 @@ class AgentRunStatus(models.TextChoices):
     # excluded from busy-waiting (section 57-58) — nothing holds a worker
     # thread, Celery worker, or DB transaction open while a run sits here.
     WAITING_FOR_APPROVAL = "waiting_for_approval", "Waiting for approval"
+    # Phase 9 Block 5: orchestration deliberately transferred responsibility
+    # to a human operator (section 4, 17-19) — a successful escalation
+    # outcome, never a failure. Terminal: no further LLM call, tool call, or
+    # provider side effect may occur for this run once here.
+    HANDED_OFF = "handed_off", "Handed off to a human"
 
 
 AGENT_RUN_TERMINAL_STATUSES = frozenset(
@@ -51,6 +56,7 @@ AGENT_RUN_TERMINAL_STATUSES = frozenset(
         AgentRunStatus.FAILED,
         AgentRunStatus.CANCELLED,
         AgentRunStatus.BUDGET_EXCEEDED,
+        AgentRunStatus.HANDED_OFF,
     }
 )
 
@@ -90,6 +96,11 @@ class AgentStepType(models.TextChoices):
     APPROVAL_EXPIRED = "approval_expired", "Approval expired"
     RUN_WAITING_FOR_APPROVAL = "run_waiting_for_approval", "Run waiting for approval"
     EXECUTION_RESUMED = "execution_resumed", "Execution resumed"
+    # Phase 9 Block 5: safe, structured handoff trace events (section 62) —
+    # never hidden chain-of-thought, only the operational fact that a
+    # handoff was requested/completed.
+    HANDOFF_REQUESTED = "handoff_requested", "Handoff requested"
+    RUN_HANDED_OFF = "run_handed_off", "Run handed off"
 
 
 class AgentStepStatus(models.TextChoices):

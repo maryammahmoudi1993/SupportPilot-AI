@@ -28,6 +28,7 @@ from .errors import (
     AgentVersionNotPublishableError,
     AgentVersionNotPublishedError,
 )
+from .failure_classification import RecoveryAction, classify_terminal_failure
 from .models import (
     AGENT_RUN_TERMINAL_STATUSES,
     AgentDefinition,
@@ -56,6 +57,15 @@ from .tool_runtime import ToolResultContext, ToolResultStatus
 logger = logging.getLogger("supportpilot")
 
 MAX_INPUT_MESSAGE_CHARS = 8000
+
+# Phase 9 Block 5 (section 23-25, 87): deterministic, server-owned
+# acknowledgement text for a successful handoff. Never model-generated —
+# a handoff never spends an extra model call merely to say a human will
+# take over, and never promises a specific response time or staff member.
+HANDOFF_ACKNOWLEDGEMENT_TEXT = (
+    "I'm connecting you with a support specialist who can help with this — "
+    "they'll follow up here."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -445,6 +455,50 @@ def _execute_tool_factory(run: AgentRun):
     return execute_tool
 
 
+def _request_handoff_factory(run: AgentRun):
+    """Bind a pure, stateless handoff-request validator to this run (Phase 9
+    Block 5, section 5-12, 27-29, 68). Deliberately never writes a
+    ``HumanHandoff`` row itself — see ``_complete_run_as_handoff``, which
+    does that atomically with the run's own terminal transition so a
+    racing cancellation can never see one materialize for an already-
+    cancelled run (section 54).
+
+    The model's proposed ``reason_code``/``summary`` are its only inputs;
+    workspace, conversation, agent run, and ticket linkage are always
+    read from this run's own trusted fields, never from provider output
+    (section 7, 10-12, 30-32, 67).
+    """
+
+    def request_handoff(reason_code: str, summary: str) -> dict[str, Any]:
+        from tickets.models import HumanHandoffReason
+
+        if run.conversation_id is None:
+            return {
+                "ok": False,
+                "error_code": "handoff_requires_conversation",
+                "error_message": "This run has no conversation to hand off.",
+            }
+        code = (reason_code or "").strip()
+        if code not in HumanHandoffReason.values:
+            # Section 68: an unrecognized/spoofed reason code fails closed
+            # rather than being silently remapped to a guessed value.
+            return {
+                "ok": False,
+                "error_code": "invalid_handoff_reason",
+                "error_message": "The requested handoff reason is not recognized.",
+            }
+        safe_summary = (summary or "").strip()
+        if not safe_summary:
+            return {
+                "ok": False,
+                "error_code": "invalid_handoff_summary",
+                "error_message": "A handoff summary is required.",
+            }
+        return {"ok": True, "reason_code": code, "summary": safe_summary}
+
+    return request_handoff
+
+
 def _version_budgets(agent_version: AgentVersion) -> Budgets:
     return Budgets(
         max_model_calls=agent_version.max_model_calls,
@@ -511,6 +565,7 @@ def execute_claimed_agent_run(
         is_cancelled=lambda: AgentRun.objects.filter(
             pk=run.pk, status=AgentRunStatus.CANCELLED
         ).exists(),
+        request_handoff=_request_handoff_factory(run),
     )
 
     try:
@@ -524,6 +579,8 @@ def execute_claimed_agent_run(
 
     if result.get("cancelled"):
         return AgentRun.objects.get(pk=run.pk)
+    if result.get("handoff_request"):
+        return _complete_run_as_handoff(run, result)
     if result.get("budget_exceeded"):
         return _budget_exceeded_run(run, reason=result.get("budget_exceeded_reason"), result=result)
     error_code = result.get("safe_error_code")
@@ -535,12 +592,7 @@ def execute_claimed_agent_run(
         # marks it FAILED directly).
         return _pause_run_for_approval(run, result)
     if error_code:
-        return _fail_run(
-            run,
-            code=error_code,
-            message=result.get("safe_error_message") or "The agent run failed.",
-            result=result,
-        )
+        return _fail_or_handoff(run, error_code=error_code, result=result)
     return _complete_run(run, result, output_metadata=output_metadata)
 
 
@@ -701,6 +753,7 @@ def _continue_run_after_resumed_tool(run: AgentRun, *, tool_result_summary: str)
         correlation_id=run.correlation_id or None,
         record_step=_record_step_factory(run),
         execute_tool=_execute_tool_factory(run),
+        request_handoff=_request_handoff_factory(run),
     )
     state = resume_state_after_tool(
         input_message=run.input_message,
@@ -723,6 +776,8 @@ def _continue_run_after_resumed_tool(run: AgentRun, *, tool_result_summary: str)
             run, code="agent_internal_error", message="The agent run failed unexpectedly."
         )
 
+    if result.get("handoff_request"):
+        return _complete_run_as_handoff(run, result)
     if result.get("budget_exceeded"):
         return _budget_exceeded_run(run, reason=result.get("budget_exceeded_reason"), result=result)
     error_code = result.get("safe_error_code")
@@ -733,12 +788,7 @@ def _continue_run_after_resumed_tool(run: AgentRun, *, tool_result_summary: str)
         # max_tool_calls).
         return _pause_run_for_approval(run, result)
     if error_code:
-        return _fail_run(
-            run,
-            code=error_code,
-            message=result.get("safe_error_message") or "The agent run failed.",
-            result=result,
-        )
+        return _fail_or_handoff(run, error_code=error_code, result=result)
     return _complete_run(run, result)
 
 
@@ -764,6 +814,147 @@ def _apply_usage(run: AgentRun, result: Mapping[str, Any]) -> None:
     run.total_tokens = result.get("total_tokens", run.total_tokens)
     cost = result.get("estimated_cost_usd")
     run.estimated_cost_usd = Decimal(str(cost)) if cost is not None else None
+
+
+# ---------------------------------------------------------------------------
+# Human handoff (Phase 9 Block 5, section 4, 13-27, 33-61)
+# ---------------------------------------------------------------------------
+
+
+def _fail_or_handoff(run: AgentRun, *, error_code: str, result: Mapping[str, Any]) -> AgentRun:
+    """The single point where a terminal graph error is classified into
+    FAIL or HANDOFF (section 33-40, 73-74) — never scattered ``if
+    error_code == ...`` branching elsewhere."""
+    action = classify_terminal_failure(
+        error_code=error_code, has_conversation=run.conversation_id is not None
+    )
+    if action is RecoveryAction.HANDOFF:
+        return _handoff_for_runtime_failure(run, error_code=error_code, result=result)
+    return _fail_run(
+        run,
+        code=error_code,
+        message=result.get("safe_error_message") or "The agent run failed.",
+        result=result,
+    )
+
+
+def _handoff_for_runtime_failure(
+    run: AgentRun, *, error_code: str, result: Mapping[str, Any]
+) -> AgentRun:
+    """Section 36, 46, 77: a bounded-retry-exhausted provider failure becomes
+    a deterministic, server-owned handoff — never another LLM call to
+    formulate it (section 87)."""
+    from tickets.models import HumanHandoffReason
+
+    validated = _request_handoff_factory(run)(
+        HumanHandoffReason.RUNTIME_FAILURE,
+        f"Automated recovery after repeated {error_code}.",
+    )
+    if not validated.get("ok"):  # pragma: no cover - defensive, e.g. no conversation
+        return _fail_run(
+            run,
+            code=error_code,
+            message=result.get("safe_error_message") or "The agent run failed.",
+            result=result,
+        )
+    handoff_result = dict(result)
+    handoff_result["handoff_request"] = {
+        "reason_code": validated["reason_code"],
+        "summary": validated["summary"],
+    }
+    return _complete_run_as_handoff(run, handoff_result)
+
+
+def complete_run_via_existing_active_handoff(run: AgentRun) -> AgentRun:
+    """Section 59-61: a conversation that already has an active handoff
+    never starts autonomous execution for a new inbound message. No LLM
+    call, no RAG retrieval, no budget consumed — the run is completed
+    immediately, reusing (never duplicating, section 14-16) the
+    conversation's existing active ``HumanHandoff``."""
+    from tickets.models import HumanHandoffReason
+
+    result: dict[str, Any] = {
+        "model_call_count": run.model_call_count,
+        "step_count": run.step_count,
+        "input_tokens": run.input_tokens,
+        "output_tokens": run.output_tokens,
+        "total_tokens": run.total_tokens,
+        "estimated_cost_usd": (
+            float(run.estimated_cost_usd) if run.estimated_cost_usd is not None else None
+        ),
+        "handoff_request": {
+            "reason_code": HumanHandoffReason.CUSTOMER_REQUESTED,
+            "summary": (
+                "A new message arrived while this conversation was already "
+                "awaiting a support specialist."
+            ),
+        },
+    }
+    return _complete_run_as_handoff(run, result)
+
+
+def _complete_run_as_handoff(run: AgentRun, result: Mapping[str, Any]) -> AgentRun:
+    """Create-or-reuse the ``HumanHandoff`` row and transition the run to
+    ``HANDED_OFF`` atomically (section 54): both happen inside the same
+    ``select_for_update`` block guarded by ``status == RUNNING``, so a
+    racing cancellation that wins the row lock first leaves no orphaned
+    active handoff behind — this function simply returns without ever
+    calling ``create_or_reuse_handoff``."""
+    from tickets.services import create_or_reuse_handoff
+
+    request = result["handoff_request"]
+    with transaction.atomic():
+        locked = AgentRun.objects.select_for_update().get(pk=run.pk)
+        if locked.status != AgentRunStatus.RUNNING:
+            return locked
+        # Every caller (``_execute_handoff_request``'s validated request via
+        # ``_request_handoff_factory``, and ``complete_run_via_existing_active_handoff``)
+        # only ever reaches here for a run that already has a conversation.
+        assert locked.conversation is not None
+        handoff, created = create_or_reuse_handoff(
+            workspace=locked.workspace,
+            conversation=locked.conversation,
+            reason_code=request["reason_code"],
+            safe_summary=request["summary"],
+            agent_run=locked,
+            ticket=locked.ticket,
+            request_id=locked.correlation_id or None,
+        )
+        _apply_usage(locked, result)
+        locked.final_response = HANDOFF_ACKNOWLEDGEMENT_TEXT
+        locked.status = AgentRunStatus.HANDED_OFF
+        locked.completed_at = timezone.now()
+        # Section 25-26, 56: reuses the exact same OneToOne idempotency
+        # invariant as an ordinary successful completion — one acknowledgement
+        # Message per run, guarded by the same lock and status check above.
+        conversation = locked.conversation
+        if conversation is not None and locked.output_message_id is None:
+            from conversations.services import create_ai_agent_message
+
+            message = create_ai_agent_message(
+                workspace=locked.workspace,
+                conversation=conversation,
+                body=HANDOFF_ACKNOWLEDGEMENT_TEXT,
+                metadata={"agent_run_id": str(locked.id), "handoff_id": str(handoff.id)},
+            )
+            locked.output_message = message
+        locked.save()
+        _next_sequence_and_create_step(
+            locked,
+            step_type=AgentStepType.RUN_HANDED_OFF,
+            status=AgentStepStatus.SUCCEEDED,
+            safe_metadata={"handoff_id": str(handoff.id), "reused": not created},
+        )
+        record_event(
+            action=AuditAction.AGENT_RUN_HANDED_OFF,
+            target_type="agent_run",
+            target_id=locked.id,
+            actor=locked.created_by,
+            workspace=locked.workspace,
+            metadata={"agent_run_id": str(locked.id), "handoff_id": str(handoff.id)},
+            request_id=locked.correlation_id or None,
+        )
+    return locked
 
 
 def _complete_run(

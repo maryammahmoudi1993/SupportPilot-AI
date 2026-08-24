@@ -111,6 +111,14 @@ def execute_support_agent_run(run_id: uuid.UUID | str) -> AgentRun:
     if conversation is None or trigger_message is None:
         return services.execute_claimed_agent_run(run)
 
+    # Phase 9 Block 5 (section 59-61): a conversation already actively
+    # escalated to a human never gets a second autonomous execution for a
+    # new inbound message — checked before any RAG/LLM cost is spent.
+    from tickets.selectors import active_handoff_for_conversation
+
+    if active_handoff_for_conversation(conversation=conversation) is not None:
+        return services.complete_run_via_existing_active_handoff(run)
+
     try:
         conversation_context = build_conversation_context(
             workspace=run.workspace,

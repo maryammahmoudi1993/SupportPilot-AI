@@ -9,7 +9,7 @@ from django.http import Http404
 
 from workspaces.models import Workspace
 
-from .models import HumanHandoff, Ticket, TicketPriority
+from .models import HUMAN_HANDOFF_ACTIVE_STATUSES, HumanHandoff, Ticket, TicketPriority
 
 #: Urgent/high priority sort first, independent of alphabetic enum order.
 _PRIORITY_ORDER = Case(
@@ -93,6 +93,17 @@ def handoff_list_for_workspace(
     if conversation_id is not None:
         qs = qs.filter(conversation_id=conversation_id)
     return qs
+
+
+def active_handoff_for_conversation(*, conversation) -> HumanHandoff | None:
+    """Phase 9 Block 5 (section 59-61): the conversation's current pending-or-
+    assigned handoff, if any — used to gate a new autonomous run start.
+    Unscoped by workspace on purpose: callers always already hold a
+    workspace-validated ``Conversation`` instance (its own FK is the tenant
+    boundary), matching ``HumanHandoff.clean()``'s own invariant."""
+    return HumanHandoff.objects.filter(
+        conversation=conversation, status__in=HUMAN_HANDOFF_ACTIVE_STATUSES
+    ).first()
 
 
 def handoff_get_for_workspace_or_404(

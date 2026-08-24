@@ -43,6 +43,12 @@ StepRecorder = Callable[..., None]
 # already-safe results (agents.services wraps tools.execution.execute_tool).
 ExecuteToolFn = Callable[[str, dict[str, Any], str | None], dict[str, Any]]
 CancellationCheck = Callable[[], bool]
+# Phase 9 Block 5: pure, stateless validation only — {"ok": True,
+# "reason_code", "summary"} or {"ok": False, "error_code", "error_message"}.
+# Never persists a HumanHandoff row itself (section 54; see
+# ``agents.services._complete_run_as_handoff``, which does that atomically
+# with the AgentRun's own terminal transition).
+RequestHandoffFn = Callable[[str, str], dict[str, Any]]
 
 
 @dataclass
@@ -61,6 +67,7 @@ class RunContext:
     tool_descriptors: tuple[ToolDescriptor, ...] = ()
     agent_run_id: str | None = None
     is_cancelled: CancellationCheck | None = None
+    request_handoff: RequestHandoffFn | None = None
 
 
 def _prepare_run(ctx: RunContext, state: RuntimeState) -> dict[str, Any]:
@@ -163,17 +170,35 @@ def _generate_response(ctx: RunContext, state: RuntimeState) -> dict[str, Any]:
             "ignored_tool_call_count": max(0, len(response.tool_calls) - 1),
         },
     )
+    # Phase 9 Block 5 (section 9, 44): a handoff request takes deterministic
+    # precedence over any tool call proposed in the same turn — if the model
+    # signals it cannot safely proceed, no tool executes this turn. Only
+    # reachable when the runtime actually supports handoff (``ctx.request_handoff``
+    # is bound); otherwise a handoff-capable response falls through to
+    # ordinary tool/final-response handling like any other model turn.
+    handoff_call = response.handoff_request if ctx.request_handoff is not None else None
+    if handoff_call is not None:
+        ctx.record_step(
+            step_type=AgentStepType.HANDOFF_REQUESTED,
+            status=AgentStepStatus.SUCCEEDED,
+            safe_metadata={"event": "handoff_requested"},
+        )
     # Only the first proposed tool call is honored — one bounded round-trip
     # per model turn keeps the graph's termination argument simple (extra
-    # calls in the same turn are ignored, not queued; section 43).
-    tool_call = response.tool_calls[0] if response.tool_calls else None
-    if response.tool_calls:
+    # calls in the same turn are ignored, not queued; section 43). Ignored
+    # entirely when a handoff was requested this turn (precedence above).
+    tool_call = (
+        None
+        if handoff_call is not None
+        else (response.tool_calls[0] if response.tool_calls else None)
+    )
+    if tool_call is not None:
         ctx.record_step(
             step_type=AgentStepType.REQUEST_NORMALIZED,
             status=AgentStepStatus.SUCCEEDED,
             safe_metadata={
                 "event": "tool_call_received",
-                "tool_key": tool_call.tool_name if tool_call else "",
+                "tool_key": tool_call.tool_name,
                 "tool_calls_received": len(response.tool_calls),
                 "ignored_tool_call_count": max(0, len(response.tool_calls) - 1),
             },
@@ -218,6 +243,11 @@ def _generate_response(ctx: RunContext, state: RuntimeState) -> dict[str, Any]:
             else None
         ),
         "tool_result_summary": None,
+        "pending_handoff_request": (
+            {"reason_code": handoff_call.reason_code, "summary": handoff_call.summary}
+            if handoff_call is not None
+            else None
+        ),
     }
 
 
@@ -231,6 +261,8 @@ def _route_after_generate(ctx: RunContext, state: RuntimeState) -> str:
             and state["model_call_count"] < ctx.budgets.max_model_calls
         )
         return "retry" if can_retry else "end"
+    if state.get("pending_handoff_request") and ctx.request_handoff is not None:
+        return "handoff_request"
     if state.get("pending_tool_call") and ctx.execute_tool is not None:
         return "tool_request"
     return "continue"
@@ -304,6 +336,42 @@ def _route_after_tool(state: RuntimeState) -> str:
     )
 
 
+def _execute_handoff_request(ctx: RunContext, state: RuntimeState) -> dict[str, Any]:
+    """Phase 9 Block 5 (section 8, 24, 41, 54, 87): validate the requested
+    handoff and end the graph immediately — never loop back to
+    ``check_budget``/``generate_response`` (a successful handoff needs no
+    further model call to describe itself). The ``HumanHandoff`` row itself
+    is *not* created here: only ``pending_handoff_request`` is consumed and
+    a validated ``handoff_request`` fact returned, so the actual
+    create-or-reuse write can happen atomically with the ``AgentRun``'s own
+    terminal transition in ``agents.services._complete_run_as_handoff`` —
+    closing the race where a concurrent cancellation could otherwise leave
+    an orphaned active ``HumanHandoff`` for an already-cancelled run.
+    """
+    request = state.get("pending_handoff_request")
+    if not request or ctx.request_handoff is None:  # pragma: no cover - guarded by routing
+        return {"pending_handoff_request": None}
+    if ctx.is_cancelled is not None and ctx.is_cancelled():
+        return {"pending_handoff_request": None, "cancelled": True}
+    validated = ctx.request_handoff(request["reason_code"], request["summary"])
+    update: dict[str, Any] = {
+        "pending_handoff_request": None,
+        "step_count": state["step_count"] + 1,
+    }
+    if not validated.get("ok"):
+        update["safe_error_code"] = validated.get("error_code") or "invalid_handoff_request"
+        update["safe_error_message"] = (
+            validated.get("error_message") or "The handoff request was invalid."
+        )
+        update["retryable_error"] = False
+    else:
+        update["handoff_request"] = {
+            "reason_code": validated["reason_code"],
+            "summary": validated["summary"],
+        }
+    return update
+
+
 def _validate_provider_result(ctx: RunContext, state: RuntimeState) -> dict[str, Any]:
     if not state.get("final_response"):
         return {
@@ -329,6 +397,7 @@ def build_graph(ctx: RunContext):
     graph.add_node("check_budget", lambda s: _check_budget(ctx, s))
     graph.add_node("generate_response", lambda s: _generate_response(ctx, s))
     graph.add_node("execute_tool_call", lambda s: _execute_tool_call(ctx, s))
+    graph.add_node("execute_handoff_request", lambda s: _execute_handoff_request(ctx, s))
     graph.add_node("validate_provider_result", lambda s: _validate_provider_result(ctx, s))
     graph.add_node("finalize_response", lambda s: _finalize_response(ctx, s))
 
@@ -345,6 +414,7 @@ def build_graph(ctx: RunContext):
         {
             "retry": "check_budget",
             "tool_request": "execute_tool_call",
+            "handoff_request": "execute_handoff_request",
             "continue": "validate_provider_result",
             "end": END,
         },
@@ -358,6 +428,9 @@ def build_graph(ctx: RunContext):
         lambda s: _route_after_tool(s),
         {"continue": "check_budget", "end": END},
     )
+    # A handoff request is always terminal for the graph (section 24, 87):
+    # success or failure, it never routes back to check_budget/generate_response.
+    graph.add_edge("execute_handoff_request", END)
     graph.add_conditional_edges(
         "validate_provider_result",
         lambda s: "error" if s.get("safe_error_code") else "ok",
@@ -395,6 +468,7 @@ def build_resume_graph(ctx: RunContext):
     graph.add_node("check_budget", lambda s: _check_budget(ctx, s))
     graph.add_node("generate_response", lambda s: _generate_response(ctx, s))
     graph.add_node("execute_tool_call", lambda s: _execute_tool_call(ctx, s))
+    graph.add_node("execute_handoff_request", lambda s: _execute_handoff_request(ctx, s))
     graph.add_node("validate_provider_result", lambda s: _validate_provider_result(ctx, s))
     graph.add_node("finalize_response", lambda s: _finalize_response(ctx, s))
 
@@ -410,6 +484,7 @@ def build_resume_graph(ctx: RunContext):
         {
             "retry": "check_budget",
             "tool_request": "execute_tool_call",
+            "handoff_request": "execute_handoff_request",
             "continue": "validate_provider_result",
             "end": END,
         },
@@ -419,6 +494,7 @@ def build_resume_graph(ctx: RunContext):
         lambda s: _route_after_tool(s),
         {"continue": "check_budget", "end": END},
     )
+    graph.add_edge("execute_handoff_request", END)
     graph.add_conditional_edges(
         "validate_provider_result",
         lambda s: "error" if s.get("safe_error_code") else "ok",
@@ -482,6 +558,7 @@ def new_run_context(
     tool_descriptors: tuple[ToolDescriptor, ...] = (),
     agent_run_id: str | None = None,
     is_cancelled: CancellationCheck | None = None,
+    request_handoff: RequestHandoffFn | None = None,
 ) -> RunContext:
     return RunContext(
         provider=provider,
@@ -498,4 +575,5 @@ def new_run_context(
         tool_descriptors=tool_descriptors,
         agent_run_id=agent_run_id,
         is_cancelled=is_cancelled,
+        request_handoff=request_handoff,
     )

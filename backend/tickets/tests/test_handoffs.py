@@ -196,6 +196,28 @@ class TestHandoffSelectors:
         )
         assert results == [pending]
 
+    def test_active_handoff_for_conversation_finds_pending_and_assigned(self):
+        conversation = ConversationFactory()
+        pending = HumanHandoffFactory(workspace=conversation.workspace, conversation=conversation)
+        assert selectors.active_handoff_for_conversation(conversation=conversation) == pending
+
+        pending.status = HumanHandoffStatus.ASSIGNED
+        pending.save()
+        assert selectors.active_handoff_for_conversation(conversation=conversation) == pending
+
+    def test_active_handoff_for_conversation_ignores_resolved_and_cancelled(self):
+        conversation = ConversationFactory()
+        HumanHandoffFactory(
+            workspace=conversation.workspace,
+            conversation=conversation,
+            status=HumanHandoffStatus.RESOLVED,
+        )
+        assert selectors.active_handoff_for_conversation(conversation=conversation) is None
+
+    def test_active_handoff_for_conversation_is_none_when_no_handoff_exists(self):
+        conversation = ConversationFactory()
+        assert selectors.active_handoff_for_conversation(conversation=conversation) is None
+
 
 @pytest.mark.django_db
 class TestHumanHandoffApi:

@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .errors import ProviderError
-from .schemas import LLMRequest, LLMResponse, LLMUsage, ToolCallRequest
+from .schemas import LLMRequest, LLMResponse, LLMUsage, NormalizedHandoffRequest, ToolCallRequest
 
 
 @dataclass(frozen=True)
@@ -24,6 +24,9 @@ class FakeLLMScenario:
     Set ``error`` to a ``ProviderError`` subclass to simulate a failure
     instead of a successful response. Set ``tool_calls`` to make this
     scenario propose a bounded tool round-trip instead of a final answer.
+    Set ``handoff_request`` to make this scenario propose a human handoff
+    instead (Phase 9 Block 5) — takes precedence over ``tool_calls`` when
+    both are set, mirroring the real routing precedence.
     """
 
     response: str = "This is a deterministic fake response."
@@ -37,6 +40,7 @@ class FakeLLMScenario:
     error: type[ProviderError] | None = None
     error_message: str | None = None
     tool_calls: tuple[ToolCallRequest, ...] = ()
+    handoff_request: NormalizedHandoffRequest | None = None
 
     @property
     def total_tokens(self) -> int:
@@ -84,4 +88,5 @@ class DeterministicFakeLLMProvider:
             structured_output=scenario.structured_output,
             estimated_cost_usd=scenario.estimated_cost_usd,
             tool_calls=scenario.tool_calls,
+            handoff_request=scenario.handoff_request,
         )

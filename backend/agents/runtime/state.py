@@ -35,6 +35,16 @@ class RuntimeState(TypedDict, total=False):
     # provider call, so the graph can never accumulate an unbounded queue.
     pending_tool_call: dict[str, Any] | None
     tool_result_summary: str | None
+    # Phase 9 Block 5: at most one pending handoff request is carried at a
+    # time, mutually exclusive with ``pending_tool_call`` (handoff takes
+    # precedence — see ``agents.runtime.graph._generate_response``).
+    # ``handoff_request`` (set only once the request has been validated) is
+    # the terminal success signal ``agents.services`` acts on; the actual
+    # ``HumanHandoff`` row is created there, not in the graph, so a racing
+    # run-cancellation can never see one materialize after the run itself
+    # has already been cancelled.
+    pending_handoff_request: dict[str, Any] | None
+    handoff_request: dict[str, Any] | None
 
 
 def initial_state(*, input_message: str) -> RuntimeState:
@@ -59,4 +69,6 @@ def initial_state(*, input_message: str) -> RuntimeState:
         cancelled=False,
         pending_tool_call=None,
         tool_result_summary=None,
+        pending_handoff_request=None,
+        handoff_request=None,
     )

@@ -75,7 +75,44 @@ class NormalizedToolCall:
 ToolCallRequest = NormalizedToolCall
 
 
+@dataclass(frozen=True)
+class NormalizedHandoffRequest:
+    """A vendor-neutral human-handoff request normalized out of a provider
+    response (Phase 9 Block 5, section 7). Deliberately carries only
+    ``reason_code``/``summary`` — no ``workspace_id``, ``assigned_to``,
+    ``staff_role``, ``ticket_id``, or priority field exists on this type at
+    all, so the model has no *shape* through which to propose one (section
+    7, 10-12, 67-68): those facts are always server-derived from the
+    ``AgentRun`` the request belongs to, never from provider output.
+
+    Both fields are the model's untrusted proposal (section 29) — safe
+    plain text, never treated as executable/authoritative until
+    ``agents.services`` validates ``reason_code`` against the server-owned
+    ``HumanHandoffReason`` enum and persists ``summary`` as a bounded,
+    redaction-safe field.
+    """
+
+    reason_code: str
+    summary: str
+
+
 MAX_NORMALIZED_TOOL_ARGUMENT_BYTES = 8000
+MAX_NORMALIZED_HANDOFF_SUMMARY_CHARS = 2000
+
+
+def normalize_handoff_request(*, reason_code: Any, summary: Any) -> NormalizedHandoffRequest | None:
+    """Shape-only normalization (section 28-29): clamps to safe plain-text
+    strings. The actual server-owned reason-code taxonomy is enforced later,
+    in ``agents.services``, not here — this function only guarantees the
+    orchestration graph never carries a non-string/oversized value.
+    """
+    if not isinstance(reason_code, str) or not isinstance(summary, str):
+        return None
+    reason_code = reason_code.strip()
+    summary = summary.strip()[:MAX_NORMALIZED_HANDOFF_SUMMARY_CHARS]
+    if not reason_code or not summary:
+        return None
+    return NormalizedHandoffRequest(reason_code=reason_code, summary=summary)
 
 
 def normalize_tool_call(
@@ -128,3 +165,9 @@ class LLMResponse:
     structured_output: dict[str, Any] | None = None
     estimated_cost_usd: float | None = None
     tool_calls: tuple[NormalizedToolCall, ...] = ()
+    # Phase 9 Block 5: a normalized human-handoff request, if the model
+    # proposed one this turn. Independent of ``tool_calls`` — a handoff is
+    # not a tool execution (it never creates a ToolExecution row, section
+    # 41) — and takes precedence over any tool call in the same response
+    # (section 9; see ``agents.runtime.graph._generate_response``).
+    handoff_request: NormalizedHandoffRequest | None = None
