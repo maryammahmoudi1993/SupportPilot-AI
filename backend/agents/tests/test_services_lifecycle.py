@@ -172,6 +172,10 @@ class TestCancelAgentRun:
             AgentRunStatus.FAILED,
             AgentRunStatus.CANCELLED,
             AgentRunStatus.BUDGET_EXCEEDED,
+            # Phase 9 Block 6 (section 40): HANDED_OFF is a Block 5 terminal
+            # status added after this parametrize list was first written —
+            # it must be just as unreopenable as any other terminal state.
+            AgentRunStatus.HANDED_OFF,
         ],
     )
     def test_terminal_run_cannot_be_cancelled_again(self, status):

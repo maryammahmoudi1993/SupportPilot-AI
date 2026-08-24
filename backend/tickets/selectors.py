@@ -9,7 +9,7 @@ from django.http import Http404
 
 from workspaces.models import Workspace
 
-from .models import Ticket, TicketPriority
+from .models import HUMAN_HANDOFF_ACTIVE_STATUSES, HumanHandoff, Ticket, TicketPriority
 
 #: Urgent/high priority sort first, independent of alphabetic enum order.
 _PRIORITY_ORDER = Case(
@@ -77,3 +77,43 @@ def ticket_get_by_id_for_workspace(*, workspace: Workspace, ticket_id: str) -> T
         .select_related("customer", "assigned_to", "assigned_to__user", "conversation")
         .first()
     )
+
+
+def handoff_list_for_workspace(
+    *,
+    workspace: Workspace,
+    status: str | None = None,
+    conversation_id: UUID | str | None = None,
+) -> QuerySet[HumanHandoff]:
+    qs = HumanHandoff.objects.filter(workspace=workspace).select_related(
+        "conversation", "agent_run", "ticket", "assigned_to", "assigned_to__user"
+    )
+    if status is not None:
+        qs = qs.filter(status=status)
+    if conversation_id is not None:
+        qs = qs.filter(conversation_id=conversation_id)
+    return qs
+
+
+def active_handoff_for_conversation(*, conversation) -> HumanHandoff | None:
+    """Phase 9 Block 5 (section 59-61): the conversation's current pending-or-
+    assigned handoff, if any — used to gate a new autonomous run start.
+    Unscoped by workspace on purpose: callers always already hold a
+    workspace-validated ``Conversation`` instance (its own FK is the tenant
+    boundary), matching ``HumanHandoff.clean()``'s own invariant."""
+    return HumanHandoff.objects.filter(
+        conversation=conversation, status__in=HUMAN_HANDOFF_ACTIVE_STATUSES
+    ).first()
+
+
+def handoff_get_for_workspace_or_404(
+    *, workspace: Workspace, handoff_id: UUID | str
+) -> HumanHandoff:
+    handoff = (
+        HumanHandoff.objects.filter(workspace=workspace, pk=handoff_id)
+        .select_related("conversation", "agent_run", "ticket", "assigned_to", "assigned_to__user")
+        .first()
+    )
+    if handoff is None:
+        raise Http404("Handoff not found.")
+    return handoff

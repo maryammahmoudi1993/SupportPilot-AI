@@ -30,6 +30,7 @@ from workspaces.models import Workspace
 
 from .contracts import Tool, ToolExecutionContext
 from .errors import (
+    ToolApprovalActionChangedError,
     ToolApprovalCancelledError,
     ToolApprovalExpiredError,
     ToolApprovalRejectedError,
@@ -648,7 +649,12 @@ def resume_after_approval(
             record_step(step_type=step_type, status=status, **kwargs)
 
     execution = ToolExecution.objects.select_related(
-        "workspace", "agent_run", "agent_version", "tool_definition", "tool_binding"
+        "workspace",
+        "agent_run",
+        "agent_version",
+        "tool_definition",
+        "tool_binding",
+        "approval_request",
     ).get(pk=tool_execution_id)
 
     claimed = _claim_resume(execution)
@@ -663,6 +669,28 @@ def resume_after_approval(
             )
         _raise_policy_terminal_outcome(execution)
     execution = claimed
+
+    # Frozen-action verification (section 8-9, 94, 125-126): the approval
+    # authorizes exactly the argument fingerprint recorded on the
+    # ApprovalRequest at request time. A row that somehow reaches resume
+    # with a different fingerprint (only reachable through direct DB
+    # tampering — no application code path ever rewrites
+    # ``arguments_fingerprint`` on a WAITING_FOR_APPROVAL row) is never
+    # "repaired" or executed against a guessed value; it fails closed with
+    # zero handler/provider calls.
+    approval_request = getattr(execution, "approval_request", None)
+    if (
+        approval_request is not None
+        and approval_request.arguments_fingerprint
+        and approval_request.arguments_fingerprint != execution.arguments_fingerprint
+    ):
+        _finalize_failure(
+            execution,
+            status=ToolExecutionStatus.FAILED,
+            code="approval_action_changed",
+            message="The approved action no longer matches what was requested.",
+        )
+        raise ToolApprovalActionChangedError()
 
     tool = tool_registry.get(execution.tool_definition.key)
     if (

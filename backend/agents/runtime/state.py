@@ -29,11 +29,22 @@ class RuntimeState(TypedDict, total=False):
     safe_error_code: str | None
     safe_error_message: str | None
     retryable_error: bool
+    cancelled: bool
     # Bounded tool round-trip (section 42-43): at most one pending tool call
     # is carried at a time and it is always cleared before the next
     # provider call, so the graph can never accumulate an unbounded queue.
     pending_tool_call: dict[str, Any] | None
     tool_result_summary: str | None
+    # Phase 9 Block 5: at most one pending handoff request is carried at a
+    # time, mutually exclusive with ``pending_tool_call`` (handoff takes
+    # precedence — see ``agents.runtime.graph._generate_response``).
+    # ``handoff_request`` (set only once the request has been validated) is
+    # the terminal success signal ``agents.services`` acts on; the actual
+    # ``HumanHandoff`` row is created there, not in the graph, so a racing
+    # run-cancellation can never see one materialize after the run itself
+    # has already been cancelled.
+    pending_handoff_request: dict[str, Any] | None
+    handoff_request: dict[str, Any] | None
 
 
 def initial_state(*, input_message: str) -> RuntimeState:
@@ -55,6 +66,9 @@ def initial_state(*, input_message: str) -> RuntimeState:
         safe_error_code=None,
         safe_error_message=None,
         retryable_error=False,
+        cancelled=False,
         pending_tool_call=None,
         tool_result_summary=None,
+        pending_handoff_request=None,
+        handoff_request=None,
     )

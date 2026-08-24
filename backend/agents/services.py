@@ -9,14 +9,13 @@ reopening safe (see ``docs/adr`` and section 18/26 of the Phase 5 brief).
 
 from __future__ import annotations
 
-import json
 import logging
 import uuid
 from collections.abc import Mapping
 from decimal import Decimal
 from typing import Any
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from accounts.models import User
@@ -29,6 +28,7 @@ from .errors import (
     AgentVersionNotPublishableError,
     AgentVersionNotPublishedError,
 )
+from .failure_classification import RecoveryAction, classify_terminal_failure
 from .models import (
     AGENT_RUN_TERMINAL_STATUSES,
     AgentDefinition,
@@ -42,6 +42,7 @@ from .models import (
 )
 from .providers.config import get_llm_provider
 from .providers.errors import ProviderConfigurationError
+from .providers.schemas import LLMMessage, ToolDescriptor
 from .runtime.budgets import Budgets
 from .runtime.graph import (
     RunContext,
@@ -50,10 +51,21 @@ from .runtime.graph import (
     run_graph,
     run_resume_graph,
 )
+from .tool_catalog import ToolCatalogConfigurationError, get_bound_tool_descriptors
+from .tool_runtime import ToolResultContext, ToolResultStatus
 
 logger = logging.getLogger("supportpilot")
 
 MAX_INPUT_MESSAGE_CHARS = 8000
+
+# Phase 9 Block 5 (section 23-25, 87): deterministic, server-owned
+# acknowledgement text for a successful handoff. Never model-generated —
+# a handoff never spends an extra model call merely to say a human will
+# take over, and never promises a specific response time or staff member.
+HANDOFF_ACKNOWLEDGEMENT_TEXT = (
+    "I'm connecting you with a support specialist who can help with this — "
+    "they'll follow up here."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -191,24 +203,51 @@ def create_agent_run(
     trigger: str,
     conversation=None,
     ticket=None,
+    trigger_message=None,
     input_metadata: dict[str, Any] | None = None,
     request_id: str | None = None,
 ) -> AgentRun:
+    """Create (or, for a ``trigger_message``-triggered run, idempotently
+    reuse) an ``AgentRun``.
+
+    Phase 9 (section 18-19, 110-111): a ``trigger_message`` makes "one
+    logical AgentRun per triggering customer message" a database invariant
+    (``AgentRun.trigger_message`` is a ``OneToOneField``), not just an
+    application-level check. Two callers racing to start a run for the same
+    message — an HTTP retry, a redelivered webhook, concurrent workers —
+    resolve to exactly one created run; the loser returns the winner's row
+    unchanged rather than raising or creating a second run.
+    """
     if agent_version.status != AgentVersionStatus.PUBLISHED:
         raise AgentVersionNotPublishedError()
     with transaction.atomic():
-        run = AgentRun.objects.create(
-            workspace=workspace,
-            agent_version=agent_version,
-            conversation=conversation,
-            ticket=ticket,
-            trigger=trigger,
-            status=AgentRunStatus.PENDING,
-            input_message=input_message[:MAX_INPUT_MESSAGE_CHARS],
-            input_metadata=input_metadata or {},
-            correlation_id=request_id or "",
-            created_by=actor,
-        )
+        if trigger_message is not None:
+            existing = (
+                AgentRun.objects.select_for_update().filter(trigger_message=trigger_message).first()
+            )
+            if existing is not None:
+                return existing
+        try:
+            with transaction.atomic():
+                run = AgentRun.objects.create(
+                    workspace=workspace,
+                    agent_version=agent_version,
+                    conversation=conversation,
+                    ticket=ticket,
+                    trigger_message=trigger_message,
+                    trigger=trigger,
+                    status=AgentRunStatus.PENDING,
+                    input_message=input_message[:MAX_INPUT_MESSAGE_CHARS],
+                    input_metadata=input_metadata or {},
+                    correlation_id=request_id or "",
+                    created_by=actor,
+                )
+        except IntegrityError:
+            if trigger_message is None:  # pragma: no cover - defensive, unreachable
+                raise
+            # Lost a concurrent race for this trigger_message's one-run slot
+            # (no existing row to lock before the create above).
+            return AgentRun.objects.get(trigger_message=trigger_message)
         transaction.on_commit(lambda: _dispatch_run(run.id))
     return run
 
@@ -275,15 +314,32 @@ def cancel_agent_run(
             # Imported locally (like the tools imports below) to avoid a
             # module-level agents<->tools/approvals import cycle.
             from approvals.services import cancel_approval_for_execution
-            from tools.models import ToolExecutionStatus
+            from tools.models import ToolExecution, ToolExecutionStatus
 
             for execution in locked.tool_executions.filter(
                 status=ToolExecutionStatus.WAITING_FOR_APPROVAL
             ):
                 cancel_approval_for_execution(execution=execution, reason="run_cancelled")
-                execution.status = ToolExecutionStatus.CANCELLED
-                execution.completed_at = timezone.now()
-                execution.save(update_fields=["status", "completed_at", "updated_at"])
+                # Section 21, 130: a conditional UPDATE, not a blind
+                # overwrite — a racing approve-resume may have already
+                # claimed this exact row (WAITING_FOR_APPROVAL -> RUNNING,
+                # possibly all the way to SUCCEEDED) between the queryset
+                # above and here. This never clobbers that outcome back to
+                # CANCELLED; it only cancels a row still genuinely waiting.
+                ToolExecution.objects.filter(
+                    pk=execution.pk, status=ToolExecutionStatus.WAITING_FOR_APPROVAL
+                ).update(
+                    status=ToolExecutionStatus.CANCELLED,
+                    completed_at=timezone.now(),
+                    updated_at=timezone.now(),
+                )
+        # Section 113: a still-active human handoff for a now-cancelled run
+        # becomes non-actionable too — imported locally to avoid a
+        # module-level agents<->tickets import cycle, matching the approvals
+        # import above.
+        from tickets.services import cancel_handoffs_for_run
+
+        cancel_handoffs_for_run(agent_run=locked, reason="run_cancelled")
     return locked
 
 
@@ -314,13 +370,29 @@ def _record_step_factory(run: AgentRun):
     return record_step
 
 
+def record_agent_operational_step(
+    *, run: AgentRun, event: str, safe_metadata: dict[str, Any]
+) -> None:
+    """Persist a safe orchestration event without storing prompt content."""
+    _record_step_factory(run)(
+        step_type=AgentStepType.REQUEST_NORMALIZED,
+        status=AgentStepStatus.SUCCEEDED,
+        safe_metadata={"event": event, **safe_metadata},
+    )
+
+
 def _execute_tool_factory(run: AgentRun):
     """Bind ``tools.execution.execute_tool`` to this run and normalize every
     ``ToolError`` into the safe outcome dict the graph expects — the
     runtime never sees a raw tool exception (section 27, 44-45)."""
 
     def execute_tool(tool_name: str, arguments: dict[str, Any], idempotency_key: str | None):
-        from tools.errors import ToolError
+        from tools.errors import (
+            ToolApprovalRequiredError,
+            ToolBudgetExceededError,
+            ToolError,
+            ToolPolicyDeniedError,
+        )
         from tools.execution import execute_tool as run_tool
 
         try:
@@ -331,14 +403,100 @@ def _execute_tool_factory(run: AgentRun):
                 idempotency_key=idempotency_key,
                 record_step=_record_step_factory(run),
             )
+        except ToolApprovalRequiredError as exc:
+            return {
+                "approval_required": True,
+                "error_code": exc.code,
+                "error_message": exc.safe_message,
+            }
+        except ToolBudgetExceededError:
+            return {"budget_exceeded": True, "budget_reason": "max_tool_calls_reached"}
         except ToolError as exc:
-            return {"succeeded": False, "error_code": exc.code, "error_message": exc.safe_message}
+            terminal_codes = {
+                "tool_configuration_error",
+                "tool_invalid_output",
+                "tool_idempotency_conflict",
+                "tool_execution_in_progress",
+                "tool_run_not_executable",
+                "policy_evaluation_failed",
+            }
+            if exc.code in terminal_codes:
+                return {
+                    "terminal": True,
+                    "error_code": exc.code,
+                    "error_message": exc.safe_message,
+                }
+            status: ToolResultStatus = (
+                "denied" if isinstance(exc, ToolPolicyDeniedError) else "failed"
+            )
+            result_context = ToolResultContext(
+                tool_key=tool_name,
+                status=status,
+                error_code=exc.code,
+            )
+            return {
+                "model_result": result_context.as_model_message(),
+                "error_code": exc.code,
+                "result_status": status,
+            }
+        result_context = ToolResultContext(
+            tool_key=tool_name,
+            status="succeeded",
+            result=result.output,
+            tool_execution_id=str(result.execution.id),
+        )
         return {
-            "succeeded": True,
-            "output_summary": json.dumps(result.output, default=str)[:500],
+            "model_result": result_context.as_model_message(),
+            "tool_execution_id": str(result.execution.id),
+            "result_status": "succeeded",
+            "reused": result.reused,
         }
 
     return execute_tool
+
+
+def _request_handoff_factory(run: AgentRun):
+    """Bind a pure, stateless handoff-request validator to this run (Phase 9
+    Block 5, section 5-12, 27-29, 68). Deliberately never writes a
+    ``HumanHandoff`` row itself — see ``_complete_run_as_handoff``, which
+    does that atomically with the run's own terminal transition so a
+    racing cancellation can never see one materialize for an already-
+    cancelled run (section 54).
+
+    The model's proposed ``reason_code``/``summary`` are its only inputs;
+    workspace, conversation, agent run, and ticket linkage are always
+    read from this run's own trusted fields, never from provider output
+    (section 7, 10-12, 30-32, 67).
+    """
+
+    def request_handoff(reason_code: str, summary: str) -> dict[str, Any]:
+        from tickets.models import HumanHandoffReason
+
+        if run.conversation_id is None:
+            return {
+                "ok": False,
+                "error_code": "handoff_requires_conversation",
+                "error_message": "This run has no conversation to hand off.",
+            }
+        code = (reason_code or "").strip()
+        if code not in HumanHandoffReason.values:
+            # Section 68: an unrecognized/spoofed reason code fails closed
+            # rather than being silently remapped to a guessed value.
+            return {
+                "ok": False,
+                "error_code": "invalid_handoff_reason",
+                "error_message": "The requested handoff reason is not recognized.",
+            }
+        safe_summary = (summary or "").strip()
+        if not safe_summary:
+            return {
+                "ok": False,
+                "error_code": "invalid_handoff_summary",
+                "error_message": "A handoff summary is required.",
+            }
+        return {"ok": True, "reason_code": code, "summary": safe_summary}
+
+    return request_handoff
 
 
 def _version_budgets(agent_version: AgentVersion) -> Budgets:
@@ -363,8 +521,26 @@ def execute_agent_run(run_id: uuid.UUID | str) -> AgentRun:
     run = claim_agent_run(run_id)
     if run is None:
         return AgentRun.objects.get(pk=run_id)
+    return execute_claimed_agent_run(run)
+
+
+def execute_claimed_agent_run(
+    run: AgentRun,
+    *,
+    initial_messages: tuple[LLMMessage, ...] | None = None,
+    output_metadata: dict[str, Any] | None = None,
+    tool_descriptors: tuple[ToolDescriptor, ...] | None = None,
+) -> AgentRun:
+    """Execute a run already claimed by the orchestration boundary."""
 
     agent_version = run.agent_version
+    if tool_descriptors is None:
+        try:
+            tool_descriptors = get_bound_tool_descriptors(
+                agent_version=agent_version, workspace=run.workspace
+            )
+        except ToolCatalogConfigurationError as exc:
+            return _fail_run(run, code=exc.code, message=exc.safe_message)
     try:
         provider = (
             get_llm_provider() if agent_version.provider == "fake" else _provider_for(agent_version)
@@ -383,6 +559,13 @@ def execute_agent_run(run_id: uuid.UUID | str) -> AgentRun:
         correlation_id=run.correlation_id or None,
         record_step=_record_step_factory(run),
         execute_tool=_execute_tool_factory(run),
+        initial_messages=initial_messages,
+        tool_descriptors=tool_descriptors,
+        agent_run_id=str(run.id),
+        is_cancelled=lambda: AgentRun.objects.filter(
+            pk=run.pk, status=AgentRunStatus.CANCELLED
+        ).exists(),
+        request_handoff=_request_handoff_factory(run),
     )
 
     try:
@@ -394,6 +577,10 @@ def execute_agent_run(run_id: uuid.UUID | str) -> AgentRun:
             run, code="agent_internal_error", message="The agent run failed unexpectedly."
         )
 
+    if result.get("cancelled"):
+        return AgentRun.objects.get(pk=run.pk)
+    if result.get("handoff_request"):
+        return _complete_run_as_handoff(run, result)
     if result.get("budget_exceeded"):
         return _budget_exceeded_run(run, reason=result.get("budget_exceeded_reason"), result=result)
     error_code = result.get("safe_error_code")
@@ -405,13 +592,13 @@ def execute_agent_run(run_id: uuid.UUID | str) -> AgentRun:
         # marks it FAILED directly).
         return _pause_run_for_approval(run, result)
     if error_code:
-        return _fail_run(
-            run,
-            code=error_code,
-            message=result.get("safe_error_message") or "The agent run failed.",
-            result=result,
-        )
-    return _complete_run(run, result)
+        return _fail_or_handoff(run, error_code=error_code, result=result)
+    return _complete_run(run, result, output_metadata=output_metadata)
+
+
+def fail_claimed_agent_run(*, run: AgentRun, code: str, message: str) -> AgentRun:
+    """Fail a claimed run through the normal safe terminal transition."""
+    return _fail_run(run, code=code, message=message)
 
 
 def _pause_run_for_approval(run: AgentRun, result: Mapping[str, Any]) -> AgentRun:
@@ -449,24 +636,56 @@ def _claim_run_for_resume(run_id) -> AgentRun | None:
     return run
 
 
+# Phase 9 Block 4 (section 41-45, 127): the safe, model-visible outcome codes
+# a resumed run's continuation may carry for a decision that never executes a
+# handler. Deliberately not the tool's own error taxonomy — a rejected or
+# expired action is a business/authorization outcome, not a tool failure.
+_CONTINUATION_OUTCOME_CODES: dict[str, str] = {
+    "rejected": "approval_rejected",
+    "expired": "approval_expired",
+}
+
+
 def resume_agent_run_after_approval(approval_request_id: uuid.UUID | str) -> str:
-    """Resume the exact paused tool action an approval just granted, then
-    continue the run's bounded graph from where it left off.
+    """Continue the run an approval decision (or its expiry) just resolved,
+    from the exact paused tool-call boundary — never a new run, never a
+    replay of the original customer request (section 4-6).
+
+    * **Approved**: execute the one frozen ``ToolExecution`` the approval
+      references, then feed its (untrusted, section 36) result to a bounded
+      LLM follow-up.
+    * **Rejected** / **Expired**: no handler is ever invoked; the LLM
+      follow-up instead sees a safe, structured denial outcome (section
+      41-47) — never the approver's private comment (section 43).
+    * **Cancelled** (or anything else): the underlying run was already
+      terminated by ``cancel_agent_run`` in the same transaction that
+      cancelled this approval (section 50-51) — nothing to continue.
 
     Grant is single-use and single-action scoped (section 156-158): this
     function only ever touches the one ``ToolExecution`` the approval
-    references, never any other tool call, run, or workspace.
+    references, never any other tool call, run, or workspace. Safe to call
+    more than once for the same ``approval_request_id`` (duplicate Celery
+    delivery, section 24, 95) — the resume claim below is the single point
+    of idempotency for *all* of these outcomes, not just the approved one.
     """
     from approvals.models import ApprovalRequest, ApprovalStatus
     from tools.errors import ToolError
     from tools.execution import resume_after_approval
 
     approval = ApprovalRequest.objects.select_related(
-        "tool_execution", "tool_execution__agent_run", "tool_execution__agent_run__agent_version"
+        "tool_execution",
+        "tool_execution__agent_run",
+        "tool_execution__agent_run__agent_version",
+        "tool_execution__tool_definition",
     ).get(pk=approval_request_id)
-    if approval.status != ApprovalStatus.APPROVED:
-        # Rejected/expired/cancelled, or a race already handled elsewhere —
-        # nothing to resume (section 92-93).
+    if approval.status not in (
+        ApprovalStatus.APPROVED,
+        ApprovalStatus.REJECTED,
+        ApprovalStatus.EXPIRED,
+    ):
+        # PENDING (should never reach here) or CANCELLED — a cancelled
+        # approval's run was already terminated, never resumed to the LLM
+        # (section 51).
         return "skipped"
 
     run = approval.tool_execution.agent_run
@@ -474,17 +693,44 @@ def resume_agent_run_after_approval(approval_request_id: uuid.UUID | str) -> str
     if claimed is None:
         return "already_resumed"
     run = claimed
+    tool_key = approval.tool_execution.tool_definition.key
+    record_step = _record_step_factory(run)
 
-    try:
-        tool_result = resume_after_approval(
+    if approval.status == ApprovalStatus.APPROVED:
+        record_step(step_type=AgentStepType.APPROVAL_APPROVED, status=AgentStepStatus.SUCCEEDED)
+        try:
+            tool_result = resume_after_approval(
+                tool_execution_id=str(approval.tool_execution_id), record_step=record_step
+            )
+        except ToolError as exc:
+            return _fail_run(run, code=exc.code, message=exc.safe_message).status
+        # Section 35-36, 60: the approved result is normalized through the
+        # same safe, untrusted-data ``ToolResultContext`` wrapper the
+        # ordinary ALLOW path uses — a human approving the *action* grants
+        # it no special trust as *data* fed back to the model.
+        tool_result_summary = ToolResultContext(
+            tool_key=tool_key,
+            status="succeeded",
+            result=tool_result.output,
             tool_execution_id=str(approval.tool_execution_id),
-            record_step=_record_step_factory(run),
+        ).as_model_message()
+    else:
+        outcome = "rejected" if approval.status == ApprovalStatus.REJECTED else "expired"
+        error_code = _CONTINUATION_OUTCOME_CODES[outcome]
+        step_type = (
+            AgentStepType.APPROVAL_REJECTED
+            if outcome == "rejected"
+            else AgentStepType.APPROVAL_EXPIRED
         )
-    except ToolError as exc:
-        return _fail_run(run, code=exc.code, message=exc.safe_message).status
+        record_step(step_type=step_type, status=AgentStepStatus.SUCCEEDED)
+        # No handler is ever invoked for a rejected/expired action (section
+        # 41, 46-47, 58-59) — the LLM only ever sees a safe denial code,
+        # never the approver's private comment (section 43, 76, 103).
+        tool_result_summary = ToolResultContext(
+            tool_key=tool_key, status="denied", error_code=error_code
+        ).as_model_message()
 
-    outcome_summary = json.dumps(tool_result.output, default=str)[:500]
-    return _continue_run_after_resumed_tool(run, tool_result_summary=outcome_summary).status
+    return _continue_run_after_resumed_tool(run, tool_result_summary=tool_result_summary).status
 
 
 def _continue_run_after_resumed_tool(run: AgentRun, *, tool_result_summary: str) -> AgentRun:
@@ -507,6 +753,7 @@ def _continue_run_after_resumed_tool(run: AgentRun, *, tool_result_summary: str)
         correlation_id=run.correlation_id or None,
         record_step=_record_step_factory(run),
         execute_tool=_execute_tool_factory(run),
+        request_handoff=_request_handoff_factory(run),
     )
     state = resume_state_after_tool(
         input_message=run.input_message,
@@ -529,6 +776,8 @@ def _continue_run_after_resumed_tool(run: AgentRun, *, tool_result_summary: str)
             run, code="agent_internal_error", message="The agent run failed unexpectedly."
         )
 
+    if result.get("handoff_request"):
+        return _complete_run_as_handoff(run, result)
     if result.get("budget_exceeded"):
         return _budget_exceeded_run(run, reason=result.get("budget_exceeded_reason"), result=result)
     error_code = result.get("safe_error_code")
@@ -539,12 +788,7 @@ def _continue_run_after_resumed_tool(run: AgentRun, *, tool_result_summary: str)
         # max_tool_calls).
         return _pause_run_for_approval(run, result)
     if error_code:
-        return _fail_run(
-            run,
-            code=error_code,
-            message=result.get("safe_error_message") or "The agent run failed.",
-            result=result,
-        )
+        return _fail_or_handoff(run, error_code=error_code, result=result)
     return _complete_run(run, result)
 
 
@@ -572,7 +816,153 @@ def _apply_usage(run: AgentRun, result: Mapping[str, Any]) -> None:
     run.estimated_cost_usd = Decimal(str(cost)) if cost is not None else None
 
 
-def _complete_run(run: AgentRun, result: Mapping[str, Any]) -> AgentRun:
+# ---------------------------------------------------------------------------
+# Human handoff (Phase 9 Block 5, section 4, 13-27, 33-61)
+# ---------------------------------------------------------------------------
+
+
+def _fail_or_handoff(run: AgentRun, *, error_code: str, result: Mapping[str, Any]) -> AgentRun:
+    """The single point where a terminal graph error is classified into
+    FAIL or HANDOFF (section 33-40, 73-74) — never scattered ``if
+    error_code == ...`` branching elsewhere."""
+    action = classify_terminal_failure(
+        error_code=error_code, has_conversation=run.conversation_id is not None
+    )
+    if action is RecoveryAction.HANDOFF:
+        return _handoff_for_runtime_failure(run, error_code=error_code, result=result)
+    return _fail_run(
+        run,
+        code=error_code,
+        message=result.get("safe_error_message") or "The agent run failed.",
+        result=result,
+    )
+
+
+def _handoff_for_runtime_failure(
+    run: AgentRun, *, error_code: str, result: Mapping[str, Any]
+) -> AgentRun:
+    """Section 36, 46, 77: a bounded-retry-exhausted provider failure becomes
+    a deterministic, server-owned handoff — never another LLM call to
+    formulate it (section 87)."""
+    from tickets.models import HumanHandoffReason
+
+    validated = _request_handoff_factory(run)(
+        HumanHandoffReason.RUNTIME_FAILURE,
+        f"Automated recovery after repeated {error_code}.",
+    )
+    if not validated.get("ok"):  # pragma: no cover - defensive, e.g. no conversation
+        return _fail_run(
+            run,
+            code=error_code,
+            message=result.get("safe_error_message") or "The agent run failed.",
+            result=result,
+        )
+    handoff_result = dict(result)
+    handoff_result["handoff_request"] = {
+        "reason_code": validated["reason_code"],
+        "summary": validated["summary"],
+    }
+    return _complete_run_as_handoff(run, handoff_result)
+
+
+def complete_run_via_existing_active_handoff(run: AgentRun) -> AgentRun:
+    """Section 59-61: a conversation that already has an active handoff
+    never starts autonomous execution for a new inbound message. No LLM
+    call, no RAG retrieval, no budget consumed — the run is completed
+    immediately, reusing (never duplicating, section 14-16) the
+    conversation's existing active ``HumanHandoff``."""
+    from tickets.models import HumanHandoffReason
+
+    result: dict[str, Any] = {
+        "model_call_count": run.model_call_count,
+        "step_count": run.step_count,
+        "input_tokens": run.input_tokens,
+        "output_tokens": run.output_tokens,
+        "total_tokens": run.total_tokens,
+        "estimated_cost_usd": (
+            float(run.estimated_cost_usd) if run.estimated_cost_usd is not None else None
+        ),
+        "handoff_request": {
+            "reason_code": HumanHandoffReason.CUSTOMER_REQUESTED,
+            "summary": (
+                "A new message arrived while this conversation was already "
+                "awaiting a support specialist."
+            ),
+        },
+    }
+    return _complete_run_as_handoff(run, result)
+
+
+def _complete_run_as_handoff(run: AgentRun, result: Mapping[str, Any]) -> AgentRun:
+    """Create-or-reuse the ``HumanHandoff`` row and transition the run to
+    ``HANDED_OFF`` atomically (section 54): both happen inside the same
+    ``select_for_update`` block guarded by ``status == RUNNING``, so a
+    racing cancellation that wins the row lock first leaves no orphaned
+    active handoff behind — this function simply returns without ever
+    calling ``create_or_reuse_handoff``."""
+    from tickets.services import create_or_reuse_handoff
+
+    request = result["handoff_request"]
+    with transaction.atomic():
+        locked = AgentRun.objects.select_for_update().get(pk=run.pk)
+        if locked.status != AgentRunStatus.RUNNING:
+            return locked
+        # Every caller (``_execute_handoff_request``'s validated request via
+        # ``_request_handoff_factory``, and ``complete_run_via_existing_active_handoff``)
+        # only ever reaches here for a run that already has a conversation.
+        assert locked.conversation is not None
+        handoff, created = create_or_reuse_handoff(
+            workspace=locked.workspace,
+            conversation=locked.conversation,
+            reason_code=request["reason_code"],
+            safe_summary=request["summary"],
+            agent_run=locked,
+            ticket=locked.ticket,
+            request_id=locked.correlation_id or None,
+        )
+        _apply_usage(locked, result)
+        locked.final_response = HANDOFF_ACKNOWLEDGEMENT_TEXT
+        locked.status = AgentRunStatus.HANDED_OFF
+        locked.completed_at = timezone.now()
+        # Section 25-26, 56: reuses the exact same OneToOne idempotency
+        # invariant as an ordinary successful completion — one acknowledgement
+        # Message per run, guarded by the same lock and status check above.
+        conversation = locked.conversation
+        if conversation is not None and locked.output_message_id is None:
+            from conversations.services import create_ai_agent_message
+
+            message = create_ai_agent_message(
+                workspace=locked.workspace,
+                conversation=conversation,
+                body=HANDOFF_ACKNOWLEDGEMENT_TEXT,
+                metadata={"agent_run_id": str(locked.id), "handoff_id": str(handoff.id)},
+            )
+            locked.output_message = message
+        locked.save()
+        _next_sequence_and_create_step(
+            locked,
+            step_type=AgentStepType.RUN_HANDED_OFF,
+            status=AgentStepStatus.SUCCEEDED,
+            safe_metadata={"handoff_id": str(handoff.id), "reused": not created},
+        )
+        record_event(
+            action=AuditAction.AGENT_RUN_HANDED_OFF,
+            target_type="agent_run",
+            target_id=locked.id,
+            actor=locked.created_by,
+            workspace=locked.workspace,
+            metadata={"agent_run_id": str(locked.id), "handoff_id": str(handoff.id)},
+            request_id=locked.correlation_id or None,
+        )
+    return locked
+
+
+def _complete_run(
+    run: AgentRun,
+    result: Mapping[str, Any],
+    *,
+    output_metadata: dict[str, Any] | None = None,
+) -> AgentRun:
     with transaction.atomic():
         locked = AgentRun.objects.select_for_update().get(pk=run.pk)
         if locked.status != AgentRunStatus.RUNNING:
@@ -581,6 +971,24 @@ def _complete_run(run: AgentRun, result: Mapping[str, Any]) -> AgentRun:
         locked.final_response = result.get("final_response", "")
         locked.status = AgentRunStatus.SUCCEEDED
         locked.completed_at = timezone.now()
+        # Phase 9 (section 54-56): persist the customer-visible response as a
+        # Conversation Message, not only on the run row. Guarded by the
+        # ``status != RUNNING`` check above and the row lock: a worker retry
+        # that re-enters this function for an already-SUCCEEDED run returns
+        # early without creating a second message, and
+        # ``AgentRun.output_message`` (a OneToOneField) makes "at most one
+        # final message per run" a database invariant on top of that.
+        conversation = locked.conversation
+        if conversation is not None and locked.final_response and locked.output_message_id is None:
+            from conversations.services import create_ai_agent_message
+
+            message = create_ai_agent_message(
+                workspace=locked.workspace,
+                conversation=conversation,
+                body=locked.final_response,
+                metadata={"agent_run_id": str(locked.id), **(output_metadata or {})},
+            )
+            locked.output_message = message
         locked.save()
         record_event(
             action=AuditAction.AGENT_RUN_COMPLETED,

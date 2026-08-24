@@ -74,6 +74,32 @@ class TestResumeHardSafetyChecks:
         assert execution.status == ToolExecutionStatus.FAILED
         assert execution.error_code == "tool_disabled"
 
+    def test_fingerprint_mismatch_against_the_approval_snapshot_fails_closed(self, monkeypatch):
+        """Phase 9 Block 4 (section 8-9, 94, 125-126): the frozen action is
+        tied to the exact argument fingerprint recorded on the
+        ``ApprovalRequest`` at request time. A ``ToolExecution`` row whose
+        fingerprint no longer matches — only reachable through direct data
+        tampering — is never "repaired"; resume fails closed with zero
+        handler/provider calls."""
+        from tools.errors import ToolApprovalActionChangedError
+
+        # A non-blank idempotency key is required for a fingerprint to be
+        # recorded at all (``arguments_fingerprint`` is blank whenever no
+        # idempotency key was supplied) — every real agent-driven tool call
+        # always supplies one (``agents/runtime/graph.py``), so this
+        # mirrors production, not the no-idempotency-key factory default.
+        run, approval, fake = pending_refund_approval(monkeypatch, idempotency_key="turn-1-key")
+        _approve(run, approval)
+        ToolExecution.objects.filter(pk=approval.tool_execution_id).update(
+            arguments_fingerprint="tampered-fingerprint"
+        )
+        with pytest.raises(ToolApprovalActionChangedError):
+            resume_after_approval(tool_execution_id=str(approval.tool_execution_id))
+        assert fake.refund_call_count == 0
+        execution = ToolExecution.objects.get(pk=approval.tool_execution_id)
+        assert execution.status == ToolExecutionStatus.FAILED
+        assert execution.error_code == "approval_action_changed"
+
     def test_corrupted_argument_snapshot_fails_closed_not_silently_wrong(self, monkeypatch):
         run, approval, fake = pending_refund_approval(monkeypatch)
         _approve(run, approval)

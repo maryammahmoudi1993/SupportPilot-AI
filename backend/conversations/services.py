@@ -305,6 +305,32 @@ def create_internal_message(
     )
 
 
+def create_ai_agent_message(
+    *,
+    workspace,
+    conversation: Conversation,
+    body: str,
+    external_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> Message:
+    """SupportPilot's agent orchestration -> customer (Phase 9, section 54).
+
+    Distinct from ``create_outbound_message``: there is no authenticated
+    staff ``actor_membership`` behind an agent-generated reply, so
+    ``sender_membership`` is always null and the sender type is always
+    ``ai_agent`` — never attributable to a human account."""
+    return _create_message(
+        workspace=workspace,
+        conversation=conversation,
+        sender_type=MessageSenderType.AI_AGENT,
+        direction=MessageDirection.OUTBOUND,
+        body=body,
+        sender_membership=None,
+        external_id=external_id,
+        metadata=metadata,
+    )
+
+
 def create_inbound_message(
     *,
     workspace,

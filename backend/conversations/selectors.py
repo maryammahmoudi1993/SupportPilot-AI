@@ -58,3 +58,18 @@ def message_list_for_conversation(*, conversation: Conversation) -> QuerySet[Mes
         .select_related("sender_membership", "sender_membership__user")
         .order_by("created_at")
     )
+
+
+def message_get_for_workspace_or_404(
+    *, workspace: Workspace, conversation: Conversation, message_id: UUID | str
+) -> Message:
+    """Scoped by *both* workspace and conversation (Phase 9, section 102-103):
+    a message belonging to a different conversation — even in the same
+    workspace — 404s exactly as a cross-tenant message would, rather than
+    being resolvable by ID alone."""
+    message = Message.objects.filter(
+        workspace=workspace, conversation=conversation, pk=message_id
+    ).first()
+    if message is None:
+        raise Http404("Message not found.")
+    return message

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import timedelta
+from functools import partial
 from typing import Any
 
 from django.db import IntegrityError, transaction
@@ -222,8 +223,15 @@ def decide_approval(
                             error_code="approval_rejected",
                             error_message="This action was rejected.",
                         )
-                    else:
-                        transaction.on_commit(lambda: _dispatch_resume(locked.id))
+                    # Section 41-45: a decision (approve *or* reject) always
+                    # dispatches the same bounded resume continuation — the
+                    # continuation service itself branches on the approval's
+                    # now-persisted status to either execute the frozen
+                    # action or hand the LLM a safe rejection outcome. This
+                    # is what keeps "no business execution on reject" and
+                    # "the run still reaches a final customer response"
+                    # both true without a second dispatch mechanism.
+                    transaction.on_commit(lambda: _dispatch_resume(locked.id))
     # transaction.atomic() committed here — safe to raise now.
     if pending_error is not None:
         raise pending_error
@@ -252,6 +260,10 @@ def _expire_if_stale(locked: ApprovalRequest) -> bool:
         workspace=locked.workspace,
         metadata={"approval_request_id": str(locked.id)},
     )
+    # Section 46-49: expiry never leaves the run waiting indefinitely — the
+    # same bounded resume continuation used for reject dispatches here too,
+    # never an LLM call inside this transaction (section 48).
+    transaction.on_commit(lambda: _dispatch_resume(locked.id))
     return True
 
 
@@ -284,6 +296,13 @@ def expire_stale_approvals(*, now=None) -> int:
                 workspace=locked.workspace,
                 metadata={"approval_request_id": str(locked.id)},
             )
+            # Section 48-49: dispatched per-row, after this row's own commit
+            # — never inside a shared transaction spanning the whole sweep,
+            # so one stuck/slow continuation can never block another row's
+            # expiry transition, and a duplicate sweep delivery only ever
+            # finds an already-EXPIRED row (the ``status != PENDING`` guard
+            # above) and dispatches nothing a second time.
+            transaction.on_commit(partial(_dispatch_resume, locked.id))
         count += 1
     return count
 

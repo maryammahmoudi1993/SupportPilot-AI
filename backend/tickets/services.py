@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 from rest_framework.exceptions import PermissionDenied, ValidationError
 
@@ -19,7 +19,13 @@ from conversations.models import Conversation
 from customers.models import Customer
 from workspaces.models import WorkspaceMembership, WorkspaceRole
 
-from .models import Ticket, TicketStatus
+from .models import (
+    HUMAN_HANDOFF_ACTIVE_STATUSES,
+    HumanHandoff,
+    HumanHandoffStatus,
+    Ticket,
+    TicketStatus,
+)
 
 #: Roles that may assign/reassign a ticket to any member of the workspace.
 #: Other roles may only self-assign an unassigned ticket.
@@ -282,8 +288,8 @@ def apply_agent_ticket_update(
     so this path never requires or fabricates one. It still reuses the same
     domain constants (``TICKET_STATUS_TRANSITIONS``,
     ``AGENT_WRITABLE_TICKET_FIELDS``) so behavior never diverges from the
-    human-driven paths (CLAUDE.md tool-execution rule: tool -> existing
-    ticket service, never a second copy of ticket business logic).
+    human-driven paths: reuse the existing ticket service rather than
+    duplicating ticket business logic in a second, tool-specific copy.
     """
     if priority is not None:
         ticket.priority = priority
@@ -342,3 +348,167 @@ def reopen_ticket(
         new_status=TicketStatus.OPEN,
         request_id=request_id,
     )
+
+
+# ---------------------------------------------------------------------------
+# Human handoff (Phase 9, section 44-53)
+# ---------------------------------------------------------------------------
+
+#: Roles that may assign/resolve/cancel a handoff — mirrors the ticket
+#: reassignment roles; a plain support agent may still view the queue
+#: (read-only) but does not manage it directly.
+HANDOFF_MANAGE_ROLES = frozenset(
+    {WorkspaceRole.OWNER, WorkspaceRole.ADMIN, WorkspaceRole.SUPPORT_MANAGER}
+)
+
+
+@transaction.atomic
+def create_or_reuse_handoff(
+    *,
+    workspace,
+    conversation: Conversation,
+    reason_code: str,
+    safe_summary: str,
+    agent_run=None,
+    ticket: Ticket | None = None,
+    request_id: str | None = None,
+) -> tuple[HumanHandoff, bool]:
+    """Create a pending handoff for this conversation, or return the
+    conversation's existing *active* handoff unchanged (section 51: one
+    AgentRun must not spawn ten identical pending handoffs; a retried
+    handoff trigger for the same still-open conversation is a no-op, not a
+    duplicate). Returns ``(handoff, created)``.
+
+    Race-safe: the model's partial unique constraint
+    (``handoff_one_active_per_conversation``) is the actual invariant — a
+    concurrent double-create loses the database race and falls back to
+    re-reading the now-existing row, rather than ever creating two.
+    """
+    if conversation.workspace_id != workspace.id:
+        raise ValidationError({"conversation": "Conversation does not belong to this workspace."})
+    if agent_run is not None and agent_run.workspace_id != workspace.id:
+        raise ValidationError({"agent_run": "Agent run does not belong to this workspace."})
+    if ticket is not None and ticket.workspace_id != workspace.id:
+        raise ValidationError({"ticket": "Ticket does not belong to this workspace."})
+
+    existing = (
+        HumanHandoff.objects.select_for_update()
+        .filter(conversation=conversation, status__in=HUMAN_HANDOFF_ACTIVE_STATUSES)
+        .first()
+    )
+    if existing is not None:
+        return existing, False
+
+    try:
+        with transaction.atomic():
+            handoff = HumanHandoff.objects.create(
+                workspace=workspace,
+                conversation=conversation,
+                agent_run=agent_run,
+                ticket=ticket,
+                reason_code=reason_code,
+                safe_summary=safe_summary,
+            )
+    except IntegrityError:
+        # Lost a concurrent race for this conversation's active-handoff slot.
+        handoff = HumanHandoff.objects.get(
+            conversation=conversation, status__in=HUMAN_HANDOFF_ACTIVE_STATUSES
+        )
+        return handoff, False
+
+    record_event(
+        action=AuditAction.HUMAN_HANDOFF_CREATED,
+        target_type="human_handoff",
+        target_id=handoff.id,
+        actor=None,
+        workspace=workspace,
+        metadata={"conversation_id": str(conversation.id), "reason_code": reason_code},
+        request_id=request_id,
+    )
+    return handoff, True
+
+
+@transaction.atomic
+def assign_handoff(
+    *,
+    workspace,
+    actor: User,
+    actor_membership: WorkspaceMembership,
+    handoff: HumanHandoff,
+    target_membership: WorkspaceMembership | None = None,
+    request_id: str | None = None,
+) -> HumanHandoff:
+    if actor_membership.role not in HANDOFF_MANAGE_ROLES:
+        raise PermissionDenied("You do not have permission to assign handoffs.")
+    target = target_membership or actor_membership
+    if target.workspace_id != workspace.id:
+        raise ValidationError({"membership": "Assignee must belong to this workspace."})
+
+    locked = HumanHandoff.objects.select_for_update().get(pk=handoff.pk)
+    if locked.status not in HUMAN_HANDOFF_ACTIVE_STATUSES:
+        raise ValidationError({"status": "Only an active handoff can be assigned."})
+    locked.assigned_to = target
+    locked.status = HumanHandoffStatus.ASSIGNED
+    locked.save(update_fields=["assigned_to", "status", "updated_at"])
+
+    record_event(
+        action=AuditAction.HUMAN_HANDOFF_ASSIGNED,
+        target_type="human_handoff",
+        target_id=locked.id,
+        actor=actor,
+        workspace=workspace,
+        metadata={"assigned_to_membership_id": str(target.id)},
+        request_id=request_id,
+    )
+    return locked
+
+
+@transaction.atomic
+def resolve_handoff(
+    *,
+    workspace,
+    actor: User,
+    actor_membership: WorkspaceMembership,
+    handoff: HumanHandoff,
+    request_id: str | None = None,
+) -> HumanHandoff:
+    if actor_membership.role not in HANDOFF_MANAGE_ROLES:
+        raise PermissionDenied("You do not have permission to resolve handoffs.")
+
+    locked = HumanHandoff.objects.select_for_update().get(pk=handoff.pk)
+    if locked.status not in HUMAN_HANDOFF_ACTIVE_STATUSES:
+        raise ValidationError({"status": "Only an active handoff can be resolved."})
+    locked.status = HumanHandoffStatus.RESOLVED
+    locked.resolved_at = timezone.now()
+    locked.save(update_fields=["status", "resolved_at", "updated_at"])
+
+    record_event(
+        action=AuditAction.HUMAN_HANDOFF_RESOLVED,
+        target_type="human_handoff",
+        target_id=locked.id,
+        actor=actor,
+        workspace=workspace,
+        metadata={},
+        request_id=request_id,
+    )
+    return locked
+
+
+def cancel_handoffs_for_run(*, agent_run, reason: str = "run_cancelled") -> None:
+    """Cancel any still-active handoff created by a now-cancelled run
+    (mirrors ``approvals.services.cancel_approval_for_execution``). Never
+    raises on "nothing to cancel" — most runs never create a handoff."""
+    with transaction.atomic():
+        for handoff in HumanHandoff.objects.select_for_update().filter(
+            agent_run=agent_run, status__in=HUMAN_HANDOFF_ACTIVE_STATUSES
+        ):
+            handoff.status = HumanHandoffStatus.CANCELLED
+            handoff.save(update_fields=["status", "updated_at"])
+            record_event(
+                action=AuditAction.HUMAN_HANDOFF_CANCELLED,
+                target_type="human_handoff",
+                target_id=handoff.id,
+                actor=None,
+                workspace=handoff.workspace,
+                metadata={"reason": reason},
+            )

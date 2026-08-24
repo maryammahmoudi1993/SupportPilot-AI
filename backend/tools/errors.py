@@ -125,3 +125,14 @@ class ToolApprovalExpiredError(ToolError):
 class ToolApprovalCancelledError(ToolError):
     code = "approval_cancelled"
     safe_message = "The approval request for this action was cancelled."
+
+
+class ToolApprovalActionChangedError(ToolError):
+    """Phase 9 Block 4 (section 8-9, 94, 125-126): the ``ToolExecution`` row
+    resume is about to execute no longer matches the argument fingerprint
+    recorded on its ``ApprovalRequest`` at approval-request time. Fails
+    closed — the resumed action is never "repaired" or executed against a
+    guessed value."""
+
+    code = "approval_action_changed"
+    safe_message = "The approved action no longer matches what was requested."

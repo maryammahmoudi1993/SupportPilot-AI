@@ -124,8 +124,19 @@ deterministic risk assessment, a fail-closed policy gate inside the same tool
 execution boundary, and a pause/resume approval lifecycle that lets a
 high-risk action (a refund, a calendar booking) execute only after a
 deterministic ALLOW or a real human decision — never merely because the
-model requested it. Frontend UI, richer approval notifications (Slack/email),
-and evaluation/analytics remain future phases.
+model requested it; and the
+[full agent orchestration layer](docs/architecture/full-agent-orchestration.md)
+(see also [ADR 0007](docs/adr/0007-bounded-persistent-agent-orchestration-with-db-authoritative-state.md)):
+conversation-aware execution combining tenant-scoped RAG, bounded
+multi-turn tool orchestration with an untrusted-data tool-result boundary,
+approval pause/resume/reject/expiry handling, and a deterministic human
+handoff outcome for requests the agent should not autonomously complete —
+all backed by idempotent, database-authoritative state and an
+[adversarial/concurrency test suite](docs/architecture/block6-hardening-matrix.md)
+exercising real PostgreSQL races, tenant-isolation attacks, and
+prompt-injection boundaries, not simulated ones. Frontend UI, richer
+approval/handoff notifications (Slack/email), and an evaluation/analytics
+framework remain future phases.
 
 ## Development Guidelines
 

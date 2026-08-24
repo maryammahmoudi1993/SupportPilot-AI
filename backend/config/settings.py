@@ -57,6 +57,11 @@ env = environ.Env(
     AGENTS_LLM_PROVIDER=(str, "fake"),
     AGENTS_OPENAI_API_KEY=(str, ""),
     AGENTS_OPENAI_BASE_URL=(str, ""),
+    AGENTS_CONTEXT_MAX_MESSAGES=(int, 20),
+    AGENTS_CONTEXT_MAX_CHARACTERS=(int, 12_000),
+    AGENTS_RAG_TOP_K=(int, 5),
+    AGENTS_RAG_MAX_CHARACTERS=(int, 8_000),
+    AGENTS_TOOL_RESULT_MAX_CHARACTERS=(int, 4_000),
     # Business integrations (Phase 7). Credential encryption always defaults
     # to a fixed development key so the app boots and every normal test/CI
     # path runs without a production secret (mirrors SECRET_KEY's pattern);
@@ -362,6 +367,20 @@ if not 0 <= KNOWLEDGE_CHUNK_OVERLAP < KNOWLEDGE_CHUNK_SIZE:
 AGENTS_LLM_PROVIDER = env("AGENTS_LLM_PROVIDER")
 AGENTS_OPENAI_API_KEY = env("AGENTS_OPENAI_API_KEY")
 AGENTS_OPENAI_BASE_URL = env("AGENTS_OPENAI_BASE_URL")
+AGENTS_CONTEXT_MAX_MESSAGES = env("AGENTS_CONTEXT_MAX_MESSAGES")
+AGENTS_CONTEXT_MAX_CHARACTERS = env("AGENTS_CONTEXT_MAX_CHARACTERS")
+AGENTS_RAG_TOP_K = env("AGENTS_RAG_TOP_K")
+AGENTS_RAG_MAX_CHARACTERS = env("AGENTS_RAG_MAX_CHARACTERS")
+AGENTS_TOOL_RESULT_MAX_CHARACTERS = env("AGENTS_TOOL_RESULT_MAX_CHARACTERS")
+
+if AGENTS_CONTEXT_MAX_MESSAGES < 1 or AGENTS_CONTEXT_MAX_CHARACTERS < 1:
+    raise ValueError("Agent conversation context limits must be positive")
+if not 1 <= AGENTS_RAG_TOP_K <= KNOWLEDGE_MAX_TOP_K:
+    raise ValueError("AGENTS_RAG_TOP_K must be within the Phase 4 retrieval limit")
+if AGENTS_RAG_MAX_CHARACTERS < 1:
+    raise ValueError("AGENTS_RAG_MAX_CHARACTERS must be positive")
+if AGENTS_TOOL_RESULT_MAX_CHARACTERS < 64:
+    raise ValueError("AGENTS_TOOL_RESULT_MAX_CHARACTERS must be at least 64")
 
 # Business integrations (Phase 7). See ``integrations/crypto.py`` and
 # ``integrations/providers/factory.py``. Real/live-mode execution is

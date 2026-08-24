@@ -342,3 +342,17 @@ class TestMessageCreationUpdatesConversationActivity:
                 conversation=foreign_conversation,
                 body="Hi",
             )
+
+    def test_ai_agent_message_has_no_sender_membership(self):
+        workspace = WorkspaceFactory()
+        conversation = ConversationFactory(workspace=workspace)
+
+        message = services.create_ai_agent_message(
+            workspace=workspace, conversation=conversation, body="Your order ships tomorrow."
+        )
+
+        assert message.sender_type == "ai_agent"
+        assert message.direction == "outbound"
+        assert message.sender_membership_id is None
+        conversation.refresh_from_db()
+        assert conversation.last_message_at is not None

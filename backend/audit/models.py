@@ -52,6 +52,7 @@ class AuditAction(models.TextChoices):
     AGENT_RUN_CANCELLED = "agent.run_cancelled", "Agent run cancelled"
     AGENT_RUN_FAILED = "agent.run_failed", "Agent run failed"
     AGENT_RUN_COMPLETED = "agent.run_completed", "Agent run completed"
+    AGENT_RUN_HANDED_OFF = "agent.run_handed_off", "Agent run handed off"
     TOOL_BINDING_CREATED = "tool.binding_created", "Tool binding created"
     TOOL_BINDING_UPDATED = "tool.binding_updated", "Tool binding updated"
     TOOL_BINDING_DISABLED = "tool.binding_disabled", "Tool binding disabled"
@@ -92,6 +93,10 @@ class AuditAction(models.TextChoices):
     APPROVAL_REJECTED = "approval.rejected", "Approval rejected"
     APPROVAL_EXPIRED = "approval.expired", "Approval expired"
     APPROVAL_CANCELLED = "approval.cancelled", "Approval cancelled"
+    HUMAN_HANDOFF_CREATED = "human_handoff.created", "Human handoff created"
+    HUMAN_HANDOFF_ASSIGNED = "human_handoff.assigned", "Human handoff assigned"
+    HUMAN_HANDOFF_RESOLVED = "human_handoff.resolved", "Human handoff resolved"
+    HUMAN_HANDOFF_CANCELLED = "human_handoff.cancelled", "Human handoff cancelled"
 
 
 class AuditEvent(BaseModel):

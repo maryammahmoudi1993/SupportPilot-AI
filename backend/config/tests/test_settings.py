@@ -64,6 +64,14 @@ class TestRequestCorrelationMiddleware:
         assert request_id_index < logging_index
 
 
+class TestAgentContextSettings:
+    def test_conversation_and_rag_limits_are_positive_and_phase4_bounded(self):
+        assert settings.AGENTS_CONTEXT_MAX_MESSAGES >= 1
+        assert settings.AGENTS_CONTEXT_MAX_CHARACTERS >= 1
+        assert 1 <= settings.AGENTS_RAG_TOP_K <= settings.KNOWLEDGE_MAX_TOP_K
+        assert settings.AGENTS_RAG_MAX_CHARACTERS >= 1
+
+
 class TestCors:
     def test_cors_does_not_allow_all_origins(self):
         assert getattr(settings, "CORS_ALLOW_ALL_ORIGINS", False) is not True

@@ -9,12 +9,15 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from common.exceptions import ConflictError, SafeAPIError
-from conversations.selectors import conversation_get_for_workspace_or_404
+from conversations.selectors import (
+    conversation_get_for_workspace_or_404,
+    message_get_for_workspace_or_404,
+)
 from tickets.selectors import ticket_get_for_workspace_or_404
 from workspaces.permissions import IsWorkspaceMember
 from workspaces.views import WorkspaceScopedMixin
 
-from . import selectors, services
+from . import orchestration, selectors, services
 from .errors import AgentError
 from .models import AgentDefinition, AgentRun, AgentVersion
 from .permissions import CanConfigureAgents, CanRunAgents
@@ -209,17 +212,34 @@ class AgentRunListCreateView(WorkspaceScopedMixin, generics.ListCreateAPIView):
             )
 
         try:
-            run = services.create_agent_run(
-                workspace=self.workspace,
-                agent_version=version,
-                actor=request.user,
-                input_message=data["input_message"],
-                trigger=data.get("trigger", "manual"),
-                conversation=conversation,
-                ticket=ticket,
-                input_metadata=data.get("input_metadata"),
-                request_id=_request_id(request),
-            )
+            if data.get("trigger_message_id"):
+                # Orchestrated path (section 17-19, 97): idempotent per
+                # trigger message, routed through agents.orchestration.
+                trigger_message = message_get_for_workspace_or_404(
+                    workspace=self.workspace,
+                    conversation=conversation,
+                    message_id=data["trigger_message_id"],
+                )
+                run = orchestration.start_support_agent_run(
+                    workspace=self.workspace,
+                    actor=request.user,
+                    conversation=conversation,
+                    trigger_message=trigger_message,
+                    agent_version=version,
+                    request_id=_request_id(request),
+                )
+            else:
+                run = services.create_agent_run(
+                    workspace=self.workspace,
+                    agent_version=version,
+                    actor=request.user,
+                    input_message=data["input_message"],
+                    trigger=data.get("trigger", "manual"),
+                    conversation=conversation,
+                    ticket=ticket,
+                    input_metadata=data.get("input_metadata"),
+                    request_id=_request_id(request),
+                )
         except AgentError as exc:
             raise SafeAPIError(exc.safe_message, code=exc.code) from exc
         return Response(AgentRunSerializer(run).data, status=status.HTTP_201_CREATED)
@@ -251,7 +271,7 @@ class AgentRunCancelView(WorkspaceScopedMixin, APIView):
     def post(self, request, workspace_id, run_id):
         run = selectors.agent_run_get_for_workspace_or_404(workspace=self.workspace, run_id=run_id)
         try:
-            run = services.cancel_agent_run(
+            run = orchestration.cancel_support_agent_run(
                 workspace=self.workspace,
                 run=run,
                 actor=request.user,

@@ -9,6 +9,8 @@ SDK object, header, or credential ever crosses this boundary.
 
 from __future__ import annotations
 
+import hashlib
+import re
 import time
 from typing import Any
 
@@ -23,7 +25,13 @@ from .errors import (
     ProviderTemporarilyUnavailableError,
     ProviderTimeoutError,
 )
-from .schemas import LLMRequest, LLMResponse, LLMUsage
+from .schemas import LLMRequest, LLMResponse, LLMUsage, normalize_tool_call
+
+
+def _openai_tool_name(key: str) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9_-]", "_", key)[:48]
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:8]
+    return f"{slug}_{digest}"
 
 
 class OpenAIProvider:
@@ -50,6 +58,20 @@ class OpenAIProvider:
 
         client = self._get_client()
         started = time.monotonic()
+        provider_tool_names = {_openai_tool_name(tool.key): tool.key for tool in request.tools}
+        request_kwargs: dict[str, Any] = {}
+        if request.tools:
+            request_kwargs["tools"] = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": _openai_tool_name(tool.key),
+                        "description": tool.description,
+                        "parameters": tool.input_schema,
+                    },
+                }
+                for tool in request.tools
+            ]
         try:
             completion = client.chat.completions.create(
                 model=request.model,
@@ -57,6 +79,7 @@ class OpenAIProvider:
                 temperature=request.temperature,
                 max_tokens=request.max_output_tokens,
                 timeout=request.timeout_seconds,
+                **request_kwargs,
             )
         except openai.AuthenticationError as exc:
             raise ProviderAuthenticationError() from exc
@@ -87,6 +110,17 @@ class OpenAIProvider:
             input_tokens = int(usage.prompt_tokens) if usage else 0
             output_tokens = int(usage.completion_tokens) if usage else 0
             total_tokens = int(usage.total_tokens) if usage else input_tokens + output_tokens
+            normalized_tool_calls = tuple(
+                normalize_tool_call(
+                    provider_call_id=str(getattr(raw_call, "id", "")),
+                    tool_key=provider_tool_names.get(
+                        str(getattr(raw_call.function, "name", "")),
+                        str(getattr(raw_call.function, "name", "")),
+                    ),
+                    raw_arguments=getattr(raw_call.function, "arguments", None),
+                )
+                for raw_call in (getattr(choice.message, "tool_calls", None) or [])
+            )
         except (IndexError, AttributeError, TypeError, ValueError) as exc:
             raise ProviderMalformedResponseError() from exc
 
@@ -103,4 +137,5 @@ class OpenAIProvider:
             ),
             latency_ms=latency_ms,
             provider_request_id=getattr(completion, "id", None),
+            tool_calls=normalized_tool_calls,
         )
