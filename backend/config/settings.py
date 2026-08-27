@@ -96,6 +96,11 @@ env = environ.Env(
     # require approval up to $500.00, deny above that — USD only.
     POLICIES_DEFAULT_REFUND_AUTO_ALLOW_MAX_MINOR=(int, 5_000),
     POLICIES_DEFAULT_REFUND_APPROVAL_MAX_MINOR=(int, 50_000),
+    # Durable delivery foundation (Phase 10 Block 1). Server-owned defaults
+    # only — no client, model, or LLM output may raise these (section 13).
+    DELIVERY_DEFAULT_MAX_ATTEMPTS=(int, 5),
+    DELIVERY_CLAIM_LEASE_SECONDS=(int, 300),
+    DELIVERY_DEFAULT_RETRY_DELAY_SECONDS=(int, 60),
 )
 
 environ.Env.read_env(os.path.join(BASE_DIR.parent, ".env"))
@@ -410,6 +415,14 @@ POLICIES_RISK_BUMP_FINANCIAL_AMOUNT_MINOR = env("POLICIES_RISK_BUMP_FINANCIAL_AM
 # workspace configures its own currency-specific rule.
 POLICIES_DEFAULT_REFUND_AUTO_ALLOW_MAX_MINOR = env("POLICIES_DEFAULT_REFUND_AUTO_ALLOW_MAX_MINOR")
 POLICIES_DEFAULT_REFUND_APPROVAL_MAX_MINOR = env("POLICIES_DEFAULT_REFUND_APPROVAL_MAX_MINOR")
+
+# Durable delivery foundation (Phase 10 Block 1) — see
+# ``notifications/models.py`` and ``notifications/services.py``. A worker's
+# claim lease and a delivery's default retry budget are both server-owned;
+# neither is ever accepted from client, model, or LLM input.
+DELIVERY_DEFAULT_MAX_ATTEMPTS = env("DELIVERY_DEFAULT_MAX_ATTEMPTS")
+DELIVERY_CLAIM_LEASE_SECONDS = env("DELIVERY_CLAIM_LEASE_SECONDS")
+DELIVERY_DEFAULT_RETRY_DELAY_SECONDS = env("DELIVERY_DEFAULT_RETRY_DELAY_SECONDS")
 
 # Logging
 LOGGING = {

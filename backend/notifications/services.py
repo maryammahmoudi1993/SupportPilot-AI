@@ -1,0 +1,375 @@
+"""Durable delivery services (Phase 10 Block 1).
+
+Every state transition below re-reads the target row under
+``select_for_update`` inside a transaction before writing — the same pattern
+``approvals/services.py`` and ``tools/execution.py`` already use for exactly
+this reason: it is what makes concurrent claim/complete/reclaim races safe
+against real PostgreSQL locking rather than in-process assumptions.
+
+Claiming uses ``select_for_update(skip_locked=True)``: a worker racing
+another for the same row never blocks waiting for it — it simply finds no
+claimable row and returns a safe "not claimable" outcome (section 8, 20).
+Ownership at completion time is proven by comparing the caller's
+``claim_token`` against the delivery's *current* persisted token, not by
+trusting anything held in a Celery task's memory (section 7, 15).
+"""
+
+from __future__ import annotations
+
+import logging
+import uuid
+from collections.abc import Callable
+from datetime import timedelta
+
+from django.conf import settings
+from django.db import transaction
+from django.utils import timezone
+
+from .errors import DeliveryNotClaimableError, DeliveryNotFoundError, StaleClaimError
+from .models import AttemptStatus, Delivery, DeliveryAttempt, DeliveryStatus
+
+logger = logging.getLogger("supportpilot")
+
+MAX_SAFE_ERROR_CODE_LENGTH = 64
+
+
+# ---------------------------------------------------------------------------
+# Creation
+# ---------------------------------------------------------------------------
+
+
+def create_delivery(
+    *, workspace, channel: str, max_attempts: int | None = None, now=None
+) -> Delivery:
+    """Create a new, immediately-due delivery. ``max_attempts`` is a
+    server-configured value only (section 13) — no client, model, or LLM
+    caller of this function may ever originate that value from untrusted
+    input; it is either omitted (server default) or set by trusted internal
+    configuration."""
+    now = now or timezone.now()
+    max_attempts = (
+        max_attempts if max_attempts is not None else settings.DELIVERY_DEFAULT_MAX_ATTEMPTS
+    )
+    delivery = Delivery.objects.create(
+        workspace=workspace,
+        channel=channel,
+        max_attempts=max_attempts,
+        next_attempt_at=now,
+    )
+    logger.info(
+        "delivery_created",
+        extra={
+            "event": "delivery_created",
+            "workspace_id": str(workspace.id),
+            "delivery_id": str(delivery.id),
+            "channel": channel,
+        },
+    )
+    return delivery
+
+
+# ---------------------------------------------------------------------------
+# Claiming
+# ---------------------------------------------------------------------------
+
+
+def _due_eligible(delivery: Delivery, now) -> bool:
+    return (
+        delivery.status in (DeliveryStatus.PENDING, DeliveryStatus.RETRY_SCHEDULED)
+        and delivery.next_attempt_at <= now
+    )
+
+
+def _expired_claim_eligible(delivery: Delivery, now) -> bool:
+    return (
+        delivery.status == DeliveryStatus.CLAIMED
+        and delivery.lease_expires_at is not None
+        and delivery.lease_expires_at <= now
+    )
+
+
+def _claim_row(
+    *,
+    delivery_id: uuid.UUID | str,
+    eligible: Callable[[Delivery, object], bool],
+    lease_seconds: int | None,
+    now,
+) -> tuple[Delivery, uuid.UUID]:
+    lease_seconds = (
+        lease_seconds if lease_seconds is not None else settings.DELIVERY_CLAIM_LEASE_SECONDS
+    )
+    with transaction.atomic():
+        # skip_locked=True is the concurrency primitive (section 8): a
+        # worker that loses the race for this row never blocks on the
+        # winner's transaction — it simply sees no row here and falls
+        # through to the safe "not claimable" outcome below.
+        locked = Delivery.objects.select_for_update(skip_locked=True).filter(pk=delivery_id).first()
+        if locked is None or not eligible(locked, now):
+            raise DeliveryNotClaimableError()
+        next_attempt_number = locked.attempt_count + 1
+        if next_attempt_number > locked.max_attempts:
+            # Defensive: a correctly-scheduled delivery never reaches this —
+            # exhaustion is decided at completion time (see
+            # complete_delivery_failure) before a delivery is ever left
+            # claimable again.
+            raise DeliveryNotClaimableError()
+
+        token = uuid.uuid4()
+        locked.status = DeliveryStatus.CLAIMED
+        locked.claim_token = token
+        locked.claimed_at = now
+        locked.lease_expires_at = now + timedelta(seconds=lease_seconds)
+        if locked.first_attempt_at is None:
+            locked.first_attempt_at = now
+        locked.attempt_count = next_attempt_number
+        locked.save(
+            update_fields=[
+                "status",
+                "claim_token",
+                "claimed_at",
+                "lease_expires_at",
+                "first_attempt_at",
+                "attempt_count",
+                "updated_at",
+            ]
+        )
+        DeliveryAttempt.objects.create(
+            delivery=locked,
+            attempt_number=next_attempt_number,
+            claim_token=token,
+            status=AttemptStatus.IN_PROGRESS,
+            started_at=now,
+        )
+    logger.info(
+        "delivery_claimed",
+        extra={
+            "event": "delivery_claimed",
+            "workspace_id": str(locked.workspace_id),
+            "delivery_id": str(locked.id),
+            "attempt_number": next_attempt_number,
+            "status": locked.status,
+        },
+    )
+    return locked, token
+
+
+def claim_delivery(
+    *, delivery_id: uuid.UUID | str, lease_seconds: int | None = None, now=None
+) -> tuple[Delivery, uuid.UUID]:
+    """Claim a due PENDING/RETRY_SCHEDULED delivery. Raises
+    ``DeliveryNotClaimableError`` (a safe, expected outcome — never an
+    operational error) if the row is missing, not due yet, already actively
+    claimed, or terminal."""
+    now = now or timezone.now()
+    return _claim_row(
+        delivery_id=delivery_id, eligible=_due_eligible, lease_seconds=lease_seconds, now=now
+    )
+
+
+def reclaim_expired_delivery(
+    *, delivery_id: uuid.UUID | str, lease_seconds: int | None = None, now=None
+) -> tuple[Delivery, uuid.UUID]:
+    """Reclaim a CLAIMED delivery whose lease has expired — the stale-worker
+    recovery path (section 7, 9, 21). Issues a brand-new ``claim_token``;
+    the original worker's token becomes unconditionally stale (see
+    ``_assert_active_claim`` below)."""
+    now = now or timezone.now()
+    return _claim_row(
+        delivery_id=delivery_id,
+        eligible=_expired_claim_eligible,
+        lease_seconds=lease_seconds,
+        now=now,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Completion
+# ---------------------------------------------------------------------------
+
+
+def _lock_delivery_or_raise(delivery_id: uuid.UUID | str) -> Delivery:
+    try:
+        return Delivery.objects.select_for_update().get(pk=delivery_id)
+    except Delivery.DoesNotExist as exc:
+        raise DeliveryNotFoundError() from exc
+
+
+def _assert_active_claim(delivery: Delivery, claim_token: uuid.UUID | str) -> None:
+    """The single ownership-proof check (section 15): a completion call only
+    ever succeeds if the delivery is still CLAIMED under exactly this token.
+    A stale worker (expired lease, already reclaimed or already completed by
+    someone else) always lands here instead of overwriting newer state."""
+    if delivery.status != DeliveryStatus.CLAIMED or str(delivery.claim_token) != str(claim_token):
+        raise StaleClaimError()
+
+
+def _complete_active_attempt(
+    *,
+    delivery: Delivery,
+    claim_token: uuid.UUID | str,
+    status: str,
+    safe_error_code: str,
+    retryable: bool | None,
+    now,
+) -> DeliveryAttempt:
+    attempt = DeliveryAttempt.objects.get(
+        delivery=delivery, claim_token=claim_token, status=AttemptStatus.IN_PROGRESS
+    )
+    attempt.status = status
+    attempt.completed_at = now
+    attempt.latency_ms = max(int((now - attempt.started_at).total_seconds() * 1000), 0)
+    attempt.safe_error_code = safe_error_code[:MAX_SAFE_ERROR_CODE_LENGTH]
+    attempt.retryable = retryable
+    attempt.save(
+        update_fields=[
+            "status",
+            "completed_at",
+            "latency_ms",
+            "safe_error_code",
+            "retryable",
+            "updated_at",
+        ]
+    )
+    return attempt
+
+
+def complete_delivery_success(
+    *, delivery_id: uuid.UUID | str, claim_token: uuid.UUID | str, now=None
+) -> Delivery:
+    now = now or timezone.now()
+    with transaction.atomic():
+        locked = _lock_delivery_or_raise(delivery_id)
+        _assert_active_claim(locked, claim_token)
+        _complete_active_attempt(
+            delivery=locked,
+            claim_token=claim_token,
+            status=AttemptStatus.SUCCEEDED,
+            safe_error_code="",
+            retryable=None,
+            now=now,
+        )
+        locked.status = DeliveryStatus.DELIVERED
+        locked.delivered_at = now
+        locked.claim_token = None
+        locked.claimed_at = None
+        locked.lease_expires_at = None
+        locked.save(
+            update_fields=[
+                "status",
+                "delivered_at",
+                "claim_token",
+                "claimed_at",
+                "lease_expires_at",
+                "updated_at",
+            ]
+        )
+    logger.info(
+        "delivery_succeeded",
+        extra={
+            "event": "delivery_succeeded",
+            "workspace_id": str(locked.workspace_id),
+            "delivery_id": str(locked.id),
+            "attempt_number": locked.attempt_count,
+            "status": locked.status,
+        },
+    )
+    return locked
+
+
+def complete_delivery_failure(
+    *,
+    delivery_id: uuid.UUID | str,
+    claim_token: uuid.UUID | str,
+    safe_error_code: str,
+    retryable: bool,
+    retry_delay_seconds: int | None = None,
+    now=None,
+) -> Delivery:
+    """Foundation for retry/terminal handling — full backoff scheduling is
+    Block 4's concern. Here: a retryable failure with attempts remaining is
+    scheduled at a fixed server-owned delay; anything else terminates the
+    delivery, split into FAILED (retries exhausted) vs. DEAD (explicitly
+    non-retryable, section 6) so a future replay tool can distinguish the
+    two."""
+    now = now or timezone.now()
+    retry_delay_seconds = (
+        retry_delay_seconds
+        if retry_delay_seconds is not None
+        else settings.DELIVERY_DEFAULT_RETRY_DELAY_SECONDS
+    )
+    with transaction.atomic():
+        locked = _lock_delivery_or_raise(delivery_id)
+        _assert_active_claim(locked, claim_token)
+        _complete_active_attempt(
+            delivery=locked,
+            claim_token=claim_token,
+            status=AttemptStatus.FAILED,
+            safe_error_code=safe_error_code,
+            retryable=retryable,
+            now=now,
+        )
+        locked.last_error_code = safe_error_code[:MAX_SAFE_ERROR_CODE_LENGTH]
+        locked.claim_token = None
+        locked.claimed_at = None
+        locked.lease_expires_at = None
+        can_retry = retryable and locked.attempt_count < locked.max_attempts
+        if can_retry:
+            locked.status = DeliveryStatus.RETRY_SCHEDULED
+            locked.next_attempt_at = now + timedelta(seconds=retry_delay_seconds)
+        else:
+            locked.status = DeliveryStatus.FAILED if retryable else DeliveryStatus.DEAD
+            locked.failed_at = now
+        locked.save(
+            update_fields=[
+                "last_error_code",
+                "claim_token",
+                "claimed_at",
+                "lease_expires_at",
+                "status",
+                "next_attempt_at",
+                "failed_at",
+                "updated_at",
+            ]
+        )
+    logger.info(
+        "delivery_failed",
+        extra={
+            "event": "delivery_failed",
+            "workspace_id": str(locked.workspace_id),
+            "delivery_id": str(locked.id),
+            "attempt_number": locked.attempt_count,
+            "status": locked.status,
+            "safe_error_code": safe_error_code[:MAX_SAFE_ERROR_CODE_LENGTH],
+        },
+    )
+    return locked
+
+
+# ---------------------------------------------------------------------------
+# Celery task boundary (section 19-20)
+# ---------------------------------------------------------------------------
+
+#: No delivery-channel handler is registered yet — Block 2 (notifications)
+#: and Block 3 (webhooks) each add one. Until then, a claimed delivery is
+#: immediately dead-lettered with this safe, stable error code rather than
+#: left hanging in an active claim forever (section 21).
+NO_HANDLER_ERROR_CODE = "delivery_handler_not_implemented"
+
+
+def process_claimed_delivery(delivery_id: str) -> str:
+    """The entire body the Block 1 Celery task delegates to (section 19: no
+    domain logic in the task itself). Duplicate task delivery is safe: the
+    first invocation claims and immediately terminates the row; any
+    redelivery of the same task message finds nothing claimable and
+    no-ops (section 20)."""
+    try:
+        delivery, token = claim_delivery(delivery_id=delivery_id)
+    except DeliveryNotClaimableError:
+        return "skipped"
+    complete_delivery_failure(
+        delivery_id=delivery.id,
+        claim_token=token,
+        safe_error_code=NO_HANDLER_ERROR_CODE,
+        retryable=False,
+    )
+    return "dead_lettered"
