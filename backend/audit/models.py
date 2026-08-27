@@ -97,6 +97,10 @@ class AuditAction(models.TextChoices):
     HUMAN_HANDOFF_ASSIGNED = "human_handoff.assigned", "Human handoff assigned"
     HUMAN_HANDOFF_RESOLVED = "human_handoff.resolved", "Human handoff resolved"
     HUMAN_HANDOFF_CANCELLED = "human_handoff.cancelled", "Human handoff cancelled"
+    WEBHOOK_ENDPOINT_CREATED = "webhook_endpoint.created", "Webhook endpoint created"
+    WEBHOOK_ENDPOINT_UPDATED = "webhook_endpoint.updated", "Webhook endpoint updated"
+    WEBHOOK_ENDPOINT_DISABLED = "webhook_endpoint.disabled", "Webhook endpoint disabled"
+    WEBHOOK_SECRET_ROTATED = "webhook_endpoint.secret_rotated", "Webhook signing secret rotated"
 
 
 class AuditEvent(BaseModel):

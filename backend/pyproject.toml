@@ -29,6 +29,17 @@ dependencies = [
     "python-dateutil==2.9.0.post0",
     "pytz==2026.3.post1",
     "requests==2.34.2",
+    # Direct dependency for Phase 10 Block 3's SSRF/DNS-rebinding-safe
+    # outbound webhook transport (webhooks/transport.py): connecting to a
+    # pre-validated IP while presenting the original hostname for TLS SNI
+    # and certificate verification requires urllib3's lower-level
+    # HTTPConnectionPool(host=<ip>, server_hostname=<hostname>,
+    # assert_hostname=<hostname>) — a capability requests's own HTTPAdapter
+    # does not expose without using the same urllib3 API underneath it
+    # anyway. Already present as requests's own pinned transitive
+    # dependency; declared explicitly here since webhooks/transport.py
+    # imports it directly.
+    "urllib3==2.7.0",
     "cryptography==50.0.0",
     "pyjwt==2.13.0",
     "stripe==15.5.0",

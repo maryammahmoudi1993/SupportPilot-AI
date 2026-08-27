@@ -241,6 +241,7 @@ def _complete_active_attempt(
     safe_error_code: str,
     retryable: bool | None,
     now,
+    response_status_code: int | None = None,
 ) -> DeliveryAttempt:
     attempt = DeliveryAttempt.objects.get(
         delivery=delivery, claim_token=claim_token, status=AttemptStatus.IN_PROGRESS
@@ -250,21 +251,30 @@ def _complete_active_attempt(
     attempt.latency_ms = max(int((now - attempt.started_at).total_seconds() * 1000), 0)
     attempt.safe_error_code = safe_error_code[:MAX_SAFE_ERROR_CODE_LENGTH]
     attempt.retryable = retryable
-    attempt.save(
-        update_fields=[
-            "status",
-            "completed_at",
-            "latency_ms",
-            "safe_error_code",
-            "retryable",
-            "updated_at",
-        ]
-    )
+    update_fields = [
+        "status",
+        "completed_at",
+        "latency_ms",
+        "safe_error_code",
+        "retryable",
+        "updated_at",
+    ]
+    if response_status_code is not None:
+        # Reserved since Block 1 specifically for this (section 10 of that
+        # block) — only ever populated by an HTTP-based channel handler
+        # (webhooks, Block 3); notification delivery never sets it.
+        attempt.response_status_code = response_status_code
+        update_fields.append("response_status_code")
+    attempt.save(update_fields=update_fields)
     return attempt
 
 
 def complete_delivery_success(
-    *, delivery_id: uuid.UUID | str, claim_token: uuid.UUID | str, now=None
+    *,
+    delivery_id: uuid.UUID | str,
+    claim_token: uuid.UUID | str,
+    now=None,
+    response_status_code: int | None = None,
 ) -> Delivery:
     now = now or timezone.now()
     with transaction.atomic():
@@ -277,6 +287,7 @@ def complete_delivery_success(
             safe_error_code="",
             retryable=None,
             now=now,
+            response_status_code=response_status_code,
         )
         locked.status = DeliveryStatus.DELIVERED
         locked.delivered_at = now
@@ -314,6 +325,7 @@ def complete_delivery_failure(
     retryable: bool,
     retry_delay_seconds: int | None = None,
     now=None,
+    response_status_code: int | None = None,
 ) -> Delivery:
     """Foundation for retry/terminal handling — full backoff scheduling is
     Block 4's concern. Here: a retryable failure with attempts remaining is
@@ -337,6 +349,7 @@ def complete_delivery_failure(
             safe_error_code=safe_error_code,
             retryable=retryable,
             now=now,
+            response_status_code=response_status_code,
         )
         locked.last_error_code = safe_error_code[:MAX_SAFE_ERROR_CODE_LENGTH]
         locked.claim_token = None

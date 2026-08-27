@@ -101,6 +101,13 @@ env = environ.Env(
     DELIVERY_DEFAULT_MAX_ATTEMPTS=(int, 5),
     DELIVERY_CLAIM_LEASE_SECONDS=(int, 300),
     DELIVERY_DEFAULT_RETRY_DELAY_SECONDS=(int, 60),
+    # Outbound webhooks (Phase 10 Block 3). HTTPS is required in production;
+    # plaintext HTTP is a server-owned opt-in for local/dev only (section 19)
+    # — never something an endpoint owner's URL can trigger by itself.
+    WEBHOOKS_ALLOW_INSECURE_HTTP=(bool, False),
+    WEBHOOKS_CONNECT_TIMEOUT_SECONDS=(float, 5.0),
+    WEBHOOKS_READ_TIMEOUT_SECONDS=(float, 10.0),
+    WEBHOOKS_MAX_URL_LENGTH=(int, 2048),
 )
 
 environ.Env.read_env(os.path.join(BASE_DIR.parent, ".env"))
@@ -141,6 +148,7 @@ INSTALLED_APPS = [
     "policies.apps.PoliciesConfig",
     "approvals.apps.ApprovalsConfig",
     "notifications.apps.NotificationsConfig",
+    "webhooks.apps.WebhooksConfig",
     "observability.apps.ObservabilityConfig",
     "evaluations.apps.EvaluationsConfig",
     "audit.apps.AuditConfig",
@@ -297,6 +305,8 @@ SPECTACULAR_SETTINGS = {
         "PolicyEffectEnum": "policies.models.PolicyEffect.choices",
         "ApprovalStatusEnum": "approvals.models.ApprovalStatus.choices",
         "ApprovalDecisionValueEnum": "approvals.models.ApprovalDecisionValue.choices",
+        "WebhookEndpointStatusEnum": "webhooks.models.WebhookEndpointStatus.choices",
+        "WebhookEventTypeEnum": "webhooks.models.WebhookEventType.choices",
     },
 }
 
@@ -423,6 +433,14 @@ POLICIES_DEFAULT_REFUND_APPROVAL_MAX_MINOR = env("POLICIES_DEFAULT_REFUND_APPROV
 DELIVERY_DEFAULT_MAX_ATTEMPTS = env("DELIVERY_DEFAULT_MAX_ATTEMPTS")
 DELIVERY_CLAIM_LEASE_SECONDS = env("DELIVERY_CLAIM_LEASE_SECONDS")
 DELIVERY_DEFAULT_RETRY_DELAY_SECONDS = env("DELIVERY_DEFAULT_RETRY_DELAY_SECONDS")
+
+# Outbound webhooks (Phase 10 Block 3) — see ``webhooks/security.py`` and
+# ``webhooks/transport.py``. Every value here is server-owned; an endpoint
+# owner's URL/configuration can never widen it (section 19, 28).
+WEBHOOKS_ALLOW_INSECURE_HTTP = env("WEBHOOKS_ALLOW_INSECURE_HTTP")
+WEBHOOKS_CONNECT_TIMEOUT_SECONDS = env("WEBHOOKS_CONNECT_TIMEOUT_SECONDS")
+WEBHOOKS_READ_TIMEOUT_SECONDS = env("WEBHOOKS_READ_TIMEOUT_SECONDS")
+WEBHOOKS_MAX_URL_LENGTH = env("WEBHOOKS_MAX_URL_LENGTH")
 
 # Logging
 LOGGING = {

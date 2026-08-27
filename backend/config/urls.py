@@ -78,6 +78,10 @@ urlpatterns = [
                     "workspaces/<uuid:workspace_id>/handoffs/",
                     include("tickets.handoff_urls"),
                 ),
+                path(
+                    "workspaces/<uuid:workspace_id>/webhooks/",
+                    include("webhooks.urls"),
+                ),
             ]
         ),
     ),
