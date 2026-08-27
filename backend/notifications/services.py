@@ -1,4 +1,4 @@
-"""Durable delivery services (Phase 10 Block 1).
+"""Durable delivery services (Phase 10 Block 1, extended in Block 2).
 
 Every state transition below re-reads the target row under
 ``select_for_update`` inside a transaction before writing — the same pattern
@@ -12,6 +12,10 @@ claimable row and returns a safe "not claimable" outcome (section 8, 20).
 Ownership at completion time is proven by comparing the caller's
 ``claim_token`` against the delivery's *current* persisted token, not by
 trusting anything held in a Celery task's memory (section 7, 15).
+
+Block 2 adds best-effort Celery dispatch after commit (section 9-10) and
+replaces the Block 1 placeholder task body with a real per-channel handler
+dispatch (section 4) — see ``process_claimed_delivery`` below.
 """
 
 from __future__ import annotations
@@ -20,6 +24,7 @@ import logging
 import uuid
 from collections.abc import Callable
 from datetime import timedelta
+from functools import partial
 
 from django.conf import settings
 from django.db import transaction
@@ -41,21 +46,28 @@ MAX_SAFE_ERROR_CODE_LENGTH = 64
 def create_delivery(
     *, workspace, channel: str, max_attempts: int | None = None, now=None
 ) -> Delivery:
-    """Create a new, immediately-due delivery. ``max_attempts`` is a
-    server-configured value only (section 13) — no client, model, or LLM
-    caller of this function may ever originate that value from untrusted
-    input; it is either omitted (server default) or set by trusted internal
-    configuration."""
+    """Create a new, immediately-due delivery and best-effort dispatch it for
+    processing once (and only once) this transaction commits (section 9).
+    ``max_attempts`` is a server-configured value only (section 13) — no
+    client, model, or LLM caller of this function may ever originate that
+    value from untrusted input; it is either omitted (server default) or set
+    by trusted internal configuration."""
     now = now or timezone.now()
     max_attempts = (
         max_attempts if max_attempts is not None else settings.DELIVERY_DEFAULT_MAX_ATTEMPTS
     )
-    delivery = Delivery.objects.create(
-        workspace=workspace,
-        channel=channel,
-        max_attempts=max_attempts,
-        next_attempt_at=now,
-    )
+    with transaction.atomic():
+        delivery = Delivery.objects.create(
+            workspace=workspace,
+            channel=channel,
+            max_attempts=max_attempts,
+            next_attempt_at=now,
+        )
+        # Broker publication is best-effort (section 9-10): if it fails, the
+        # row above is already committed and stays PENDING/due — recoverable
+        # by Block 4's sweeper — rather than being rolled back merely
+        # because Redis/the broker was unavailable at this instant.
+        transaction.on_commit(partial(_dispatch_delivery, delivery.id))
     logger.info(
         "delivery_created",
         extra={
@@ -66,6 +78,24 @@ def create_delivery(
         },
     )
     return delivery
+
+
+def _dispatch_delivery(delivery_id: uuid.UUID | str) -> None:
+    """Best-effort Celery publication (section 9-10). A broker failure here
+    must never: delete the delivery, mark it as a provider failure, consume
+    an attempt slot, or expose a raw Celery/Kombu exception — it only means
+    nobody woke up the worker immediately; the delivery is already
+    persisted and due, so Block 4's recovery sweeper can still find and
+    claim it later."""
+    from .tasks import process_delivery_task
+
+    try:
+        process_delivery_task.delay(str(delivery_id))
+    except Exception:  # noqa: BLE001 - broker/transport errors are unbounded in type
+        logger.warning(
+            "delivery_dispatch_failed",
+            extra={"event": "delivery_dispatch_failed", "delivery_id": str(delivery_id)},
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -346,30 +376,45 @@ def complete_delivery_failure(
 
 
 # ---------------------------------------------------------------------------
-# Celery task boundary (section 19-20)
+# Celery task boundary (section 19-20; Block 2 section 4, 14)
 # ---------------------------------------------------------------------------
-
-#: No delivery-channel handler is registered yet — Block 2 (notifications)
-#: and Block 3 (webhooks) each add one. Until then, a claimed delivery is
-#: immediately dead-lettered with this safe, stable error code rather than
-#: left hanging in an active claim forever (section 21).
-NO_HANDLER_ERROR_CODE = "delivery_handler_not_implemented"
 
 
 def process_claimed_delivery(delivery_id: str) -> str:
-    """The entire body the Block 1 Celery task delegates to (section 19: no
-    domain logic in the task itself). Duplicate task delivery is safe: the
-    first invocation claims and immediately terminates the row; any
-    redelivery of the same task message finds nothing claimable and
-    no-ops (section 20)."""
+    """The entire body the Celery task delegates to (section 19: no domain
+    logic in the task itself). Resolves the registered handler for
+    ``Delivery.channel`` and calls it with an already-claimed delivery +
+    claim token; the handler is solely responsible for the external attempt
+    and completing the delivery through the ownership-aware service
+    functions above (section 14).
+
+    ``channel`` is read *before* claiming so a genuinely unregistered
+    channel is detected without consuming a claim/attempt slot (section 4)
+    — safe because ``channel`` is immutable after creation, never touched by
+    any service in this module. Duplicate task delivery is safe: only the
+    first invocation can claim; a redelivered task finds nothing claimable
+    and no-ops (section 20)."""
+    from .handlers import get_channel_handler
+
+    channel = Delivery.objects.filter(pk=delivery_id).values_list("channel", flat=True).first()
+    if channel is None:
+        return "skipped"
+    handler = get_channel_handler(channel)
+    if handler is None:
+        # An internal implementation gap (an unregistered channel) is never
+        # turned into a fake provider failure against the delivery itself
+        # (section 4) — it is surfaced only in operational logs, and the
+        # delivery is left exactly as it was for once the channel is
+        # registered (or for an operator to investigate).
+        logger.warning(
+            "delivery_channel_handler_missing",
+            extra={"event": "delivery_channel_handler_missing", "channel": channel},
+        )
+        return "skipped_unsupported_channel"
+
     try:
         delivery, token = claim_delivery(delivery_id=delivery_id)
     except DeliveryNotClaimableError:
         return "skipped"
-    complete_delivery_failure(
-        delivery_id=delivery.id,
-        claim_token=token,
-        safe_error_code=NO_HANDLER_ERROR_CODE,
-        retryable=False,
-    )
-    return "dead_lettered"
+    handler(delivery=delivery, claim_token=token)
+    return "processed"

@@ -182,3 +182,69 @@ class DeliveryAttempt(BaseModel):
 
     def __str__(self) -> str:
         return f"{self.delivery_id}:{self.attempt_number}:{self.status}"
+
+
+class NotificationMedium(models.TextChoices):
+    """The notification *medium* — deliberately a distinct concept from
+    ``Delivery.channel`` (section 6), which distinguishes logical delivery
+    *families* (notification vs. webhook), not the medium within one family.
+    Only email exists today, matching the sole Phase 7 ``NotificationProvider``
+    adapter (``integrations.providers.email_provider``)."""
+
+    EMAIL = "email", "Email"
+
+
+class NotificationDelivery(BaseModel):
+    """The notification-specific one-to-one companion to a ``Delivery``
+    (section 5): everything Block 1's generic delivery lifecycle doesn't
+    need to know about — the frozen recipient/content snapshot and the
+    stable provider-facing idempotency identity. Never stores credentials or
+    other provider secrets (section 27) — only the same non-secret
+    recipient/subject/body a human already sees in the tool call.
+
+    One row per source ``ToolExecution`` (the ``OneToOneField`` below is the
+    database-enforced identity, section 11): a replayed/reset
+    ``notification.send`` execution finds and reuses this row rather than
+    creating a second logical notification.
+    """
+
+    delivery = models.OneToOneField(
+        Delivery, on_delete=models.CASCADE, related_name="notification_delivery"
+    )
+    source_tool_execution = models.OneToOneField(
+        "tools.ToolExecution", on_delete=models.PROTECT, related_name="notification_delivery"
+    )
+    medium = models.CharField(max_length=20, choices=NotificationMedium.choices)
+
+    # Frozen at creation time (section 7) — never re-read from the current
+    # Customer/business record on retry. Deliberately plain columns, not a
+    # JSON blob (section 5): the existing notification provider contract
+    # already fixes exactly these three fields.
+    recipient_email = models.EmailField()
+    subject = models.CharField(max_length=200)
+    body = models.TextField()
+
+    # The stable identity passed to ``NotificationProvider.send`` on *every*
+    # attempt for this delivery (section 12) — never regenerated per retry,
+    # so a provider that supports idempotency (or the deterministic fake)
+    # can deduplicate an ambiguous retry after a timeout.
+    idempotency_key = models.CharField(max_length=200)
+
+    # Set once the provider supplies one on a successful send (section 21).
+    # Never asserted to exist for providers/outcomes that don't return one.
+    provider_message_id = models.CharField(max_length=200, blank=True)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=~models.Q(recipient_email=""),
+                name="notification_delivery_recipient_not_blank",
+            ),
+            models.CheckConstraint(
+                condition=~models.Q(idempotency_key=""),
+                name="notification_delivery_idempotency_key_not_blank",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.delivery_id}:{self.medium}:{self.recipient_email}"

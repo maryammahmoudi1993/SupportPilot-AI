@@ -473,6 +473,16 @@ def create_booking(
     )
 
 
+def ensure_notification_provider_configured(*, workspace: Workspace) -> None:
+    """Synchronous configuration check only (Phase 10 Block 2, section 8):
+    ``notification.send`` still validates a usable EMAIL connection exists
+    before accepting the request — the same ``integration_not_configured`` /
+    ``integration_disabled`` outcomes as before — but no longer performs the
+    provider call itself; that happens later, asynchronously, once a worker
+    claims the durable delivery (``notifications.notification_delivery``)."""
+    _require_usable_connection(workspace=workspace, provider=IntegrationProvider.EMAIL)
+
+
 def send_notification(
     *,
     workspace: Workspace,
