@@ -262,6 +262,40 @@ def test_success_delivers_signed_body_and_marks_delivered(monkeypatch):
     assert json.loads(sent["body"])["type"] == event.event_type
 
 
+def test_real_resolver_public_address_accepted_and_pinned_to_transport(monkeypatch):
+    """Block 3 remediation, section 4: exercises the *real*
+    ``webhooks.security.resolve_and_validate`` (only the DNS layer below it
+    is faked) end to end through the handler, proving a globally-routable
+    address is accepted and that the exact IP it approves is what the
+    transport is instructed to connect to — not a mocked security layer."""
+    import socket
+
+    endpoint = WebhookEndpointFactory()
+    event = WebhookEventFactory(workspace=endpoint.workspace)
+    delivery = create_delivery(workspace=endpoint.workspace, channel=DeliveryChannel.WEBHOOK)
+    WebhookDelivery.objects.create(
+        delivery=delivery, workspace=endpoint.workspace, endpoint=endpoint, event=event
+    )
+
+    public_ip = "93.184.216.34"
+
+    def fake_getaddrinfo(host, port, proto=None, **kwargs):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (public_ip, port))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+    fake_transport, calls = _fake_transport(status=204)
+    monkeypatch.setattr("webhooks.services.send_pinned_request", fake_transport)
+
+    claimed, token = claim_delivery(delivery_id=delivery.id)
+    handle_webhook_delivery_attempt(delivery=claimed, claim_token=token)
+
+    delivery.refresh_from_db()
+    assert delivery.status == DeliveryStatus.DELIVERED
+    assert len(calls) == 1
+    assert calls[0]["ip"] == public_ip
+    assert calls[0]["hostname"] == "example.com"
+
+
 @pytest.mark.parametrize("status_code", [408, 429, 500, 503])
 def test_retryable_http_status_schedules_retry(monkeypatch, status_code):
     endpoint = WebhookEndpointFactory()

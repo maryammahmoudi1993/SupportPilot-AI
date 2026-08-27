@@ -102,6 +102,50 @@ def test_is_blocked_address_allows_public_ranges(address):
     assert is_blocked_address(ipaddress.ip_address(address)) is False
 
 
+@pytest.mark.parametrize(
+    "address",
+    [
+        "100.64.0.1",  # carrier-grade NAT shared space (RFC 6598)
+        "100.127.255.254",
+        "198.18.0.1",  # benchmarking (RFC 2544)
+        "198.19.255.254",
+        "192.0.2.1",  # TEST-NET-1 documentation (RFC 5737)
+        "198.51.100.1",  # TEST-NET-2 documentation
+        "203.0.113.1",  # TEST-NET-3 documentation
+        "240.0.0.1",  # reserved for future use
+        "fec0::1",  # deprecated IPv6 site-local (RFC 3879)
+        "2001:db8::1",  # IPv6 documentation (RFC 3849)
+        "::ffff:100.64.0.1",  # IPv4-mapped CGN bypass attempt
+        "::ffff:192.168.1.1",  # IPv4-mapped private bypass attempt
+        "224.0.0.1",  # IPv4 multicast
+        "ff02::1",  # IPv6 multicast (duplicated from the matrix above —
+        # re-asserted here because ``is_global`` alone reports it as
+        # global; this is the specific regression this test matrix guards).
+    ],
+)
+def test_is_blocked_address_rejects_non_globally_routable_ranges(address):
+    """Block 3 remediation, section 2-3: ``is_global`` is the primary
+    fail-closed gate, but every one of these was individually verified
+    against this project's Python/stdlib version (see the module
+    docstring) — some (CGN, benchmarking, documentation ranges) because
+    the *previous* private/loopback/link-local/multicast/reserved
+    blacklist did not cover them at all, others (multicast, deprecated
+    site-local) because ``is_global`` alone would incorrectly accept them."""
+    assert is_blocked_address(ipaddress.ip_address(address)) is True
+
+
+def test_is_global_alone_would_incorrectly_accept_multicast():
+    """Documents *why* multicast needs an explicit check on top of
+    ``is_global`` (section 2) — a regression guard on the stdlib's own
+    classification, not just on this module's behavior."""
+    assert ipaddress.ip_address("ff02::1").is_global is True
+    assert ipaddress.ip_address("224.0.0.1").is_global is True
+
+
+def test_is_global_alone_would_incorrectly_accept_deprecated_site_local():
+    assert ipaddress.ip_address("fec0::1").is_global is True
+
+
 # ---------------------------------------------------------------------------
 # SSRF test matrix (section 50) — required cases against the real resolver.
 # ---------------------------------------------------------------------------
@@ -123,6 +167,15 @@ def test_is_blocked_address_allows_public_ranges(address):
         "https://[fc00::1]/",
         "https://[ff02::1]/",
         "https://[::]/",
+        "https://100.64.0.1/",
+        "https://198.18.0.1/",
+        "https://192.0.2.1/",
+        "https://198.51.100.1/",
+        "https://203.0.113.1/",
+        "https://240.0.0.1/",
+        "https://[fec0::1]/",
+        "https://[2001:db8::1]/",
+        "https://[::ffff:100.64.0.1]/",
     ],
 )
 def test_ssrf_matrix_blocked_before_reaching_the_transport(url):
@@ -185,6 +238,17 @@ def test_multiple_dns_results_one_private_fails_closed(monkeypatch):
     """Section 52: a public address AND a private address must both be
     rejected together — never silently pick the public one."""
     monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo("93.184.216.34", "192.168.1.10"))
+    with pytest.raises(WebhookDestinationBlockedError):
+        resolve_and_validate("webhook.example", 443)
+
+
+def test_multiple_dns_results_one_non_global_but_not_private_fails_closed(monkeypatch):
+    """Section 5 of the Block 3 remediation: the second address here
+    (100.64.0.1, carrier-grade NAT) is neither private nor loopback nor
+    reserved under the old blacklist — only the global-routability
+    allowlist catches it. The public member must still never be silently
+    selected."""
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo("93.184.216.34", "100.64.0.1"))
     with pytest.raises(WebhookDestinationBlockedError):
         resolve_and_validate("webhook.example", 443)
 
