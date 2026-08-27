@@ -9,6 +9,7 @@ existing tool-level tests do — never a live/network provider.
 
 from __future__ import annotations
 
+import logging
 from datetime import timedelta
 
 import pytest
@@ -249,6 +250,49 @@ def test_unexpected_non_integration_exception_fails_closed(monkeypatch):
     assert delivery.last_error_code == UNEXPECTED_ERROR_CODE
     attempt = DeliveryAttempt.objects.get(delivery=delivery, attempt_number=1)
     assert attempt.retryable is False
+
+
+def test_unexpected_error_never_logs_raw_exception_text(monkeypatch, caplog):
+    """Block 2 remediation: the unexpected-provider-failure path must never
+    log ``str(exc)``/``repr(exc)``/a traceback, only stable safe metadata —
+    a secret embedded in an untrusted exception's message must never reach
+    the log stream, regardless of formatter/DEBUG setting."""
+    secret_marker = "SUPER_SECRET_NOTIFICATION_TOKEN_987654"
+    tool_execution, workspace, _fake = _setup(monkeypatch)
+
+    def _boom(**kwargs):
+        raise RuntimeError(f"provider blew up while handling token={secret_marker}")
+
+    monkeypatch.setattr("notifications.notification_delivery.send_notification", _boom)
+    notification_delivery = create_or_reuse_notification_delivery(
+        tool_execution=tool_execution,
+        workspace=workspace,
+        recipient_email="a@example.com",
+        subject="s",
+        body="b",
+    )
+    delivery, token = claim_delivery(delivery_id=notification_delivery.delivery_id)
+
+    with caplog.at_level(logging.DEBUG, logger="supportpilot"):
+        handle_notification_delivery_attempt(delivery=delivery, claim_token=token)
+
+    assert secret_marker not in caplog.text
+    matching = [r for r in caplog.records if getattr(r, "event", None) == UNEXPECTED_ERROR_CODE]
+    assert len(matching) == 1
+    record = matching[0]
+    # No exc_info attached at all (never exc_info=True / logger.exception) —
+    # the only thing identifying the exception is its class name.
+    assert record.exc_info is None
+    assert record.exception_type == "RuntimeError"
+    assert secret_marker not in record.getMessage()
+
+    delivery.refresh_from_db()
+    assert delivery.status == DeliveryStatus.DEAD
+    assert delivery.last_error_code == UNEXPECTED_ERROR_CODE
+    assert secret_marker not in delivery.last_error_code
+    attempt = DeliveryAttempt.objects.get(delivery=delivery, attempt_number=1)
+    assert attempt.safe_error_code == UNEXPECTED_ERROR_CODE
+    assert secret_marker not in attempt.safe_error_code
 
 
 # ---------------------------------------------------------------------------

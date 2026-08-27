@@ -8,6 +8,7 @@ PostgreSQL row locking across real threads.
 
 from __future__ import annotations
 
+import logging
 import threading
 
 import django.db as django_db
@@ -49,6 +50,35 @@ def test_broker_publication_failure_leaves_delivery_recoverable(monkeypatch):
 
     claimed, _token = claim_delivery(delivery_id=delivery.id)
     assert claimed.status == DeliveryStatus.CLAIMED
+
+
+def test_broker_publication_failure_never_logs_raw_exception_text(monkeypatch, caplog):
+    """Block 2 remediation: an injected broker/Kombu exception carrying a
+    secret-like marker must never reach the log stream, and the delivery
+    must remain exactly as recoverable as the non-adversarial case above."""
+    secret_marker = "BROKER_SECRET_MARKER_123456"
+
+    def _raise_broker_error(*args, **kwargs):
+        raise RuntimeError(f"kombu connection failed: {secret_marker}")
+
+    monkeypatch.setattr(tasks_module.process_delivery_task, "delay", _raise_broker_error)
+
+    tool_execution = ToolExecutionFactory()
+    workspace = tool_execution.workspace
+
+    with caplog.at_level(logging.DEBUG, logger="supportpilot"):
+        delivery = create_delivery(workspace=workspace, channel=DeliveryChannel.NOTIFICATION)
+
+    assert secret_marker not in caplog.text
+    for record in caplog.records:
+        assert record.exc_info is None
+        assert secret_marker not in record.getMessage()
+
+    delivery.refresh_from_db()
+    assert delivery.status == DeliveryStatus.PENDING
+    assert delivery.attempt_count == 0
+    assert delivery.last_error_code == ""
+    assert DeliveryAttempt.objects.filter(delivery=delivery).count() == 0
 
 
 def test_two_concurrent_task_deliveries_call_provider_only_once(monkeypatch):

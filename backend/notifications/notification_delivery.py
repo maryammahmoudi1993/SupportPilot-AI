@@ -31,10 +31,17 @@ logger = logging.getLogger("supportpilot")
 #: terminal, never retried (section 15). An unclassified failure might be a
 #: permanent bug rather than a transient outage; silently retrying an
 #: unknown failure until the attempt budget burns out is worse than
-#: surfacing it as DEAD immediately for an operator to investigate. The full
-#: exception is logged server-side (never persisted to any delivery field)
-#: via ``logger.exception``, matching ``tools/execution.py``'s identical
-#: handler-boundary convention.
+#: surfacing it as DEAD immediately for an operator to investigate.
+#:
+#: Deliberately *not* logged via ``logger.exception``/``exc_info=True``
+#: (unlike ``tools/execution.py``'s handler-boundary convention): the
+#: exception here can originate from an external provider/library this
+#: block does not control, so it is untrusted and may carry secret- or
+#: credential-like text. Only stable, safe metadata (event, workspace/
+#: delivery id, attempt number, exception *type* name) is ever logged —
+#: never ``str(exc)``, ``repr(exc)``, ``exc.args``, or a rendered traceback
+#: — and nothing beyond the stable error code below is ever persisted to a
+#: delivery field.
 UNEXPECTED_ERROR_CODE = "notification_delivery_unexpected_error"
 MISSING_SNAPSHOT_ERROR_CODE = "notification_delivery_missing"
 
@@ -123,8 +130,26 @@ def handle_notification_delivery_attempt(*, delivery: Delivery, claim_token: uui
             retryable=exc.retryable,
         )
         return
-    except Exception:  # noqa: BLE001 - the documented fail-closed boundary above
-        logger.exception("notification_delivery_unexpected_error")
+    except Exception as exc:  # noqa: BLE001 - the documented fail-closed boundary above
+        # Section 27, 34 (Block 2 remediation): this exception is untrusted
+        # — it may originate from a provider/library we do not control and
+        # could carry credential- or secret-like text in its message or
+        # args. Never ``logger.exception``/``exc_info=True`` here: with
+        # ``DEBUG`` on, the plain "verbose" formatter renders a full
+        # traceback (including ``str(exc)``) into the log line, and no
+        # formatter is trusted to redact it. Only stable, safe metadata is
+        # ever logged — never ``str(exc)``, ``repr(exc)``, ``exc.args``, or
+        # a traceback.
+        logger.error(
+            "notification_delivery_unexpected_error",
+            extra={
+                "event": "notification_delivery_unexpected_error",
+                "workspace_id": str(delivery.workspace_id),
+                "delivery_id": str(delivery.id),
+                "attempt_number": delivery.attempt_count,
+                "exception_type": type(exc).__name__,
+            },
+        )
         complete_delivery_failure(
             delivery_id=delivery.id,
             claim_token=claim_token,
