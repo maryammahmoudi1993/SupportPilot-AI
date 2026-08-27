@@ -1,6 +1,14 @@
-"""Celery boundary tests (section 19-20, 25): the task calls the service and
-carries no domain logic; a duplicate task delivery never creates a second
-simultaneously active attempt."""
+"""Celery boundary tests (section 19-20, 25; Block 2 section 4, 14): the
+task calls the service and carries no domain logic; a duplicate task
+delivery never creates a second simultaneously active attempt; a genuinely
+unregistered channel is skipped without consuming a claim/attempt slot
+(replacing Block 1's placeholder dead-lettering, which is no longer
+acceptable now that a real producer — ``notification.send`` — exists).
+
+Uses a throwaway fake channel/handler (monkeypatched into the registry) so
+these tests stay about task/claim plumbing, independent of the real
+notification handler covered in ``test_notification_delivery.py``.
+"""
 
 from __future__ import annotations
 
@@ -9,31 +17,64 @@ from datetime import timedelta
 import pytest
 from django.utils import timezone
 
+import notifications.handlers as handlers_module
 from notifications.models import DeliveryAttempt, DeliveryStatus
-from notifications.services import NO_HANDLER_ERROR_CODE
+from notifications.services import complete_delivery_success
 from notifications.tasks import process_delivery_task
 from notifications.tests.factories import DeliveryFactory
 
 pytestmark = pytest.mark.django_db
 
+FAKE_CHANNEL = "test_fake_channel"
 
-def test_task_calls_service_and_dead_letters_with_no_handler_registered():
-    delivery = DeliveryFactory(next_attempt_at=timezone.now() - timedelta(seconds=1))
+
+@pytest.fixture
+def fake_channel_calls(monkeypatch):
+    calls: list[tuple] = []
+
+    def handler(*, delivery, claim_token):
+        calls.append((delivery.id, claim_token))
+        complete_delivery_success(delivery_id=delivery.id, claim_token=claim_token)
+
+    patched = dict(handlers_module._HANDLERS)
+    patched[FAKE_CHANNEL] = handler
+    monkeypatch.setattr(handlers_module, "_HANDLERS", patched)
+    return calls
+
+
+def test_task_calls_registered_handler_which_completes_the_delivery(fake_channel_calls):
+    delivery = DeliveryFactory(
+        channel=FAKE_CHANNEL, next_attempt_at=timezone.now() - timedelta(seconds=1)
+    )
     result = process_delivery_task.apply(args=[str(delivery.id)]).get()
-    assert result == "dead_lettered"
+    assert result == "processed"
+    assert len(fake_channel_calls) == 1
     delivery.refresh_from_db()
-    assert delivery.status == DeliveryStatus.DEAD
-    assert delivery.last_error_code == NO_HANDLER_ERROR_CODE
-    assert DeliveryAttempt.objects.filter(delivery=delivery, attempt_number=1).count() == 1
+    assert delivery.status == DeliveryStatus.DELIVERED
 
 
-def test_duplicate_task_delivery_is_a_safe_no_op():
-    delivery = DeliveryFactory(next_attempt_at=timezone.now() - timedelta(seconds=1))
+def test_duplicate_task_delivery_is_a_safe_no_op(fake_channel_calls):
+    delivery = DeliveryFactory(
+        channel=FAKE_CHANNEL, next_attempt_at=timezone.now() - timedelta(seconds=1)
+    )
     first = process_delivery_task.apply(args=[str(delivery.id)]).get()
     second = process_delivery_task.apply(args=[str(delivery.id)]).get()
-    assert first == "dead_lettered"
+    assert first == "processed"
     assert second == "skipped"
+    assert len(fake_channel_calls) == 1
     assert DeliveryAttempt.objects.filter(delivery=delivery).count() == 1
+
+
+def test_unsupported_channel_is_skipped_without_consuming_an_attempt():
+    delivery = DeliveryFactory(
+        channel="unregistered_chan", next_attempt_at=timezone.now() - timedelta(seconds=1)
+    )
+    result = process_delivery_task.apply(args=[str(delivery.id)]).get()
+    assert result == "skipped_unsupported_channel"
+    delivery.refresh_from_db()
+    assert delivery.status == DeliveryStatus.PENDING
+    assert delivery.attempt_count == 0
+    assert DeliveryAttempt.objects.filter(delivery=delivery).count() == 0
 
 
 def test_task_on_unclaimable_delivery_skips_safely():
