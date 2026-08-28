@@ -108,6 +108,10 @@ env = environ.Env(
     # Bounded batch size for the due-work/expired-claim recovery sweepers
     # (section 11) — never an unbounded in-memory load of all due rows.
     DELIVERY_SWEEP_BATCH_SIZE=(int, 100),
+    # Celery Beat cadence for both recovery sweeper tasks (section 18) —
+    # server-owned and configurable, never sub-second polling. See
+    # ``config/celery.py``.
+    DELIVERY_SWEEP_INTERVAL_SECONDS=(float, 30.0),
     # Outbound webhooks (Phase 10 Block 3). HTTPS is required in production;
     # plaintext HTTP is a server-owned opt-in for local/dev only (section 19)
     # — never something an endpoint owner's URL can trigger by itself.
@@ -451,6 +455,7 @@ DELIVERY_CLAIM_LEASE_SECONDS = env("DELIVERY_CLAIM_LEASE_SECONDS")
 DELIVERY_RETRY_BASE_DELAY_SECONDS = env("DELIVERY_RETRY_BASE_DELAY_SECONDS")
 DELIVERY_RETRY_MAX_DELAY_SECONDS = env("DELIVERY_RETRY_MAX_DELAY_SECONDS")
 DELIVERY_SWEEP_BATCH_SIZE = env("DELIVERY_SWEEP_BATCH_SIZE")
+DELIVERY_SWEEP_INTERVAL_SECONDS = env("DELIVERY_SWEEP_INTERVAL_SECONDS")
 
 # Outbound webhooks (Phase 10 Block 3) — see ``webhooks/security.py`` and
 # ``webhooks/transport.py``. Every value here is server-owned; an endpoint

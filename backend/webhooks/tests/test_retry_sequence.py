@@ -1,8 +1,11 @@
 """Full webhook retry sequences through the Block 4 recovery boundary
 (section 24, 52-53): 500 -> 500 -> 204 with correct exponential backoff,
-stable identity (event/delivery/idempotency/body) across every attempt, and
-per-attempt DNS re-validation — plus a disabled endpoint staying unsent
-through the sweeper.
+stable identity (event id/delivery id/Idempotency-Key/raw body) across every
+attempt, a *fresh* timestamp and recomputed signature per attempt (the
+signing scheme is HMAC(secret, timestamp + "." + raw_body) — the body is
+what must stay byte-identical across retries, never the signature, which is
+only ever a stale replay if it were reused), and per-attempt DNS
+re-validation — plus a disabled endpoint staying unsent through the sweeper.
 """
 
 from __future__ import annotations
@@ -25,7 +28,8 @@ from notifications.tasks import process_delivery_task
 from webhooks.errors import WebhookEndpointDisabledError
 from webhooks.models import WebhookDelivery, WebhookEndpointStatus
 from webhooks.services import handle_webhook_delivery_attempt
-from webhooks.tests.factories import WebhookEndpointFactory, WebhookEventFactory
+from webhooks.signing import build_signed_request, sign
+from webhooks.tests.factories import TEST_SECRET, WebhookEndpointFactory, WebhookEventFactory
 from webhooks.transport import TransportResult
 
 pytestmark = pytest.mark.django_db(transaction=True)
@@ -55,13 +59,32 @@ def test_500_500_204_sequence_has_correct_backoff_and_stable_identity(monkeypatc
 
     monkeypatch.setattr("webhooks.services.resolve_and_validate", _resolve)
 
+    # A fresh, strictly-increasing signing timestamp per attempt — proves
+    # the signature is genuinely recomputed from that attempt's own
+    # timestamp, not frozen from the first attempt. Real `time.time()` calls
+    # in a fast test can legitimately collide on the same integer second,
+    # which would make "signatures differ" pass or fail by accident rather
+    # than by design (see the docstring above), so this wraps the real
+    # ``build_signed_request`` and injects an explicit, controlled ``now``
+    # instead of patching the global ``time`` module (which would also
+    # affect the logging module's own timestamps).
+    real_build_signed_request = build_signed_request
+    fake_clock = iter([1_700_000_000, 1_700_000_030, 1_700_000_090])
+
+    def _build_with_fresh_timestamp(**kwargs):
+        return real_build_signed_request(now=next(fake_clock), **kwargs)
+
+    monkeypatch.setattr("webhooks.services.build_signed_request", _build_with_fresh_timestamp)
+
     responses = iter([500, 500, 204])
     bodies: list[bytes] = []
     signatures: list[str] = []
+    timestamps: list[str] = []
 
     def fake_transport(*, scheme, ip, port, hostname, path_and_query, headers, body, method="POST"):
         bodies.append(body)
         signatures.append(headers["X-SupportPilot-Signature"])
+        timestamps.append(headers["X-SupportPilot-Timestamp"])
         return TransportResult(status_code=next(responses), latency_ms=1)
 
     monkeypatch.setattr("webhooks.services.send_pinned_request", fake_transport)
@@ -103,10 +126,21 @@ def test_500_500_204_sequence_has_correct_backoff_and_stable_identity(monkeypatc
     assert delivery.status == DeliveryStatus.DELIVERED
     assert delivery.attempt_count == 3
 
-    # Identity stable across all three attempts (section 24).
+    # The raw event body is stable across all three attempts (section 24) —
+    # never re-serialized, so its bytes are identical every time.
     assert len(bodies) == 3
     assert bodies[0] == bodies[1] == bodies[2]
-    assert signatures[0] == signatures[1] == signatures[2]
+
+    # The timestamp and signature are the opposite: each attempt gets a
+    # fresh timestamp (from this test's controlled clock) and therefore a
+    # freshly-recomputed signature — reusing a signature across attempts
+    # would mean the timestamp was frozen and never actually protecting
+    # against replay, which is not this scheme's design.
+    assert timestamps == ["1700000000", "1700000030", "1700000090"]
+    assert len(set(signatures)) == 3, "each attempt must sign its own fresh timestamp"
+    for ts, sig, body in zip(timestamps, signatures, bodies, strict=True):
+        assert sig == sign(secret=TEST_SECRET, timestamp=int(ts), raw_body=body)
+
     assert dns_calls == ["example.com", "example.com", "example.com"]  # re-resolved every attempt
     assert WebhookDelivery.objects.filter(event=event).count() == 1  # still one logical delivery
     assert (

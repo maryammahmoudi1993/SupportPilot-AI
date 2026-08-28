@@ -10,6 +10,7 @@ notification/webhook handlers covered elsewhere.
 
 from __future__ import annotations
 
+import logging
 import threading
 from datetime import timedelta
 
@@ -169,6 +170,77 @@ def test_initial_broker_failure_then_sweeper_recovery_end_to_end(monkeypatch, fa
     delivery.refresh_from_db()
     assert delivery.status == DeliveryStatus.DELIVERED
     assert len(fake_channel_calls) == 1
+
+
+@pytest.mark.django_db(transaction=True)
+def test_sweeper_broker_failure_never_logs_raw_exception_text(monkeypatch, caplog):
+    """Block 2's secret-safe logging regression (section 42, adversarially
+    re-proven for Block 4's *new* publication call site): the sweeper's own
+    best-effort republish goes through the exact same
+    ``dispatch_delivery_for_processing`` -> ``process_delivery_task.delay``
+    call as ``create_delivery``'s ``transaction.on_commit`` hook, but this
+    exercises it from ``dispatch_due_deliveries`` directly — a call path
+    ``test_notification_delivery_dispatch.py``'s equivalent test never
+    reaches — so it must be proven independently rather than assumed to
+    inherit the earlier guarantee."""
+    secret_marker = "SWEEPER_BROKER_SECRET_MARKER_998877"
+
+    def _raise_broker_error(*args, **kwargs):
+        raise RuntimeError(f"kombu connection failed: {secret_marker}")
+
+    monkeypatch.setattr(tasks_module.process_delivery_task, "delay", _raise_broker_error)
+
+    delivery = DeliveryFactory(
+        status=DeliveryStatus.PENDING, next_attempt_at=timezone.now() - timedelta(seconds=1)
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="supportpilot"):
+        count = dispatch_due_deliveries()
+
+    assert count == 1
+    assert secret_marker not in caplog.text
+    for record in caplog.records:
+        assert record.exc_info is None
+        assert secret_marker not in record.getMessage()
+
+    delivery.refresh_from_db()
+    assert delivery.status == DeliveryStatus.PENDING
+    assert delivery.attempt_count == 0
+    assert not DeliveryAttempt.objects.filter(delivery=delivery).exists()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_expired_claim_sweeper_broker_failure_never_logs_raw_exception_text(monkeypatch, caplog):
+    """Same adversarial proof as above, for the other new Block 4
+    publication call site (``recover_expired_delivery_claims``)."""
+    import uuid
+
+    secret_marker = "EXPIRED_CLAIM_SWEEPER_SECRET_MARKER_554433"
+
+    def _raise_broker_error(*args, **kwargs):
+        raise RuntimeError(f"kombu connection failed: {secret_marker}")
+
+    monkeypatch.setattr(tasks_module.process_delivery_task, "delay", _raise_broker_error)
+
+    now = timezone.now()
+    delivery = DeliveryFactory(
+        status=DeliveryStatus.CLAIMED,
+        claim_token=uuid.uuid4(),
+        claimed_at=now - timedelta(minutes=10),
+        lease_expires_at=now - timedelta(minutes=1),
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="supportpilot"):
+        count = recover_expired_delivery_claims()
+
+    assert count == 1
+    assert secret_marker not in caplog.text
+    for record in caplog.records:
+        assert record.exc_info is None
+        assert secret_marker not in record.getMessage()
+
+    delivery.refresh_from_db()
+    assert delivery.status == DeliveryStatus.CLAIMED
 
 
 # ---------------------------------------------------------------------------
