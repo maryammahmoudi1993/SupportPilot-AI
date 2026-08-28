@@ -72,6 +72,12 @@ class TestAgentContextSettings:
         assert settings.AGENTS_RAG_MAX_CHARACTERS >= 1
 
 
+class TestDeliverySweepInterval:
+    def test_sweep_interval_default_is_positive_and_thirty_seconds(self):
+        assert settings.DELIVERY_SWEEP_INTERVAL_SECONDS > 0
+        assert settings.DELIVERY_SWEEP_INTERVAL_SECONDS == 30.0
+
+
 class TestCors:
     def test_cors_does_not_allow_all_origins(self):
         assert getattr(settings, "CORS_ALLOW_ALL_ORIGINS", False) is not True

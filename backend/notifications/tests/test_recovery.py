@@ -190,6 +190,15 @@ def test_sweeper_broker_failure_never_logs_raw_exception_text(monkeypatch, caplo
 
     monkeypatch.setattr(tasks_module.process_delivery_task, "delay", _raise_broker_error)
 
+    # A broker publication failure must mean the Celery task body never
+    # runs at all — explicitly guard the provider call it would otherwise
+    # reach, so "no network call occurs" is proven, not merely assumed from
+    # the delay() exception alone.
+    def _fail_if_called(*args, **kwargs):
+        raise AssertionError("provider must never be called when publication itself failed")
+
+    monkeypatch.setattr("notifications.notification_delivery.send_notification", _fail_if_called)
+
     delivery = DeliveryFactory(
         status=DeliveryStatus.PENDING, next_attempt_at=timezone.now() - timedelta(seconds=1)
     )
@@ -222,6 +231,11 @@ def test_expired_claim_sweeper_broker_failure_never_logs_raw_exception_text(monk
 
     monkeypatch.setattr(tasks_module.process_delivery_task, "delay", _raise_broker_error)
 
+    def _fail_if_called(*args, **kwargs):
+        raise AssertionError("provider must never be called when publication itself failed")
+
+    monkeypatch.setattr("notifications.notification_delivery.send_notification", _fail_if_called)
+
     now = timezone.now()
     delivery = DeliveryFactory(
         status=DeliveryStatus.CLAIMED,
@@ -241,6 +255,8 @@ def test_expired_claim_sweeper_broker_failure_never_logs_raw_exception_text(monk
 
     delivery.refresh_from_db()
     assert delivery.status == DeliveryStatus.CLAIMED
+    assert delivery.attempt_count == 0
+    assert not DeliveryAttempt.objects.filter(delivery=delivery).exists()
 
 
 # ---------------------------------------------------------------------------

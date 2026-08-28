@@ -457,6 +457,9 @@ DELIVERY_RETRY_MAX_DELAY_SECONDS = env("DELIVERY_RETRY_MAX_DELAY_SECONDS")
 DELIVERY_SWEEP_BATCH_SIZE = env("DELIVERY_SWEEP_BATCH_SIZE")
 DELIVERY_SWEEP_INTERVAL_SECONDS = env("DELIVERY_SWEEP_INTERVAL_SECONDS")
 
+if DELIVERY_SWEEP_INTERVAL_SECONDS <= 0:
+    raise ValueError("DELIVERY_SWEEP_INTERVAL_SECONDS must be positive")
+
 # Outbound webhooks (Phase 10 Block 3) — see ``webhooks/security.py`` and
 # ``webhooks/transport.py``. Every value here is server-owned; an endpoint
 # owner's URL/configuration can never widen it (section 19, 28).
