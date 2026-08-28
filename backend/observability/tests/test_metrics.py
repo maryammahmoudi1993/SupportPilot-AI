@@ -67,6 +67,18 @@ class TestHttpRequestObservation:
             )
             assert value == 1.0
 
+    def test_out_of_range_status_codes_collapse_to_one_bounded_fallback(self):
+        for status_code in (199, 600, 999):
+            route = f"test-metrics-status-fallback-{status_code}"
+            observe_http_request(
+                method="GET", route=route, status_code=status_code, duration_seconds=0.01
+            )
+            value = _sample_value(
+                metric_name=f"{METRIC_NAMESPACE}_http_requests_total",
+                labels={"method": "GET", "route": route, "status_class": "other"},
+            )
+            assert value == 1.0
+
     def test_histogram_records_an_observation_in_the_count_series(self):
         route = "test-metrics-histogram-route"
         observe_http_request(method="POST", route=route, status_code=201, duration_seconds=0.02)

@@ -58,12 +58,13 @@ METRIC_NAMESPACE = "supportpilot"
 # HTTP
 # ---------------------------------------------------------------------------
 
-#: Labels: ``method`` (HTTP verb — bounded, ~9 values), ``route`` (the
+#: Labels: ``method`` (one of ``GET``/``POST``/``PUT``/``PATCH``/``DELETE``/
+#: ``HEAD``/``OPTIONS``/``OTHER``), ``route`` (the
 #: resolved Django URL name, e.g. ``"webhook-endpoint-detail"`` — bounded by
 #: the URLconf, never the raw request path/querystring; unresolved paths are
 #: collapsed to the single value ``"unmatched"`` rather than one series per
 #: probed path — see ``observability/middleware.py``), ``status_class``
-#: (``"2xx"``/``"3xx"``/``"4xx"``/``"5xx"`` — 4 values).
+#: (``"2xx"``/``"3xx"``/``"4xx"``/``"5xx"``/``"other"`` — 5 values).
 HTTP_REQUESTS_TOTAL = Counter(
     f"{METRIC_NAMESPACE}_http_requests_total",
     "Total HTTP requests handled, by method/route/status class.",
@@ -81,8 +82,20 @@ HTTP_REQUEST_DURATION_SECONDS = Histogram(
 )
 
 
+_HTTP_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"})
+_HTTP_STATUS_CLASSES = frozenset({2, 3, 4, 5})
+
+
+def _http_method(method: str) -> str:
+    """Collapse attacker-controlled/custom HTTP verbs to one stable label."""
+    normalized_method = method.upper()
+    return normalized_method if normalized_method in _HTTP_METHODS else "OTHER"
+
+
 def _status_class(status_code: int) -> str:
-    return f"{status_code // 100}xx"
+    """Return a bounded class even if application code emits an invalid status."""
+    status_class = status_code // 100
+    return f"{status_class}xx" if status_class in _HTTP_STATUS_CLASSES else "other"
 
 
 def observe_http_request(
@@ -91,9 +104,10 @@ def observe_http_request(
     """The single call site every HTTP metrics recorder must go through
     (section 7) — keeps the two HTTP metrics' label values consistent with
     each other by construction."""
+    method_label = _http_method(method)
     status_class = _status_class(status_code)
-    HTTP_REQUESTS_TOTAL.labels(method=method, route=route, status_class=status_class).inc()
-    HTTP_REQUEST_DURATION_SECONDS.labels(method=method, route=route).observe(duration_seconds)
+    HTTP_REQUESTS_TOTAL.labels(method=method_label, route=route, status_class=status_class).inc()
+    HTTP_REQUEST_DURATION_SECONDS.labels(method=method_label, route=route).observe(duration_seconds)
 
 
 # ---------------------------------------------------------------------------

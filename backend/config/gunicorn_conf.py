@@ -12,11 +12,13 @@ correct under Gunicorn's multi-worker model (section 29, release-critical):
   worker process that is forked afterwards sees the same variable already
   present *before* it imports ``observability.metrics`` — which is exactly
   the timing ``prometheus_client`` requires (see that module's docstring).
-* ``child_exit`` runs in the master whenever a worker process exits, and
-  tells ``prometheus_client`` to discard that worker's mmap files
-  immediately — without this, a scrape after a worker restart (a graceful
-  reload, an OOM-killed worker Gunicorn replaces) would keep double-counting
-  a dead process's last-known values forever.
+* ``child_exit`` runs in the master whenever a worker process exits and
+  calls ``prometheus_client.multiprocess.mark_process_dead``. The client
+  removes that worker's live-gauge files; counter and histogram files are
+  deliberately retained so their cumulative values survive a worker recycle,
+  then removed by ``on_starting`` at the next master start. Block 1 currently
+  defines counters and histograms only, but the hook keeps future live gauges
+  correct as well.
 
 Only ``gunicorn`` (the production web process) uses this file — Celery
 workers and ``manage.py`` commands are deliberately left in

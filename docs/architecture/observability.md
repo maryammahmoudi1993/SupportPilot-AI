@@ -59,7 +59,10 @@ genuine 404, or an attacker probing many distinct paths) collapses to the
 single bounded value `"unmatched"` rather than creating one time series per
 attempted path — this is a cardinality-attack defense, not just a naming
 convenience (see [Cardinality rules](#cardinality-rules)). `status_class` is
-one of `2xx`/`3xx`/`4xx`/`5xx`.
+one of `2xx`/`3xx`/`4xx`/`5xx`, with `other` as a stable fallback for an
+out-of-range status produced by application code. `method` is one of
+`GET`/`POST`/`PUT`/`PATCH`/`DELETE`/`HEAD`/`OPTIONS`; custom or unknown verbs
+collapse to `OTHER` before reaching the metrics registry.
 
 `observability/middleware.MetricsMiddleware` records both metrics for every
 completed request, after `common.middleware.StructuredLoggingMiddleware` in
@@ -117,9 +120,13 @@ specifically:
   `prometheus_client` requires. Wiping the directory on every master start
   avoids aggregating stale mmap files left over from a previous
   container/deploy into the current scrape.
-- `child_exit` runs whenever a worker exits and immediately discards that
-  worker's files, so a scrape after a worker restart never keeps
-  double-counting a dead process's last-known values.
+- `child_exit` runs whenever a worker exits and calls
+  `prometheus_client.multiprocess.mark_process_dead`. The client removes
+  live-gauge files for that worker. Counter and histogram files are retained
+  deliberately so their cumulative values survive a worker recycle; the next
+  master start removes them with the rest of the multiprocess directory.
+  Block 1 defines counters and histograms only, but the hook also makes future
+  live gauges safe.
 
 Rendering a scrape (`observability.metrics.render_metrics`) branches at
 **render time**: if `PROMETHEUS_MULTIPROC_DIR` is set, it builds a fresh

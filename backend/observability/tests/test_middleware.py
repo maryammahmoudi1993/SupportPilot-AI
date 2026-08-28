@@ -26,6 +26,18 @@ def _all_route_labels(metric_name: str) -> set[str]:
     return routes
 
 
+def _method_labels_for_route(metric_name: str, route: str) -> set[str]:
+    body = render_metrics().decode("utf-8")
+    return {
+        sample.labels["method"]
+        for family in text_string_to_metric_families(body)
+        for sample in family.samples
+        if sample.name == metric_name
+        and sample.labels.get("route") == route
+        and "method" in sample.labels
+    }
+
+
 @pytest.mark.django_db
 class TestMetricsMiddlewareRouteNormalization:
     def test_known_route_uses_the_bounded_url_name_not_the_raw_path(self, api_client):
@@ -69,6 +81,38 @@ class TestMetricsMiddlewareRouteNormalization:
                 ):
                     value = (value or 0.0) + sample.value
         assert value is not None and value >= 50
+
+
+@pytest.mark.django_db
+class TestMetricsMiddlewareMethodNormalization:
+    @pytest.mark.parametrize("method", ["GET", "POST", "PUT", "PATCH", "DELETE"])
+    def test_normal_methods_retain_their_own_bounded_label(self, api_client, method):
+        api_client.generic(method, "/health/")
+
+        methods = _method_labels_for_route(
+            f"{METRIC_NAMESPACE}_http_requests_total", "health:health"
+        )
+        assert method in methods
+
+    def test_cardinality_attack_custom_methods_collapse_to_one_series(self, api_client):
+        custom_methods = [f"CUSTOM_{index:04d}" for index in range(1, 101)]
+        for method in custom_methods:
+            api_client.generic(method, "/health/")
+
+        body = render_metrics().decode("utf-8")
+        for method in custom_methods:
+            assert method not in body
+
+        counter_methods = _method_labels_for_route(
+            f"{METRIC_NAMESPACE}_http_requests_total", "health:health"
+        )
+        histogram_methods = _method_labels_for_route(
+            f"{METRIC_NAMESPACE}_http_request_duration_seconds_count", "health:health"
+        )
+        assert "OTHER" in counter_methods
+        assert "OTHER" in histogram_methods
+        assert not counter_methods.intersection(custom_methods)
+        assert not histogram_methods.intersection(custom_methods)
 
 
 @pytest.mark.django_db
