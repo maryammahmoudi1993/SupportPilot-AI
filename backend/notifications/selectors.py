@@ -30,7 +30,7 @@ def due_claimable_deliveries(*, now=None) -> QuerySet[Delivery]:
     now = now or timezone.now()
     return Delivery.objects.filter(
         status__in=DELIVERY_DUE_CLAIMABLE_STATUSES, next_attempt_at__lte=now
-    ).order_by("next_attempt_at")
+    ).order_by("next_attempt_at", "created_at", "id")
 
 
 def expired_claimed_deliveries(*, now=None) -> QuerySet[Delivery]:
@@ -39,7 +39,7 @@ def expired_claimed_deliveries(*, now=None) -> QuerySet[Delivery]:
     now = now or timezone.now()
     return Delivery.objects.filter(
         status=DeliveryStatus.CLAIMED, lease_expires_at__lte=now
-    ).order_by("lease_expires_at")
+    ).order_by("lease_expires_at", "created_at", "id")
 
 
 def get_delivery_for_workspace(*, workspace_id, delivery_id: uuid.UUID | str) -> Delivery | None:

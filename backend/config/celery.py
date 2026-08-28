@@ -25,4 +25,19 @@ app.conf.beat_schedule = {
         "task": "approvals.tasks.expire_stale_approvals_task",
         "schedule": 300.0,  # every 5 minutes
     },
+    # Phase 10 Block 4 (section 17-18): recovery for durable deliveries
+    # (notifications and webhooks share this state — no per-channel Beat
+    # task is needed). 30 seconds is frequent enough to make broker-outage
+    # and worker-crash recovery feel prompt without sub-second polling; both
+    # tasks are cheap best-effort re-publications, not the actual provider
+    # I/O, so running them from more than one Beat instance at once is safe
+    # (section 19) — see ``notifications/recovery.py``.
+    "dispatch-due-deliveries": {
+        "task": "notifications.tasks.dispatch_due_deliveries_task",
+        "schedule": 30.0,
+    },
+    "recover-expired-delivery-claims": {
+        "task": "notifications.tasks.recover_expired_delivery_claims_task",
+        "schedule": 30.0,
+    },
 }

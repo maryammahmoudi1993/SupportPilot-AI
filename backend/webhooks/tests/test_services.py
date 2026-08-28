@@ -353,7 +353,7 @@ def test_timeout_is_retryable_with_no_raw_exception_persisted(monkeypatch):
 
 
 def test_max_attempts_bounds_actual_transport_call_count(monkeypatch, settings):
-    settings.DELIVERY_DEFAULT_RETRY_DELAY_SECONDS = 0
+    settings.DELIVERY_RETRY_BASE_DELAY_SECONDS = 0
 
     endpoint = WebhookEndpointFactory()
     event = WebhookEventFactory(workspace=endpoint.workspace)

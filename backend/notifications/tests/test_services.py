@@ -235,6 +235,38 @@ def test_retryable_failure_with_budget_remaining_schedules_retry():
     assert result.failed_at is None
 
 
+def test_retry_delay_defaults_to_exponential_backoff_when_not_overridden(settings):
+    """Phase 10 Block 4 (section 4-5): with no explicit ``retry_delay_seconds``,
+    the schedule is computed from the just-failed attempt's own number, not a
+    flat server-owned delay."""
+    settings.DELIVERY_RETRY_BASE_DELAY_SECONDS = 30
+    settings.DELIVERY_RETRY_MAX_DELAY_SECONDS = 3600
+    delivery = DeliveryFactory(
+        max_attempts=5, next_attempt_at=timezone.now() - timedelta(seconds=1)
+    )
+
+    t0 = timezone.now()
+    claimed, token = claim_delivery(delivery_id=delivery.id, now=t0)
+    result = complete_delivery_failure(
+        delivery_id=claimed.id, claim_token=token, safe_error_code="x", retryable=True, now=t0
+    )
+    assert result.next_attempt_at == t0 + timedelta(seconds=30)  # attempt 1 -> base delay
+
+    t1 = t0 + timedelta(seconds=30)
+    claimed, token = claim_delivery(delivery_id=result.id, now=t1)
+    result = complete_delivery_failure(
+        delivery_id=claimed.id, claim_token=token, safe_error_code="x", retryable=True, now=t1
+    )
+    assert result.next_attempt_at == t1 + timedelta(seconds=60)  # attempt 2 -> base * 2
+
+    t2 = t1 + timedelta(seconds=60)
+    claimed, token = claim_delivery(delivery_id=result.id, now=t2)
+    result = complete_delivery_failure(
+        delivery_id=claimed.id, claim_token=token, safe_error_code="x", retryable=True, now=t2
+    )
+    assert result.next_attempt_at == t2 + timedelta(seconds=120)  # attempt 3 -> base * 4
+
+
 def test_retryable_failure_with_budget_exhausted_terminates_as_failed():
     delivery = DeliveryFactory(
         max_attempts=1, next_attempt_at=timezone.now() - timedelta(seconds=1)

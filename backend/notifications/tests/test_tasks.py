@@ -20,7 +20,11 @@ from django.utils import timezone
 import notifications.handlers as handlers_module
 from notifications.models import DeliveryAttempt, DeliveryStatus
 from notifications.services import complete_delivery_success
-from notifications.tasks import process_delivery_task
+from notifications.tasks import (
+    dispatch_due_deliveries_task,
+    process_delivery_task,
+    recover_expired_delivery_claims_task,
+)
 from notifications.tests.factories import DeliveryFactory
 
 pytestmark = pytest.mark.django_db
@@ -81,3 +85,34 @@ def test_task_on_unclaimable_delivery_skips_safely():
     delivery = DeliveryFactory(status=DeliveryStatus.DELIVERED)
     result = process_delivery_task.apply(args=[str(delivery.id)]).get()
     assert result == "skipped"
+
+
+# ---------------------------------------------------------------------------
+# Recovery sweeper Celery Beat task bodies (Phase 10 Block 4, section 17)
+# ---------------------------------------------------------------------------
+
+
+def test_dispatch_due_deliveries_task_delegates_to_recovery_service(monkeypatch):
+    published: list = []
+    monkeypatch.setattr("notifications.recovery.dispatch_delivery_for_processing", published.append)
+    delivery = DeliveryFactory(next_attempt_at=timezone.now() - timedelta(seconds=1))
+    result = dispatch_due_deliveries_task.apply().get()
+    assert result == 1
+    assert published == [delivery.id]
+
+
+def test_recover_expired_delivery_claims_task_delegates_to_recovery_service(monkeypatch):
+    import uuid
+
+    published: list = []
+    monkeypatch.setattr("notifications.recovery.dispatch_delivery_for_processing", published.append)
+    now = timezone.now()
+    delivery = DeliveryFactory(
+        status=DeliveryStatus.CLAIMED,
+        claim_token=uuid.uuid4(),
+        claimed_at=now - timedelta(minutes=10),
+        lease_expires_at=now - timedelta(minutes=1),
+    )
+    result = recover_expired_delivery_claims_task.apply().get()
+    assert result == 1
+    assert published == [delivery.id]

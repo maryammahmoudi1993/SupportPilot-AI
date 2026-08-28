@@ -61,6 +61,13 @@ class AttemptStatus(models.TextChoices):
     IN_PROGRESS = "in_progress", "In progress"
     SUCCEEDED = "succeeded", "Succeeded"
     FAILED = "failed", "Failed"
+    # Phase 10 Block 4 (section 15): the in-flight attempt belonging to a
+    # claim whose lease expired before it completed. Set by the expired-claim
+    # recovery path the moment a new worker reclaims the delivery — never
+    # left ambiguously IN_PROGRESS forever, and never silently rewritten as
+    # SUCCEEDED/FAILED, since the original worker's own eventual completion
+    # call is independently rejected by ``StaleClaimError``.
+    ABANDONED = "abandoned", "Abandoned"
 
 
 class Delivery(BaseModel):

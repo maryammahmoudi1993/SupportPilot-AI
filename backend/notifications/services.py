@@ -30,6 +30,7 @@ from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
+from .backoff import compute_retry_delay_seconds
 from .errors import DeliveryNotClaimableError, DeliveryNotFoundError, StaleClaimError
 from .models import AttemptStatus, Delivery, DeliveryAttempt, DeliveryStatus
 
@@ -67,7 +68,7 @@ def create_delivery(
         # row above is already committed and stays PENDING/due — recoverable
         # by Block 4's sweeper — rather than being rolled back merely
         # because Redis/the broker was unavailable at this instant.
-        transaction.on_commit(partial(_dispatch_delivery, delivery.id))
+        transaction.on_commit(partial(dispatch_delivery_for_processing, delivery.id))
     logger.info(
         "delivery_created",
         extra={
@@ -80,15 +81,28 @@ def create_delivery(
     return delivery
 
 
-def _dispatch_delivery(delivery_id: uuid.UUID | str) -> None:
-    """Best-effort Celery publication (section 9-10). A broker failure here
-    must never: delete the delivery, mark it as a provider failure, consume
-    an attempt slot, or expose a raw Celery/Kombu exception — it only means
-    nobody woke up the worker immediately; the delivery is already
-    persisted and due, so Block 4's recovery sweeper can still find and
-    claim it later."""
+def dispatch_delivery_for_processing(delivery_id: uuid.UUID | str) -> None:
+    """Best-effort Celery publication (section 9-10) — the single publication
+    primitive shared by initial creation (``create_delivery``), the Block 4
+    due-work/expired-claim recovery sweepers, and manual webhook redrive.
+    Publishing the same delivery id more than once (two sweepers, a sweep
+    racing an active worker, a redrive racing a sweep) is always safe:
+    publication is not itself an ownership operation — only
+    ``claim_delivery``/``reclaim_expired_delivery`` inside
+    ``process_claimed_delivery`` decide who actually gets to attempt it
+    (section 10).
+
+    A broker failure here must never: delete the delivery, mark it as a
+    provider failure, consume an attempt slot, or expose a raw Celery/Kombu
+    exception — it only means nobody woke up a worker immediately; the
+    delivery is already persisted and due, so the next sweep can still find
+    and claim it later."""
     from .tasks import process_delivery_task
 
+    logger.info(
+        "delivery_dispatch_attempted",
+        extra={"event": "delivery_dispatch_attempted", "delivery_id": str(delivery_id)},
+    )
     try:
         process_delivery_task.delay(str(delivery_id))
     except Exception:  # noqa: BLE001 - broker/transport errors are unbounded in type
@@ -143,6 +157,18 @@ def _claim_row(
             # complete_delivery_failure) before a delivery is ever left
             # claimable again.
             raise DeliveryNotClaimableError()
+
+        if locked.status == DeliveryStatus.CLAIMED and locked.claim_token is not None:
+            # Only true on the expired-claim recovery path (plain
+            # claim_delivery only ever matches PENDING/RETRY_SCHEDULED rows,
+            # which the claim-field-consistency constraint guarantees carry
+            # no claim_token). The abandoned worker's in-flight attempt is
+            # explicitly marked rather than left ambiguously "in_progress"
+            # forever (section 15) — its eventual completion call is
+            # independently rejected by StaleClaimError regardless.
+            DeliveryAttempt.objects.filter(
+                delivery=locked, claim_token=locked.claim_token, status=AttemptStatus.IN_PROGRESS
+            ).update(status=AttemptStatus.ABANDONED, completed_at=now, updated_at=now)
 
         token = uuid.uuid4()
         locked.status = DeliveryStatus.CLAIMED
@@ -327,18 +353,15 @@ def complete_delivery_failure(
     now=None,
     response_status_code: int | None = None,
 ) -> Delivery:
-    """Foundation for retry/terminal handling — full backoff scheduling is
-    Block 4's concern. Here: a retryable failure with attempts remaining is
-    scheduled at a fixed server-owned delay; anything else terminates the
-    delivery, split into FAILED (retries exhausted) vs. DEAD (explicitly
-    non-retryable, section 6) so a future replay tool can distinguish the
-    two."""
+    """A retryable failure with attempts remaining is scheduled using
+    deterministic bounded exponential backoff (Phase 10 Block 4, section 4-5)
+    keyed off the just-failed attempt's own number — never a Celery retry
+    counter (section 3); anything else terminates the delivery, split into
+    FAILED (retries exhausted) vs. DEAD (explicitly non-retryable, section 6)
+    so a future replay tool can distinguish the two. ``retry_delay_seconds``
+    remains available as an explicit override (existing callers, deterministic
+    tests) — when omitted, the backoff schedule below computes it."""
     now = now or timezone.now()
-    retry_delay_seconds = (
-        retry_delay_seconds
-        if retry_delay_seconds is not None
-        else settings.DELIVERY_DEFAULT_RETRY_DELAY_SECONDS
-    )
     with transaction.atomic():
         locked = _lock_delivery_or_raise(delivery_id)
         _assert_active_claim(locked, claim_token)
@@ -357,8 +380,13 @@ def complete_delivery_failure(
         locked.lease_expires_at = None
         can_retry = retryable and locked.attempt_count < locked.max_attempts
         if can_retry:
+            delay_seconds = (
+                retry_delay_seconds
+                if retry_delay_seconds is not None
+                else compute_retry_delay_seconds(attempt_number=locked.attempt_count)
+            )
             locked.status = DeliveryStatus.RETRY_SCHEDULED
-            locked.next_attempt_at = now + timedelta(seconds=retry_delay_seconds)
+            locked.next_attempt_at = now + timedelta(seconds=delay_seconds)
         else:
             locked.status = DeliveryStatus.FAILED if retryable else DeliveryStatus.DEAD
             locked.failed_at = now
@@ -406,7 +434,15 @@ def process_claimed_delivery(delivery_id: str) -> str:
     — safe because ``channel`` is immutable after creation, never touched by
     any service in this module. Duplicate task delivery is safe: only the
     first invocation can claim; a redelivered task finds nothing claimable
-    and no-ops (section 20)."""
+    and no-ops (section 20).
+
+    Block 4 (section 14, 19): a single publication of this task now covers
+    both a due PENDING/RETRY_SCHEDULED delivery *and* a CLAIMED delivery
+    whose lease has already expired — ``claim_delivery`` is tried first, and
+    only on a safe "not claimable" outcome is ``reclaim_expired_delivery``
+    tried as a fallback. This is what lets the recovery sweeper publish one
+    task per delivery id regardless of which of the two recovery states it
+    is in, without needing two different task bodies."""
     from .handlers import get_channel_handler
 
     channel = Delivery.objects.filter(pk=delivery_id).values_list("channel", flat=True).first()
@@ -428,6 +464,9 @@ def process_claimed_delivery(delivery_id: str) -> str:
     try:
         delivery, token = claim_delivery(delivery_id=delivery_id)
     except DeliveryNotClaimableError:
-        return "skipped"
+        try:
+            delivery, token = reclaim_expired_delivery(delivery_id=delivery_id)
+        except DeliveryNotClaimableError:
+            return "skipped"
     handler(delivery=delivery, claim_token=token)
     return "processed"

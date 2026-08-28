@@ -301,7 +301,7 @@ def test_unexpected_error_never_logs_raw_exception_text(monkeypatch, caplog):
 
 
 def test_max_attempts_bounds_provider_call_count(monkeypatch, settings):
-    settings.DELIVERY_DEFAULT_RETRY_DELAY_SECONDS = 0
+    settings.DELIVERY_RETRY_BASE_DELAY_SECONDS = 0
     fake = FakeNotificationProvider(
         send_errors=[(IntegrationTimeoutError(), False), (IntegrationTimeoutError(), False)]
     )
