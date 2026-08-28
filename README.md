@@ -60,7 +60,8 @@ supportpilot-ai/
 │   ├── integrations/       # External integrations
 │   ├── policies/           # Policy engine
 │   ├── approvals/          # Approval workflows
-│   ├── notifications/      # Notification delivery
+│   ├── notifications/      # Durable async notification delivery
+│   ├── webhooks/           # Signed outbound webhook delivery
 │   ├── observability/      # Logging, traces, metrics
 │   ├── evaluations/        # Agent evaluation
 │   ├── audit/              # Audit events
@@ -134,9 +135,23 @@ handoff outcome for requests the agent should not autonomously complete —
 all backed by idempotent, database-authoritative state and an
 [adversarial/concurrency test suite](docs/architecture/block6-hardening-matrix.md)
 exercising real PostgreSQL races, tenant-isolation attacks, and
-prompt-injection boundaries, not simulated ones. Frontend UI, richer
-approval/handoff notifications (Slack/email), and an evaluation/analytics
-framework remain future phases.
+prompt-injection boundaries, not simulated ones; and
+[asynchronous delivery and outbound webhooks](docs/architecture/asynchronous-delivery-and-webhooks.md)
+(see also [ADR 0008](docs/adr/0008-durable-outbound-delivery-with-celery-execution-transport.md)):
+durable, database-authoritative delivery for customer email notifications
+and signed outbound webhooks, with PostgreSQL — not Celery — as the source
+of truth. Atomic claiming, expiring leases, and stale-worker fencing make
+duplicate task messages and concurrent workers safe by construction; a
+recovery sweeper on Celery Beat closes the broker-outage/worker-crash
+recovery gap without any manual intervention. Webhooks are HMAC-SHA256
+signed, sent over a DNS-rebinding-safe pinned-IP transport that only
+accepts globally-routable destinations and never follows a redirect. The
+guarantee is durable **at-least-once** delivery with a stable logical
+idempotency identity — never exactly-once — documented explicitly in
+[the webhook receiver verification guide](docs/security/webhook-receiver-verification.md)
+and [outbound security notes](docs/security/webhook-outbound-security.md).
+Frontend UI, richer approval/handoff notifications (Slack/email), and an
+evaluation/analytics framework remain future phases.
 
 ## Development Guidelines
 
