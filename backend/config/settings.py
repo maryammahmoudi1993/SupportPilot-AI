@@ -96,6 +96,34 @@ env = environ.Env(
     # require approval up to $500.00, deny above that — USD only.
     POLICIES_DEFAULT_REFUND_AUTO_ALLOW_MAX_MINOR=(int, 5_000),
     POLICIES_DEFAULT_REFUND_APPROVAL_MAX_MINOR=(int, 50_000),
+    # Durable delivery foundation (Phase 10 Block 1). Server-owned defaults
+    # only — no client, model, or LLM output may raise these (section 13).
+    DELIVERY_DEFAULT_MAX_ATTEMPTS=(int, 5),
+    DELIVERY_CLAIM_LEASE_SECONDS=(int, 300),
+    # Retry/backoff/recovery sweeper (Phase 10 Block 4). Replaces the Block 1
+    # fixed retry delay with deterministic bounded exponential backoff
+    # (section 4-5) — server-owned only, never client/model/provider input.
+    DELIVERY_RETRY_BASE_DELAY_SECONDS=(int, 30),
+    DELIVERY_RETRY_MAX_DELAY_SECONDS=(int, 3600),
+    # Bounded batch size for the due-work/expired-claim recovery sweepers
+    # (section 11) — never an unbounded in-memory load of all due rows.
+    DELIVERY_SWEEP_BATCH_SIZE=(int, 100),
+    # Celery Beat cadence for both recovery sweeper tasks (section 18) —
+    # server-owned and configurable, never sub-second polling. See
+    # ``config/celery.py``.
+    DELIVERY_SWEEP_INTERVAL_SECONDS=(float, 30.0),
+    # Outbound webhooks (Phase 10 Block 3). HTTPS is required in production;
+    # plaintext HTTP is a server-owned opt-in for local/dev only (section 19)
+    # — never something an endpoint owner's URL can trigger by itself.
+    WEBHOOKS_ALLOW_INSECURE_HTTP=(bool, False),
+    WEBHOOKS_CONNECT_TIMEOUT_SECONDS=(float, 5.0),
+    WEBHOOKS_READ_TIMEOUT_SECONDS=(float, 10.0),
+    WEBHOOKS_MAX_URL_LENGTH=(int, 2048),
+    # Manual redrive (Phase 10 Block 4, section 31): redriving a terminal
+    # webhook delivery grants a bounded number of additional attempts by
+    # raising ``max_attempts`` — never resets ``attempt_count`` or erases
+    # attempt history. Server-owned only; never client-supplied.
+    WEBHOOKS_REDRIVE_ATTEMPT_ALLOWANCE=(int, 3),
 )
 
 environ.Env.read_env(os.path.join(BASE_DIR.parent, ".env"))
@@ -136,6 +164,7 @@ INSTALLED_APPS = [
     "policies.apps.PoliciesConfig",
     "approvals.apps.ApprovalsConfig",
     "notifications.apps.NotificationsConfig",
+    "webhooks.apps.WebhooksConfig",
     "observability.apps.ObservabilityConfig",
     "evaluations.apps.EvaluationsConfig",
     "audit.apps.AuditConfig",
@@ -292,6 +321,8 @@ SPECTACULAR_SETTINGS = {
         "PolicyEffectEnum": "policies.models.PolicyEffect.choices",
         "ApprovalStatusEnum": "approvals.models.ApprovalStatus.choices",
         "ApprovalDecisionValueEnum": "approvals.models.ApprovalDecisionValue.choices",
+        "WebhookEndpointStatusEnum": "webhooks.models.WebhookEndpointStatus.choices",
+        "WebhookEventTypeEnum": "webhooks.models.WebhookEventType.choices",
     },
 }
 
@@ -410,6 +441,35 @@ POLICIES_RISK_BUMP_FINANCIAL_AMOUNT_MINOR = env("POLICIES_RISK_BUMP_FINANCIAL_AM
 # workspace configures its own currency-specific rule.
 POLICIES_DEFAULT_REFUND_AUTO_ALLOW_MAX_MINOR = env("POLICIES_DEFAULT_REFUND_AUTO_ALLOW_MAX_MINOR")
 POLICIES_DEFAULT_REFUND_APPROVAL_MAX_MINOR = env("POLICIES_DEFAULT_REFUND_APPROVAL_MAX_MINOR")
+
+# Durable delivery foundation (Phase 10 Block 1) — see
+# ``notifications/models.py`` and ``notifications/services.py``. A worker's
+# claim lease and a delivery's default retry budget are both server-owned;
+# neither is ever accepted from client, model, or LLM input.
+DELIVERY_DEFAULT_MAX_ATTEMPTS = env("DELIVERY_DEFAULT_MAX_ATTEMPTS")
+DELIVERY_CLAIM_LEASE_SECONDS = env("DELIVERY_CLAIM_LEASE_SECONDS")
+
+# Retry/backoff/recovery sweeper (Phase 10 Block 4) — see
+# ``notifications/backoff.py`` and ``notifications/recovery.py``. Bounded
+# deterministic exponential backoff, server-owned only (section 4, 13).
+DELIVERY_RETRY_BASE_DELAY_SECONDS = env("DELIVERY_RETRY_BASE_DELAY_SECONDS")
+DELIVERY_RETRY_MAX_DELAY_SECONDS = env("DELIVERY_RETRY_MAX_DELAY_SECONDS")
+DELIVERY_SWEEP_BATCH_SIZE = env("DELIVERY_SWEEP_BATCH_SIZE")
+DELIVERY_SWEEP_INTERVAL_SECONDS = env("DELIVERY_SWEEP_INTERVAL_SECONDS")
+
+if DELIVERY_SWEEP_INTERVAL_SECONDS <= 0:
+    raise ValueError("DELIVERY_SWEEP_INTERVAL_SECONDS must be positive")
+
+# Outbound webhooks (Phase 10 Block 3) — see ``webhooks/security.py`` and
+# ``webhooks/transport.py``. Every value here is server-owned; an endpoint
+# owner's URL/configuration can never widen it (section 19, 28).
+WEBHOOKS_ALLOW_INSECURE_HTTP = env("WEBHOOKS_ALLOW_INSECURE_HTTP")
+WEBHOOKS_CONNECT_TIMEOUT_SECONDS = env("WEBHOOKS_CONNECT_TIMEOUT_SECONDS")
+WEBHOOKS_READ_TIMEOUT_SECONDS = env("WEBHOOKS_READ_TIMEOUT_SECONDS")
+WEBHOOKS_MAX_URL_LENGTH = env("WEBHOOKS_MAX_URL_LENGTH")
+
+# Manual redrive (Phase 10 Block 4) — see ``webhooks/services.py``.
+WEBHOOKS_REDRIVE_ATTEMPT_ALLOWANCE = env("WEBHOOKS_REDRIVE_ATTEMPT_ALLOWANCE")
 
 # Logging
 LOGGING = {

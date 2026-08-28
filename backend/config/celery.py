@@ -14,6 +14,17 @@ app = Celery("supportpilot")
 app.config_from_object("django.conf:settings", namespace="CELERY")
 app.autodiscover_tasks()
 
+
+def _delivery_sweep_interval_seconds() -> float:
+    """Read lazily, at beat-schedule build time (not at import time): the
+    Django settings module must already be fully loaded first, and this
+    keeps the value a genuine ``django.conf.settings`` read rather than a
+    value frozen at process start (section 18)."""
+    from django.conf import settings
+
+    return float(settings.DELIVERY_SWEEP_INTERVAL_SECONDS)
+
+
 # Phase 8 (section 45): a periodic sweep for approval requests whose
 # expires_at has passed while nobody decided them. Deliberately coarse —
 # expiry is also enforced synchronously on read/decide/resume (section 44),
@@ -24,5 +35,22 @@ app.conf.beat_schedule = {
     "expire-stale-approvals": {
         "task": "approvals.tasks.expire_stale_approvals_task",
         "schedule": 300.0,  # every 5 minutes
+    },
+    # Phase 10 Block 4 (section 17-18): recovery for durable deliveries
+    # (notifications and webhooks share this state — no per-channel Beat
+    # task is needed). Cadence is server-owned and configurable via
+    # ``DELIVERY_SWEEP_INTERVAL_SECONDS`` (30s default — frequent enough to
+    # make broker-outage and worker-crash recovery feel prompt without
+    # sub-second polling); both tasks are cheap best-effort re-publications,
+    # not the actual provider I/O, so running them from more than one Beat
+    # instance at once is safe (section 19) — see
+    # ``notifications/recovery.py``.
+    "dispatch-due-deliveries": {
+        "task": "notifications.tasks.dispatch_due_deliveries_task",
+        "schedule": _delivery_sweep_interval_seconds(),
+    },
+    "recover-expired-delivery-claims": {
+        "task": "notifications.tasks.recover_expired_delivery_claims_task",
+        "schedule": _delivery_sweep_interval_seconds(),
     },
 }

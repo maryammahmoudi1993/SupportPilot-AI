@@ -1,14 +1,24 @@
 """``order.lookup`` / ``shipment.lookup`` / ``notification.send`` tool tests
-(section 30-32, 57-60, 97, 100)."""
+(section 30-32, 57-60, 97, 100).
+
+Phase 10 Block 2: ``notification.send`` no longer performs synchronous
+provider I/O — it durably enqueues a ``Delivery``/``NotificationDelivery``
+and returns ``queued``. These tests exercise the tool call and the async
+worker (``process_delivery_task``) as two explicit steps, exactly as
+production does (a Celery worker processes the delivery later, not inside
+the request that queued it)."""
 
 from __future__ import annotations
 
 import pytest
+from django.utils import timezone
 
 from customers.tests.factories import CustomerFactory
 from integrations.errors import IntegrationTimeoutError
 from integrations.models import IntegrationProvider
 from integrations.providers.fakes import FakeNotificationProvider
+from notifications.models import Delivery, DeliveryStatus, NotificationDelivery
+from notifications.tasks import process_delivery_task
 from tools.errors import ToolError
 from tools.execution import execute_tool
 
@@ -110,7 +120,7 @@ class TestNotificationSend:
         )
         return run, fake
 
-    def test_success_delivers_to_the_customers_own_email(self, monkeypatch):
+    def test_success_queues_delivery_then_worker_delivers(self, monkeypatch):
         run, fake = self._setup(monkeypatch)
         customer = CustomerFactory(workspace=run.workspace, email="customer@example.com")
         result = execute_tool(
@@ -122,7 +132,20 @@ class TestNotificationSend:
                 "body": "It is on the way.",
             },
         )
-        assert result.output["status"] == "sent"
+        # The tool call itself never touches the provider (section 8) — it
+        # only accepts the request and durably enqueues it.
+        assert result.output["status"] == "queued"
+        delivery_id = result.output["delivery_id"]
+        assert fake.outbox == []
+        delivery = Delivery.objects.get(pk=delivery_id)
+        assert delivery.status == DeliveryStatus.PENDING
+        notification_delivery = NotificationDelivery.objects.get(delivery_id=delivery_id)
+        assert notification_delivery.source_tool_execution_id == result.execution.id
+
+        worker_result = process_delivery_task.apply(args=[delivery_id]).get()
+        assert worker_result == "processed"
+        delivery.refresh_from_db()
+        assert delivery.status == DeliveryStatus.DELIVERED
         assert fake.outbox == [
             {
                 "to": "customer@example.com",
@@ -162,32 +185,48 @@ class TestNotificationSend:
             )
         assert exc_info.value.code == "integration_invalid_request"
 
-    def test_repeated_call_same_idempotency_key_sends_once(self, monkeypatch):
+    def test_repeated_call_same_idempotency_key_reuses_one_logical_delivery(self, monkeypatch):
         run, fake = self._setup(monkeypatch)
         customer = CustomerFactory(workspace=run.workspace, email="customer@example.com")
         arguments = {"customer_id": str(customer.id), "subject": "x", "body": "y"}
-        execute_tool(
+        first = execute_tool(
             agent_run=run, tool_key="notification.send", arguments=arguments, idempotency_key="k1"
         )
-        execute_tool(
+        second = execute_tool(
             agent_run=run, tool_key="notification.send", arguments=arguments, idempotency_key="k1"
         )
+        # Same ToolExecution replay -> same logical NotificationDelivery
+        # (section 11), never a second one.
+        assert first.output["delivery_id"] == second.output["delivery_id"]
+        assert NotificationDelivery.objects.count() == 1
+
+        process_delivery_task.apply(args=[first.output["delivery_id"]]).get()
         assert len(fake.outbox) == 1
 
-    def test_ambiguous_timeout_does_not_double_send(self, monkeypatch):
+    def test_ambiguous_timeout_retry_does_not_double_send(self, monkeypatch):
+        """A provider that commits a send before raising a timeout back to
+        the caller (section 22) produces an ambiguous outcome at the
+        worker level — the durable retry must reuse the same stable
+        idempotency key so the deterministic fake (standing in for any
+        provider capable of server-side dedup) never delivers twice."""
         fake = FakeNotificationProvider(send_errors=[(IntegrationTimeoutError(), True)])
         run, fake = self._setup(monkeypatch, fake=fake)
         customer = CustomerFactory(workspace=run.workspace, email="customer@example.com")
         arguments = {"customer_id": str(customer.id), "subject": "x", "body": "y"}
-        with pytest.raises(ToolError):
-            execute_tool(
-                agent_run=run,
-                tool_key="notification.send",
-                arguments=arguments,
-                idempotency_key="k1",
-            )
-        assert len(fake.outbox) == 1  # provider committed it despite the timeout
-        execute_tool(
+        result = execute_tool(
             agent_run=run, tool_key="notification.send", arguments=arguments, idempotency_key="k1"
         )
+        delivery_id = result.output["delivery_id"]
+
+        first_outcome = process_delivery_task.apply(args=[delivery_id]).get()
+        assert first_outcome == "processed"
+        assert len(fake.outbox) == 1  # provider committed it despite the timeout
+        delivery = Delivery.objects.get(pk=delivery_id)
+        assert delivery.status == DeliveryStatus.RETRY_SCHEDULED
+
+        Delivery.objects.filter(pk=delivery_id).update(next_attempt_at=timezone.now())
+        second_outcome = process_delivery_task.apply(args=[delivery_id]).get()
+        assert second_outcome == "processed"
         assert len(fake.outbox) == 1  # retry did not send a second message
+        delivery.refresh_from_db()
+        assert delivery.status == DeliveryStatus.DELIVERED

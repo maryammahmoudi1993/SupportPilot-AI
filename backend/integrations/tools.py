@@ -22,6 +22,7 @@ from accounts.models import User
 from audit.models import AuditAction
 from audit.services import record_event
 from customers import selectors as customer_selectors
+from notifications.notification_delivery import create_or_reuse_notification_delivery
 from tickets import selectors as ticket_selectors
 from tickets import services as ticket_services
 from tickets.models import TicketPriority, TicketStatus
@@ -35,6 +36,7 @@ from tools.contracts import (
     ToolSpec,
 )
 from tools.errors import ToolError
+from tools.models import ToolExecution
 from workspaces.models import Workspace
 
 from . import services as integration_services
@@ -747,8 +749,12 @@ class NotificationSendInput(StrictModel):
 
 
 class NotificationSendOutput(StrictModel):
-    message_id: str
-    status: str
+    #: Phase 10 Block 2: the tool no longer performs synchronous provider
+    #: I/O, so it never reports "sent" — only that a durable delivery was
+    #: accepted for asynchronous processing (section 8). Actual send/retry
+    #: outcomes live on the ``Delivery``/``DeliveryAttempt`` rows, not here.
+    status: str = "queued"
+    delivery_id: str
 
 
 def _notification_send_handler(*, context: ToolExecutionContext, arguments: BaseModel) -> BaseModel:
@@ -765,22 +771,26 @@ def _notification_send_handler(*, context: ToolExecutionContext, arguments: Base
         raise IntegrationToolError(CustomerNotFoundError())
     if not customer.email:
         raise IntegrationToolError(IntegrationInvalidRequestError("Customer has no email on file."))
+    # A usable EMAIL integration must exist *now* — section 8's tool
+    # contract still validates configuration synchronously, it just no
+    # longer performs the provider call itself. Raising here (instead of
+    # only discovering "not configured" inside the async worker) keeps the
+    # existing, tested "integration_not_configured"/"integration_disabled"
+    # tool-error behavior unchanged for a workspace with no EMAIL
+    # connection at all.
+    integration_services.ensure_notification_provider_configured(workspace=workspace)
 
-    idempotency_key = f"notification.send:{context.tool_execution_id}"
-    try:
-        message = integration_services.send_notification(
-            workspace=workspace,
-            remaining_seconds=_remaining_seconds(context),
-            # Recipient is always the tenant-scoped customer's own address —
-            # never a raw argument (section 58).
-            recipient_email=customer.email,
-            subject=arguments.subject,
-            body=arguments.body,
-            idempotency_key=idempotency_key,
-        )
-    except IntegrationError as exc:
-        raise IntegrationToolError(exc) from exc
-    return NotificationSendOutput(message_id=message.message_id, status=message.status)
+    tool_execution = ToolExecution.objects.get(pk=context.tool_execution_id)
+    notification_delivery = create_or_reuse_notification_delivery(
+        tool_execution=tool_execution,
+        workspace=workspace,
+        # Recipient is always the tenant-scoped customer's own address —
+        # never a raw argument (section 58).
+        recipient_email=customer.email,
+        subject=arguments.subject,
+        body=arguments.body,
+    )
+    return NotificationSendOutput(delivery_id=str(notification_delivery.delivery_id))
 
 
 NOTIFICATION_SEND_TOOL = Tool(
@@ -794,6 +804,17 @@ NOTIFICATION_SEND_TOOL = Tool(
         side_effect_type=SideEffectType.EXTERNAL_WRITE,
         default_timeout_seconds=8.0,
         max_timeout_seconds=15.0,
+        # Phase 10 Block 2: the handler no longer makes a synchronous
+        # provider call, so ``WRITE_RETRYABLE_CODES`` can no longer actually
+        # occur here — but ``max_retries`` also bounds the *cross-call*
+        # idempotency-key attempt budget (``tools/execution.py:
+        # _resolve_existing``), which still matters: a transient failure in
+        # this handler itself (e.g. a DB hiccup) should still leave room for
+        # the same logical action to be retried under its existing key,
+        # rather than permanently exhausting it on the first failure.
+        # Retries against the actual provider now live entirely in the
+        # async delivery/attempt state machine (``notifications``), bounded
+        # separately by ``Delivery.max_attempts``.
         retry_policy=RetryPolicy(max_retries=2, retryable_error_codes=WRITE_RETRYABLE_CODES),
         idempotency_mode=IdempotencyMode.REQUIRED,
     ),

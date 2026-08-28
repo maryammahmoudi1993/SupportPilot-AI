@@ -17,6 +17,8 @@ from audit.models import AuditAction
 from audit.services import record_event
 from conversations.models import Conversation
 from customers.models import Customer
+from webhooks.models import WebhookEventType
+from webhooks.services import emit_event
 from workspaces.models import WorkspaceMembership, WorkspaceRole
 
 from .models import (
@@ -424,6 +426,19 @@ def create_or_reuse_handoff(
         workspace=workspace,
         metadata={"conversation_id": str(conversation.id), "reason_code": reason_code},
         request_id=request_id,
+    )
+    # Phase 10 Block 3, section 47: only the already-safe-by-design fields
+    # (``safe_summary`` is exactly that — never the raw conversation
+    # transcript or internal operator notes).
+    emit_event(
+        workspace=workspace,
+        event_type=WebhookEventType.HANDOFF_CREATED,
+        data={
+            "handoff_id": str(handoff.id),
+            "conversation_id": str(conversation.id),
+            "reason_code": reason_code,
+            "summary": safe_summary,
+        },
     )
     return handoff, True
 

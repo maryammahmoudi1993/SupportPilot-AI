@@ -1,4 +1,5 @@
-"""Approval lifecycle services (Phase 8).
+"""Approval lifecycle services (Phase 8; webhook events added Phase 10
+Block 3).
 
 ``create_or_reuse_approval_request`` is called only from the tool-execution
 policy gate (``tools/execution.py``). Every other function here is called
@@ -7,6 +8,11 @@ the row under ``select_for_update`` inside a transaction before writing —
 the same pattern ``agents/services.py`` and ``tools/execution.py`` already
 use — which is what makes concurrent approve/reject/expire/cancel races
 safe (section 41-42, 90-93).
+
+Each lifecycle transition also emits a webhook event (Phase 10 Block 3,
+section 47) with only already-safe, already-external-facing fields —
+never a decision's private comment (section 9, 48), the redacted tool
+arguments, or policy reasoning text.
 """
 
 from __future__ import annotations
@@ -24,6 +30,8 @@ from audit.models import AuditAction
 from audit.services import record_event
 from common.redaction import redact
 from tools.models import ToolExecution, ToolExecutionStatus
+from webhooks.models import WebhookEventType
+from webhooks.services import emit_event
 from workspaces.models import WorkspaceRole
 
 from .errors import (
@@ -121,6 +129,22 @@ def create_or_reuse_approval_request(
             },
             request_id=agent_run.correlation_id or None,
         )
+        # Phase 10 Block 3, section 47: only safe, already-external-facing
+        # fields — never the raw tool arguments, policy reasoning, or any
+        # approver comment (section 9, 48; there is none yet at this point
+        # anyway).
+        emit_event(
+            workspace=execution.workspace,
+            event_type=WebhookEventType.APPROVAL_REQUESTED,
+            data={
+                "approval_id": str(approval.id),
+                "tool_key": tool.spec.key,
+                "risk_level": risk_assessment.effective_risk,
+                "required_role": required_role,
+                "summary": summary,
+                "expires_at": approval.expires_at.isoformat(),
+            },
+        )
     return approval
 
 
@@ -217,6 +241,19 @@ def decide_approval(
                         metadata={"approval_request_id": str(locked.id)},
                         request_id=request_id,
                     )
+                    emit_event(
+                        workspace=workspace,
+                        event_type=(
+                            WebhookEventType.APPROVAL_APPROVED
+                            if decision == ApprovalDecisionValue.APPROVE
+                            else WebhookEventType.APPROVAL_REJECTED
+                        ),
+                        data={
+                            "approval_id": str(locked.id),
+                            "required_role": locked.required_role,
+                            "decided_at": locked.resolved_at.isoformat(),
+                        },
+                    )
                     if decision == ApprovalDecisionValue.REJECT:
                         _terminate_execution(
                             locked,
@@ -260,6 +297,7 @@ def _expire_if_stale(locked: ApprovalRequest) -> bool:
         workspace=locked.workspace,
         metadata={"approval_request_id": str(locked.id)},
     )
+    _emit_expired_event(locked)
     # Section 46-49: expiry never leaves the run waiting indefinitely — the
     # same bounded resume continuation used for reject dispatches here too,
     # never an LLM call inside this transaction (section 48).
@@ -296,6 +334,7 @@ def expire_stale_approvals(*, now=None) -> int:
                 workspace=locked.workspace,
                 metadata={"approval_request_id": str(locked.id)},
             )
+            _emit_expired_event(locked)
             # Section 48-49: dispatched per-row, after this row's own commit
             # — never inside a shared transaction spanning the whole sweep,
             # so one stuck/slow continuation can never block another row's
@@ -340,6 +379,22 @@ def _terminate_execution(approval: ApprovalRequest, *, error_code: str, error_me
         error_message_safe=error_message,
         completed_at=timezone.now(),
         updated_at=timezone.now(),
+    )
+
+
+def _emit_expired_event(locked: ApprovalRequest) -> None:
+    # Always set by the caller immediately before this (both call sites)
+    # — never actually None here, just nullable at the model level for
+    # every *other* (non-resolved) lifecycle state.
+    assert locked.resolved_at is not None
+    emit_event(
+        workspace=locked.workspace,
+        event_type=WebhookEventType.APPROVAL_EXPIRED,
+        data={
+            "approval_id": str(locked.id),
+            "required_role": locked.required_role,
+            "expired_at": locked.resolved_at.isoformat(),
+        },
     )
 
 
