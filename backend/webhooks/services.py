@@ -11,23 +11,27 @@ from __future__ import annotations
 
 import logging
 import uuid
+from functools import partial
 
+from django.conf import settings
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from audit.models import AuditAction
 from audit.services import record_event
 from integrations.crypto import CredentialEncryptionError, decrypt_credentials, encrypt_credentials
-from notifications.models import Delivery, DeliveryChannel
+from notifications.models import Delivery, DeliveryChannel, DeliveryStatus
 from notifications.services import (
     complete_delivery_failure,
     complete_delivery_success,
     create_delivery,
+    dispatch_delivery_for_processing,
 )
 
 from . import selectors
 from .classification import classify_http_status
 from .errors import (
+    WebhookDeliveryNotRedrivableError,
     WebhookEndpointDisabledError,
     WebhookError,
     WebhookInvalidEventTypeError,
@@ -274,6 +278,63 @@ def emit_event(*, workspace, event_type: str, data: dict, version: int = 1) -> W
                 # logical delivery for this pair; never a second one.
                 continue
     return event
+
+
+# ---------------------------------------------------------------------------
+# Manual redrive (Phase 10 Block 4, section 28-37)
+# ---------------------------------------------------------------------------
+
+
+def redrive_webhook_delivery(
+    *, workspace, webhook_delivery: WebhookDelivery, actor, request_id: str | None = None
+) -> WebhookDelivery:
+    """Manual redrive for an exhausted (``FAILED``/``DEAD``) webhook
+    delivery. Reuses the exact same logical ``WebhookEvent``/``WebhookDelivery``
+    /``Delivery`` row (section 30) — never creates a second event merely to
+    redrive, and never resets ``attempt_count`` or erases attempt history.
+    Grants a bounded number of additional attempts by raising
+    ``Delivery.max_attempts`` (section 31, the repository-suggested option
+    for this data model) so the next attempt continues the same monotonic
+    numbering the ``attempt_count <= max_attempts`` constraint already
+    enforces.
+
+    Endpoint status is checked *before* any delivery-state change (section
+    37): a disabled endpoint never produces a network call from redrive, and
+    the row is left exactly as it was rather than flipped back to PENDING
+    first. The next actual attempt still independently re-resolves DNS/SSRF
+    and re-signs with whatever secret is active then (section 32) — nothing
+    here bypasses ``handle_webhook_delivery_attempt``.
+    """
+    endpoint = WebhookEndpoint.objects.get(pk=webhook_delivery.endpoint_id)
+    if endpoint.status != WebhookEndpointStatus.ACTIVE:
+        raise WebhookEndpointDisabledError()
+
+    with transaction.atomic():
+        # Row-locked (section 35): an actively CLAIMED delivery, one that
+        # already reached DELIVERED (section 36), or one still
+        # PENDING/RETRY_SCHEDULED on its own is never redriven — only a
+        # terminal, exhausted delivery is.
+        locked = Delivery.objects.select_for_update().get(pk=webhook_delivery.delivery_id)
+        if locked.status not in (DeliveryStatus.FAILED, DeliveryStatus.DEAD):
+            raise WebhookDeliveryNotRedrivableError()
+        locked.max_attempts = locked.max_attempts + settings.WEBHOOKS_REDRIVE_ATTEMPT_ALLOWANCE
+        locked.status = DeliveryStatus.PENDING
+        locked.next_attempt_at = timezone.now()
+        locked.failed_at = None
+        locked.save(
+            update_fields=["max_attempts", "status", "next_attempt_at", "failed_at", "updated_at"]
+        )
+        record_event(
+            action=AuditAction.WEBHOOK_DELIVERY_REDRIVEN,
+            target_type="webhook_delivery",
+            target_id=locked.id,
+            actor=actor,
+            workspace=workspace,
+            metadata={"endpoint_id": str(endpoint.id)},
+            request_id=request_id,
+        )
+        transaction.on_commit(partial(dispatch_delivery_for_processing, locked.id))
+    return webhook_delivery
 
 
 # ---------------------------------------------------------------------------

@@ -201,3 +201,34 @@ class WebhookDeliveryDetailView(WorkspaceScopedMixin, APIView):
         if webhook_delivery is None:
             raise Http404("Webhook delivery not found.")
         return Response(WebhookDeliverySerializer(webhook_delivery).data)
+
+
+class WebhookDeliveryRedriveView(WorkspaceScopedMixin, APIView):
+    """Manual redrive for a terminal webhook delivery (Phase 10 Block 4,
+    section 29, 34): an explicit ``POST`` mutation, never a ``GET`` — a
+    foreign-workspace delivery id resolves to 404 (section 29), matching the
+    tenant-isolation convention used everywhere else in this app."""
+
+    def get_permissions(self):
+        return [IsWorkspaceMember(), CanManageWebhooks()]
+
+    @extend_schema(request=None, responses=WebhookDeliverySerializer)
+    def post(self, request, workspace_id, delivery_id):
+        webhook_delivery = selectors.delivery_get_for_workspace(
+            workspace=self.workspace, delivery_id=delivery_id
+        )
+        if webhook_delivery is None:
+            raise Http404("Webhook delivery not found.")
+        try:
+            services.redrive_webhook_delivery(
+                workspace=self.workspace,
+                webhook_delivery=webhook_delivery,
+                actor=request.user,
+                request_id=_request_id(request),
+            )
+        except WebhookError as exc:
+            raise _webhook_api_error(exc) from exc
+        refreshed = selectors.delivery_get_for_workspace(
+            workspace=self.workspace, delivery_id=delivery_id
+        )
+        return Response(WebhookDeliverySerializer(refreshed).data)

@@ -38,4 +38,9 @@ urlpatterns = [
         views.WebhookDeliveryDetailView.as_view(),
         name="delivery-detail",
     ),
+    path(
+        "deliveries/<uuid:delivery_id>/redrive/",
+        views.WebhookDeliveryRedriveView.as_view(),
+        name="delivery-redrive",
+    ),
 ]

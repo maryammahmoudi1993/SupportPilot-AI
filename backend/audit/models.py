@@ -101,6 +101,10 @@ class AuditAction(models.TextChoices):
     WEBHOOK_ENDPOINT_UPDATED = "webhook_endpoint.updated", "Webhook endpoint updated"
     WEBHOOK_ENDPOINT_DISABLED = "webhook_endpoint.disabled", "Webhook endpoint disabled"
     WEBHOOK_SECRET_ROTATED = "webhook_endpoint.secret_rotated", "Webhook signing secret rotated"
+    WEBHOOK_DELIVERY_REDRIVEN = (
+        "webhook_delivery.manually_redriven",
+        "Webhook delivery manually redriven",
+    )
 
 
 class AuditEvent(BaseModel):

@@ -93,6 +93,17 @@ class WebhookInvalidEventTypeError(WebhookError):
     safe_message = "One or more subscribed event types are not recognized."
 
 
+class WebhookDeliveryNotRedrivableError(WebhookError):
+    """Manual redrive (Phase 10 Block 4, section 35-36) only ever applies to
+    a terminal, exhausted delivery (``FAILED``/``DEAD``) — never one that is
+    actively claimed, already delivered, or still pending its own scheduled
+    retry. Deliberately generic (never reveals the delivery's actual current
+    status) — this is a safe conflict outcome, not an operational error."""
+
+    code = "webhook_delivery_not_redrivable"
+    safe_message = "This delivery cannot be redriven in its current state."
+
+
 class WebhookUnexpectedTransportError(WebhookError):
     """Fail-closed classification for a transport failure this module does
     not explicitly recognize (section 15, 30) — never retried automatically."""
