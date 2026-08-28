@@ -197,6 +197,64 @@ def test_retryable_provider_failure_schedules_retry(monkeypatch, error_cls, code
     assert attempt.safe_error_code == code
 
 
+# ---------------------------------------------------------------------------
+# Ambiguous external success (Phase 10 Block 5, section 13-14, 19)
+# ---------------------------------------------------------------------------
+
+
+def test_ambiguous_timeout_after_provider_commit_is_deduplicated_by_stable_key(monkeypatch):
+    """Models the most important ambiguous-success scenario honestly
+    (section 14): the fake provider *records* the send (mirrors a remote
+    mail server that accepted and queued the message) and only then raises
+    a retryable timeout to the sender — the sender genuinely cannot tell
+    whether the message went out. The retry reuses the exact same stable
+    idempotency key (section 12), and this fake provider is capable of
+    deduplicating on it — proving only one logical message exists — but
+    this is a property of *this test double*, not a guarantee this
+    platform can make about a real SMTP relay (documented explicitly
+    below, not assumed)."""
+    fake = FakeNotificationProvider(send_errors=[(IntegrationTimeoutError(), True)])
+    tool_execution, workspace, fake = _setup(monkeypatch, fake=fake)
+    notification_delivery = create_or_reuse_notification_delivery(
+        tool_execution=tool_execution,
+        workspace=workspace,
+        recipient_email="a@example.com",
+        subject="s",
+        body="b",
+    )
+    stable_key = notification_delivery.idempotency_key
+
+    # Attempt 1: the fake provider commits the send, then raises.
+    delivery, token = claim_delivery(delivery_id=notification_delivery.delivery_id)
+    handle_notification_delivery_attempt(delivery=delivery, claim_token=token)
+    delivery.refresh_from_db()
+    assert delivery.status == DeliveryStatus.RETRY_SCHEDULED
+    assert fake.send_call_count == 1
+    assert len(fake.outbox) == 1  # the ambiguous send already happened
+
+    # Attempt 2: same stable key — the fake's own dedup returns the already
+    # -committed result without incrementing its "new send" counter or
+    # appending a second outbox entry.
+    delivery, token = claim_delivery(
+        delivery_id=notification_delivery.delivery_id, now=delivery.next_attempt_at
+    )
+    handle_notification_delivery_attempt(delivery=delivery, claim_token=token)
+    delivery.refresh_from_db()
+
+    assert delivery.status == DeliveryStatus.DELIVERED
+    assert fake.send_call_count == 1, "the fake provider's own key-based dedup suppressed a resend"
+    assert len(fake.outbox) == 1
+
+    notification_delivery.refresh_from_db()
+    assert notification_delivery.idempotency_key == stable_key
+    assert notification_delivery.delivery_id == delivery.id
+    # NOT a platform guarantee for a real SMTP/HTTP provider: a real mail
+    # relay or webhook receiver that does not implement key-based dedup may
+    # legitimately receive and act on this message twice under at-least-once
+    # delivery — this fake's suppression is a test-double convenience, not
+    # something ``notification.send`` enforces against arbitrary providers.
+
+
 @pytest.mark.parametrize(
     "error_cls,code",
     [
