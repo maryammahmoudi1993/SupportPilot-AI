@@ -69,9 +69,22 @@ class WebhookEndpointListCreateView(WorkspaceScopedMixin, generics.ListCreateAPI
             return WebhookEndpoint.objects.none()
         return selectors.endpoint_list_for_workspace(workspace=self.workspace)
 
+    # drf-spectacular resolves a plain (non-ViewSet) APIView's per-operation
+    # schema via ``getattr(view, method.lower())`` — literally the
+    # HTTP-verb-named method — not the semantic CRUD action name. Decorating
+    # ``create()`` alone is therefore silently ignored for a POST here: the
+    # actual dispatch target DRF's ``CreateModelMixin`` wires up for POST is
+    # its own inherited, undecorated ``post()``, which only delegates to
+    # ``create()``. Verified directly against the generated schema (a real
+    # Block 6 defect: the create endpoint's documented response silently
+    # fell back to the *request* serializer shape) — the fix is to decorate
+    # ``post`` itself, not ``create``.
     @extend_schema(
         request=WebhookEndpointCreateSerializer, responses=WebhookEndpointCreateResponseSerializer
     )
+    def post(self, request, *args, **kwargs):
+        return self.create(request, *args, **kwargs)
+
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)

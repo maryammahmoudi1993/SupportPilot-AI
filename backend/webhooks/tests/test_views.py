@@ -379,3 +379,33 @@ class TestSwaggerFakeView:
         view = WebhookDeliveryListView()
         view.swagger_fake_view = True
         assert list(view.get_queryset()) == []
+
+
+class TestOpenAPISchemaAccuracy:
+    """Phase 10 Block 6 regression: drf-spectacular resolves a plain
+    (non-ViewSet) view's per-operation schema via
+    ``getattr(view, method.lower())`` — the literal HTTP-verb method, not
+    the semantic CRUD action name. A ``@extend_schema`` on ``create()``
+    alone is silently ignored for a ``ListCreateAPIView``'s POST, because
+    DRF's own dispatch there is the inherited, undecorated ``post()``
+    (which only delegates to ``create()``) — the generated schema then
+    falls back to documenting the *request* shape as the response too,
+    silently under-documenting the real one-time ``signing_secret``
+    exposure. This failed before the fix in this exact way."""
+
+    def test_endpoint_create_response_schema_documents_the_actual_response_shape(self):
+        from drf_spectacular.generators import SchemaGenerator
+
+        schema = SchemaGenerator().get_schema(request=None, public=True)
+        create_op = schema["paths"]["/api/v1/workspaces/{workspace_id}/webhooks/endpoints/"]["post"]
+        response_ref = create_op["responses"]["201"]["content"]["application/json"]["schema"][
+            "$ref"
+        ]
+        component_name = response_ref.rsplit("/", 1)[-1]
+        component = schema["components"]["schemas"][component_name]
+        assert "signing_secret" in component["properties"]
+        assert "id" in component["properties"]
+        assert "status" in component["properties"]
+        # Not the bare request-serializer shape (name/url/subscribed_event_types
+        # only) — the actual documented bug this regression guards against.
+        assert component_name != "WebhookEndpointCreate"
