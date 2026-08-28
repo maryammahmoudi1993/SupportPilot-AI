@@ -51,6 +51,13 @@ dependencies = [
     "django-filter==25.1",
     "djangorestframework-simplejwt==5.5.1",
     "pypdf==6.15.0",
+    # Phase 11: vendor-neutral Prometheus exposition for bounded-cardinality
+    # production metrics (observability/metrics.py). A pure client library —
+    # no server component, no vendor SDK/agent, no hard external network
+    # dependency at request time. Deliberately not OpenTelemetry: Phase 11
+    # scopes tracing/correlation to structured logging (see ADR 0009) rather
+    # than adding a second, heavier instrumentation stack.
+    "prometheus-client==0.26.0",
 ]
 
 [project.optional-dependencies]
@@ -71,7 +78,12 @@ dev = [
 ]
 
 [tool.setuptools]
-packages = ["common", "accounts", "workspaces", "customers", "conversations", "tickets", "knowledge", "agents", "tools", "integrations", "policies", "approvals", "notifications", "observability", "evaluations", "audit", "health"]
+# "webhooks" was omitted here when the app was added in Phase 10 — a latent
+# packaging gap (harmless for this repository's own Docker/dev layout, where
+# BASE_DIR is always importable directly off sys.path, but incorrect for any
+# consumer that installs this distribution without the source tree present).
+# Fixed while touching this file for Phase 11's new dependency.
+packages = ["common", "accounts", "workspaces", "customers", "conversations", "tickets", "knowledge", "agents", "tools", "integrations", "policies", "approvals", "notifications", "webhooks", "observability", "evaluations", "audit", "health"]
 
 [tool.black]
 line-length = 100

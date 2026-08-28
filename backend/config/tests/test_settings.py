@@ -63,6 +63,12 @@ class TestRequestCorrelationMiddleware:
 
         assert request_id_index < logging_index
 
+    def test_metrics_middleware_runs_after_structured_logging(self):
+        logging_index = settings.MIDDLEWARE.index("common.middleware.StructuredLoggingMiddleware")
+        metrics_index = settings.MIDDLEWARE.index("observability.middleware.MetricsMiddleware")
+
+        assert logging_index < metrics_index
+
 
 class TestAgentContextSettings:
     def test_conversation_and_rag_limits_are_positive_and_phase4_bounded(self):

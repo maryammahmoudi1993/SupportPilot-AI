@@ -124,6 +124,15 @@ env = environ.Env(
     # raising ``max_attempts`` — never resets ``attempt_count`` or erases
     # attempt history. Server-owned only; never client-supplied.
     WEBHOOKS_REDRIVE_ATTEMPT_ALLOWANCE=(int, 3),
+    # Production observability (Phase 11 Block 1). Metrics are bounded,
+    # low-cardinality, vendor-neutral Prometheus exposition — never a
+    # business/tenant data API (section 26-27). Enabled by default so the
+    # normal dev/test/CI path always exercises the real instrumentation
+    # (section 64); ``METRICS_TOKEN`` has no usable default in production —
+    # see the fail-closed check below.
+    OBSERVABILITY_METRICS_ENABLED=(bool, True),
+    OBSERVABILITY_METRICS_TOKEN=(str, ""),
+    OBSERVABILITY_SERVICE_NAME=(str, "supportpilot-backend"),
 )
 
 environ.Env.read_env(os.path.join(BASE_DIR.parent, ".env"))
@@ -183,6 +192,7 @@ MIDDLEWARE = [
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "common.middleware.RequestIdMiddleware",
     "common.middleware.StructuredLoggingMiddleware",
+    "observability.middleware.MetricsMiddleware",
 ]
 
 ROOT_URLCONF = "config.urls"
@@ -470,6 +480,24 @@ WEBHOOKS_MAX_URL_LENGTH = env("WEBHOOKS_MAX_URL_LENGTH")
 
 # Manual redrive (Phase 10 Block 4) — see ``webhooks/services.py``.
 WEBHOOKS_REDRIVE_ATTEMPT_ALLOWANCE = env("WEBHOOKS_REDRIVE_ATTEMPT_ALLOWANCE")
+
+# Production observability (Phase 11 Block 1) — see ``observability/metrics.py``
+# and ``observability/views.py``. The metrics endpoint is deployment
+# infrastructure, not a tenant API (section 26): it is protected by a
+# single server-owned bearer token, never workspace RBAC. Failing startup
+# when a real deployment would otherwise silently expose an unauthenticated
+# metrics endpoint matches this repository's existing fail-closed
+# convention (e.g. ``WEBHOOKS_ALLOW_INSECURE_HTTP``) — DEBUG-only local/dev
+# runs are exempt so the endpoint stays usable without extra setup.
+OBSERVABILITY_METRICS_ENABLED = env("OBSERVABILITY_METRICS_ENABLED")
+OBSERVABILITY_METRICS_TOKEN = env("OBSERVABILITY_METRICS_TOKEN")
+OBSERVABILITY_SERVICE_NAME = env("OBSERVABILITY_SERVICE_NAME")
+
+if OBSERVABILITY_METRICS_ENABLED and not DEBUG and not OBSERVABILITY_METRICS_TOKEN:
+    raise ValueError(
+        "OBSERVABILITY_METRICS_TOKEN must be set when "
+        "OBSERVABILITY_METRICS_ENABLED is true outside DEBUG."
+    )
 
 # Logging
 LOGGING = {

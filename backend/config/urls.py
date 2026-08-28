@@ -13,6 +13,9 @@ urlpatterns = [
     path("admin/", admin.site.urls),
     # Health checks
     path("", include("health.urls")),
+    # Observability infrastructure (Phase 11 Block 1) — bearer-token
+    # protected, outside the versioned product API (see observability/urls.py).
+    path("", include("observability.urls")),
     # API v1
     path(
         "api/v1/",
