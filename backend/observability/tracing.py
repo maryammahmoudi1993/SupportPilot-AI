@@ -68,9 +68,11 @@ __all__ = [
     "get_tracer",
     "server_span",
     "task_span",
+    "domain_span",
     "mark_span_error",
     "finalize_server_span",
     "finalize_task_span",
+    "finalize_domain_span",
     "extract_context",
     "inject_context",
     "get_trace_id",
@@ -250,6 +252,22 @@ def server_span(name: str, *, parent_context=None):
     return _safe_span(name, kind=SpanKind.SERVER, parent_context=parent_context)
 
 
+def domain_span(name: str, *, attributes: Mapping[str, str] | None = None):
+    """One lightweight internal span for a domain lifecycle boundary
+    (Phase 11 Block 3): agent orchestration, an LLM provider call, a tool
+    execution, a policy decision, an approval, a handoff. Always a child of
+    whatever span is already current (HTTP request or Celery task) — never
+    its own trace, so these naturally form the request -> agent -> LLM/tool
+    -> policy -> approval-or-handoff lineage section 41 asks for, without
+    any caller needing to pass a parent context explicitly.
+
+    Attributes must already be bounded/safe by the time they reach here —
+    see each call site's own docstring for what is and is not included
+    (never args/kwargs/payload/prompt/response/comment text; sections
+    15/18/21/23/26/29)."""
+    return _safe_span(name, kind=SpanKind.INTERNAL, attributes=attributes)
+
+
 def task_span(task_name: str, *, headers: Mapping[str, str] | None = None):
     """One Celery consumer span per task execution (section 16), parented
     to whatever W3C context :func:`inject_context` placed into the message
@@ -313,6 +331,30 @@ def finalize_task_span(span: Span | None, *, outcome: str) -> None:
         outcome_label = outcome if outcome in _TASK_OUTCOMES else "failure"
         span.set_attribute("supportpilot.task_outcome", outcome_label)
         span.set_status(Status(StatusCode.OK if outcome_label == "success" else StatusCode.ERROR))
+    except Exception:  # noqa: BLE001 - telemetry must fail open
+        logger.warning("tracing_span_finalize_failed", extra={"event": "tracing_error"})
+
+
+def finalize_domain_span(
+    span: Span | None,
+    *,
+    outcome: str,
+    is_error: bool = False,
+    extra_attributes: Mapping[str, str | int | bool] | None = None,
+) -> None:
+    """Generic finalize for a :func:`domain_span` (Phase 11 Block 3):
+    ``supportpilot.outcome`` plus whatever already-bounded, already-safe
+    ``extra_attributes`` the caller passes — never args/kwargs/payload/
+    prompt/response/comment text (each call site's own docstring is the
+    actual privacy contract; this function only guarantees the *mechanism*
+    fails open, not that a caller passed safe values)."""
+    if span is None:
+        return
+    try:
+        span.set_attribute("supportpilot.outcome", outcome)
+        for key, value in (extra_attributes or {}).items():
+            span.set_attribute(key, value)
+        span.set_status(Status(StatusCode.ERROR if is_error else StatusCode.OK))
     except Exception:  # noqa: BLE001 - telemetry must fail open
         logger.warning("tracing_span_finalize_failed", extra={"event": "tracing_error"})
 
