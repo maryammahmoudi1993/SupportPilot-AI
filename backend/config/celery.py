@@ -2,6 +2,15 @@
 
 Business logic must not live in task bodies — tasks call service functions
 defined in each domain app, per the project's architecture rules.
+
+Distributed tracing (Phase 11 Block 2 remediation, ``observability/tracing.py``)
+requires no setup here: each worker process builds its own ``TracerProvider``
+lazily, the first time ``common.tasks.CorrelatedTask`` needs one, entirely
+independent of whether/how the Gunicorn web process has initialized its own
+(section 33). ``common/tasks.py`` connects the ``before_task_publish``
+signal that injects W3C trace context into outbound message headers at
+import time — already guaranteed by every first-party task declaring
+``base=CorrelatedTask``.
 """
 
 import os

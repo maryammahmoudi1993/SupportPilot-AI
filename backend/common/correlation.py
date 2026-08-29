@@ -38,6 +38,18 @@ def get_correlation_id() -> str | None:
     return _correlation_id.get()
 
 
+def get_request_id() -> str | None:
+    """The application's own correlation identity (Block 2 remediation
+    section 10) — an alias for :func:`get_correlation_id`. Kept as a
+    separate, semantically distinct accessor from
+    ``observability.tracing.get_trace_id``/``get_span_id`` even though,
+    today, both request id and correlation id are bound from the same
+    inbound ``X-Request-ID``/generated value: request_id must never be
+    *derived from* trace_id, and vice versa (they can and do change
+    independently)."""
+    return get_correlation_id()
+
+
 @contextmanager
 def correlation_scope(correlation_id: str | None) -> Iterator[None]:
     """Bind ``correlation_id`` for the duration of the ``with`` block,

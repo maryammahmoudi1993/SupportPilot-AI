@@ -3,8 +3,41 @@
 ## Status
 
 Accepted (Phase 11, Block 1 — metrics foundation; Block 2 — correlation-id
-propagation and task-level metrics across the Celery boundary; extended by
-later blocks).
+propagation and task-level metrics across the Celery boundary, then
+extended within Block 2 by a remediation adding vendor-neutral distributed
+tracing — see "Amendment" below; extended further by later blocks).
+
+## Amendment (Block 2 remediation, Part B): distributed tracing added
+
+The original decision below rejected the OpenTelemetry SDK for Block 1,
+while explicitly noting the door was not closed: "this decision does not
+foreclose adding OTel later behind the same metric definitions if a real
+need for full distributed tracing emerges." That need emerged within Block
+2 itself — request-id/log-based correlation alone could not represent a
+true parent/child span relationship across the HTTP -> Celery boundary.
+
+What changed, concretely:
+
+* `opentelemetry-api` and `opentelemetry-sdk` are now direct dependencies
+  (`observability/tracing.py` is the sole module that imports them —
+  same "one call site" principle as `observability/metrics.py`).
+* W3C Trace Context (`traceparent`/`tracestate`) is the propagation
+  format, parsed only through OpenTelemetry's own propagator — never
+  hand-rolled.
+* **No exporter/span processor ships in this block.** The `TracerProvider`
+  is built with no processor attached: spans are created, correctly
+  parented, and give real `trace_id`/`span_id` values for propagation and
+  log correlation, but are not sent anywhere. Adding a real exporter
+  (OTLP or otherwise) is left to whichever future block actually needs
+  spans to leave the process — not fabricated here for appearance.
+* Every design constraint from the original decision below still holds
+  unchanged for tracing: bounded attributes only (never a raw path, query
+  string, header, or exception message), failure-open on any tracing
+  error, and no new business-data persistence path.
+
+This is additive, not a reversal — metrics remain exactly as decided
+below; tracing now sits alongside them behind the same "vendor-neutral,
+bounded, fail-open" design principle.
 
 ## Context
 
@@ -100,10 +133,12 @@ business correctness.
 
 **Trade-offs**:
 
-- No true distributed tracing (spans, cross-service trace propagation) —
-  correlation is request-id/log-based and relationship-based, not a trace
-  waterfall. Acceptable for this system's current single-service-plus-Celery
-  topology; revisitable if a real multi-service topology emerges.
+- Distributed tracing (added by the Block 2 remediation amendment above)
+  gives a real span/parent relationship across the HTTP -> Celery boundary,
+  but ships no exporter yet — spans are not sent anywhere until a future
+  block adds one. Until then, tracing's operational value is limited to
+  in-process propagation correctness and trace/span-id log correlation,
+  not an actual trace waterfall an operator can view.
 - Multiprocess Prometheus metrics require the `PROMETHEUS_MULTIPROC_DIR`
   environment variable to be set correctly, before import, in every process
   that should aggregate correctly (`config/gunicorn_conf.py` handles this

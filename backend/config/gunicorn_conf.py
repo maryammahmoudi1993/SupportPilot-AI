@@ -26,6 +26,15 @@ workers and ``manage.py`` commands are deliberately left in
 ``PROMETHEUS_MULTIPROC_DIR`` set for them), matching section 64's
 requirement that ordinary local/dev/test/management-command runs stay
 simple and need no multiprocess directory to exist at all.
+
+Distributed tracing (Phase 11 Block 2 remediation, ``observability/tracing.py``)
+deliberately needs no equivalent pre-fork hook here: its ``TracerProvider``
+is built lazily, per-process, on first use (not at import time, not in the
+Gunicorn master), and this block ships no span processor/exporter — so
+there is no background export thread whose fork-safety would need managing
+the way ``PROMETHEUS_MULTIPROC_DIR`` needs to be set before fork. Each
+worker process that ends up calling into tracing builds its own provider
+independently, after it is already running as a distinct process.
 """
 
 from __future__ import annotations

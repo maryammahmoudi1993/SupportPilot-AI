@@ -178,10 +178,13 @@ added.
 
 ## Trace/log correlation
 
-Phase 11 does not add distributed tracing or an OpenTelemetry SDK (see
+Phase 11 Block 2 was amended to add distributed tracing via the
+OpenTelemetry API + SDK (see the "Amendment" section of
 [ADR 0009](../adr/0009-vendor-neutral-observability-with-bounded-cardinality-telemetry.md)
-for why). Correlation across a request, and now across the Celery boundary,
-exists through:
+for why, and what did/did not change). Correlation across a request, and
+across the Celery boundary, now exists through two complementary,
+deliberately distinct mechanisms — see "Distributed tracing" below for the
+second one:
 
 - `request.request_id` (`common.middleware.RequestIdMiddleware`), present on
   every structured log line the request produces
@@ -232,6 +235,57 @@ keyword argument.
 `task_name` is bounded because it is drawn from this codebase's own
 `@shared_task` definitions, never from task input — the same reasoning that
 lets the HTTP `route` label use the resolved URL name.
+
+### Distributed tracing (Block 2 remediation, Part B)
+
+`observability/tracing.py` is the sole module that imports `opentelemetry`
+(same "one call site" principle as `observability/metrics.py`) — see its
+module docstring for the full design. Summary:
+
+- **W3C Trace Context** (`traceparent`/`tracestate`) only, parsed/injected
+  exclusively through OpenTelemetry's own propagator — never hand-rolled.
+  No baggage propagator is configured (an unbounded, easily-misused-for-
+  business-data channel this application has no use for).
+- **One server span per HTTP request** (`observability.middleware.TracingMiddleware`,
+  placed right after `RequestIdMiddleware`), parented to a valid inbound
+  W3C context when present; malformed/absent context safely starts a fresh
+  local trace rather than failing the request. `/metrics/` is excluded
+  from tracing (recursive scrape noise); `/health/`/`/ready/` are traced —
+  readiness does not *depend* on tracing (tracing already fails open), so
+  there is no reason to also exclude them.
+- **One consumer span per Celery task execution**
+  (`common.tasks.CorrelatedTask`, wrapping `observability.tracing.task_span`),
+  parented to whatever context `common.tasks._inject_trace_context`
+  (connected to Celery's `before_task_publish` signal) placed into the
+  message headers at publish time — **never** into business task kwargs,
+  keeping `correlation_id`'s existing kwarg-based design (above) completely
+  unchanged. A duplicate broker redelivery producing two task executions
+  produces two task spans by design; this is a tracing artifact only and
+  must never be read as two `DeliveryAttempt`s or two external sends —
+  Phase 10's claim/idempotency behavior is what actually prevents that.
+- **`trace_id`/`span_id` are surfaced to structured logs**
+  (`observability.tracing.TraceContextLogFilter`) alongside
+  `correlation_id`/`request_id` — three deliberately distinct fields;
+  `request_id`/`correlation_id` is the application's own correlation
+  identity, never derived from `trace_id`, and vice versa.
+- **No exporter ships in this block.** The `TracerProvider` has no span
+  processor attached — spans are created with real, correctly-propagated
+  ids (useful for the log correlation above and for future export) but are
+  never sent anywhere yet. `OBSERVABILITY_TRACING_ENABLED` defaults to
+  `False` for exactly this reason: enabling it today is a deliberate,
+  informed choice to get propagation/log-correlation value with no
+  destination for the spans themselves.
+- **Failure isolation** matches metrics' existing guarantee exactly: every
+  tracing operation (span start/end, context extract/inject) is wrapped so
+  a tracing-internal failure degrades to "no span"/"no context" and never
+  affects the HTTP response or Celery task result.
+- **No raw exception text is ever recorded onto a span** — span status is
+  set from safe, bounded outcome labels only (HTTP status code, Celery
+  task outcome), never from `str(exc)`/`repr(exc)`/a provider's response
+  text. This is a hard security requirement, not a style choice: span data
+  is exactly as exportable/third-party-visible as a metric label, so it
+  gets the same "never an unbounded/untrusted value" treatment PII/secrets
+  already get everywhere else in this codebase.
 
 **Known gap, deferred to a later block**: these metrics accumulate
 correctly in each Celery worker process (default single-process

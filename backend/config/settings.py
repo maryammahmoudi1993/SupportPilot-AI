@@ -133,6 +133,14 @@ env = environ.Env(
     OBSERVABILITY_METRICS_ENABLED=(bool, True),
     OBSERVABILITY_METRICS_TOKEN=(str, ""),
     OBSERVABILITY_SERVICE_NAME=(str, "supportpilot-backend"),
+    # Distributed tracing (Phase 11 Block 2 remediation, Part B). Off by
+    # default, unlike metrics: this block ships no exporter (see
+    # ``observability/tracing.py``), so an operator opting in today gets
+    # correct W3C context propagation and trace/span-id log correlation but
+    # nothing exported anywhere yet — an explicit, informed choice rather
+    # than a surprise default. Disabled mode must need no collector/backend
+    # and add no startup dependency (section 6).
+    OBSERVABILITY_TRACING_ENABLED=(bool, False),
 )
 
 environ.Env.read_env(os.path.join(BASE_DIR.parent, ".env"))
@@ -191,6 +199,7 @@ MIDDLEWARE = [
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "common.middleware.RequestIdMiddleware",
+    "observability.middleware.TracingMiddleware",
     "common.middleware.StructuredLoggingMiddleware",
     "observability.middleware.MetricsMiddleware",
 ]
@@ -499,6 +508,13 @@ if OBSERVABILITY_METRICS_ENABLED and not DEBUG and not OBSERVABILITY_METRICS_TOK
         "OBSERVABILITY_METRICS_ENABLED is true outside DEBUG."
     )
 
+# Distributed tracing (Phase 11 Block 2 remediation) — see
+# ``observability/tracing.py``. Reads this setting itself, lazily, so
+# flipping it requires no other code change and no collector/backend needs
+# to exist for the application to start or run normally either way
+# (section 6/34).
+OBSERVABILITY_TRACING_ENABLED = env("OBSERVABILITY_TRACING_ENABLED")
+
 # Logging
 LOGGING = {
     "version": 1,
@@ -526,13 +542,19 @@ LOGGING = {
         "correlation_id": {
             "()": "common.correlation.CorrelationIdLogFilter",
         },
+        # Phase 11 Block 2 remediation: injects the current span's
+        # trace_id/span_id (observability.tracing), kept as fields distinct
+        # from correlation_id/request_id above (section 10/28).
+        "trace_context": {
+            "()": "observability.tracing.TraceContextLogFilter",
+        },
     },
     "handlers": {
         "console": {
             "level": "INFO",
             "class": "logging.StreamHandler",
             "formatter": "json" if not DEBUG else "verbose",
-            "filters": ["correlation_id"],
+            "filters": ["correlation_id", "trace_context"],
         },
     },
     "loggers": {

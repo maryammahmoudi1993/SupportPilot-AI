@@ -54,10 +54,17 @@ dependencies = [
     # Phase 11: vendor-neutral Prometheus exposition for bounded-cardinality
     # production metrics (observability/metrics.py). A pure client library —
     # no server component, no vendor SDK/agent, no hard external network
-    # dependency at request time. Deliberately not OpenTelemetry: Phase 11
-    # scopes tracing/correlation to structured logging (see ADR 0009) rather
-    # than adding a second, heavier instrumentation stack.
+    # dependency at request time.
     "prometheus-client==0.26.0",
+    # Phase 11 Block 2 remediation (Part B): vendor-neutral distributed
+    # tracing (observability/tracing.py) — API + SDK only, no vendor
+    # exporter (Datadog/New Relic/Honeycomb/Jaeger/Sentry) and no OTLP
+    # exporter package, since this block ships no exporter (see ADR 0009's
+    # update). W3C Trace Context propagation used via
+    # ``opentelemetry.trace.propagation.tracecontext`` and
+    # ``opentelemetry.propagate``, both included in ``opentelemetry-api``.
+    "opentelemetry-api==1.44.0",
+    "opentelemetry-sdk==1.44.0",
 ]
 
 [project.optional-dependencies]
