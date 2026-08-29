@@ -268,13 +268,18 @@ module docstring for the full design. Summary:
   `correlation_id`/`request_id` — three deliberately distinct fields;
   `request_id`/`correlation_id` is the application's own correlation
   identity, never derived from `trace_id`, and vice versa.
-- **No exporter ships in this block.** The `TracerProvider` has no span
-  processor attached — spans are created with real, correctly-propagated
-  ids (useful for the log correlation above and for future export) but are
-  never sent anywhere yet. `OBSERVABILITY_TRACING_ENABLED` defaults to
-  `False` for exactly this reason: enabling it today is a deliberate,
-  informed choice to get propagation/log-correlation value with no
-  destination for the spans themselves.
+- **OTLP exporter (Block 3).** A `BatchSpanProcessor` + `OTLPSpanExporter`
+  (HTTP/protobuf transport) is attached only when
+  `OBSERVABILITY_OTLP_ENDPOINT` is configured — absent (the default)
+  remains explicit local/no-export mode, not a degraded state.
+  `OBSERVABILITY_TRACING_ENABLED` still defaults to `False`: enabling
+  tracing and configuring an endpoint are two separate, deliberate
+  decisions. Batched and asynchronous by construction — the processor's
+  background thread does the actual network I/O, never the request/task
+  thread — and constructed lazily inside `get_tracer_provider()`'s
+  per-process path, so it is exporter-fork-safe the same way the provider
+  itself already is (never built in the Gunicorn master before fork; a
+  Celery worker builds its own independently of Gunicorn).
 - **Failure isolation** matches metrics' existing guarantee exactly: every
   tracing operation (span start/end, context extract/inject) is wrapped so
   a tracing-internal failure degrades to "no span"/"no context" and never
@@ -287,12 +292,211 @@ module docstring for the full design. Summary:
   gets the same "never an unbounded/untrusted value" treatment PII/secrets
   already get everywhere else in this codebase.
 
-**Known gap, deferred to a later block**: these metrics accumulate
-correctly in each Celery worker process (default single-process
-`prometheus_client` mode, as decided in Block 1 — see
-[ADR 0009](../adr/0009-vendor-neutral-observability-with-bounded-cardinality-telemetry.md)),
-but are not yet exposed for scraping from a worker. Doing so safely needs a
-worker-process-safe HTTP exposition strategy (multiple prefork children
-cannot simply share one port the way Gunicorn's multiprocess directory
-handles it) — this is the same operational gap ADR 0009 already flagged for
-"a later block," now scoped specifically to Block 3.
+**Resolved in Block 3** — see "Celery metrics exposition" below: these
+metrics now accumulate correctly in each Celery worker process *and* are
+exposed for scraping through one prefork-safe HTTP listener.
+
+## Celery metrics exposition (Block 3)
+
+`config/celery_metrics.py` closes the gap noted above. Architecture (see
+the module's own docstring for the full rationale):
+
+```text
+Celery worker main process (parent, pre-fork)
+    |  worker_init: fresh OBSERVABILITY_CELERY_PROMETHEUS_MULTIPROC_DIR,
+    |  one HTTP listener bound here only
+    v
+prefork children (inherit the env var via fork)
+    |  each writes its own per-PID mmap files under that directory
+    v
+the one parent-owned HTTP listener
+    |  serves render_metrics() (the same multiprocess-aware function
+    |  Gunicorn's own /metrics/ route already uses) fresh on every scrape
+    v
+Prometheus (or any compatible scraper)
+```
+
+- **Signals, not Gunicorn's hooks**: `celery.signals.worker_init` fires
+  once, in the parent, before the prefork pool forks any child — the
+  Celery equivalent of Gunicorn's `on_starting`. `celery.signals.worker_process_shutdown`
+  — despite the name — also fires *in the parent*
+  (`celery.concurrency.prefork.process_destructor` sends it from the
+  pool's own destructor callback with the dead child's `pid`), the same
+  timing `child_exit` relies on for Gunicorn; it calls
+  `prometheus_client.multiprocess.mark_process_dead`, exactly like
+  `config/gunicorn_conf.py::child_exit`.
+- **Independent of Gunicorn's own multiprocess directory** (section 5 of
+  the Block 3 brief): a separate setting,
+  `OBSERVABILITY_CELERY_PROMETHEUS_MULTIPROC_DIR`, with its own default
+  path — Django/Gunicorn and Celery are typically separate deployable
+  process groups (often separate containers) and must not be required to
+  share a directory or even a filesystem.
+- **Security**: no application-level authentication on this listener (it
+  is infrastructure telemetry, not a tenant API, the same reasoning
+  `/metrics/`'s bearer token exists *because* it is reachable through the
+  main Django/DRF process — this listener is a separate, narrower-purpose
+  process). Binds to `OBSERVABILITY_CELERY_METRICS_HOST` (default
+  `127.0.0.1`, loopback-only) — a non-default bind is an explicit,
+  deployment-owned decision that the surrounding network (a private VPC, a
+  sidecar-only network namespace, a firewall) is what actually restricts
+  access. Off by default (`OBSERVABILITY_CELERY_METRICS_ENABLED=False`).
+- **Never a public DRF route**: a raw `http.server.ThreadingHTTPServer` on
+  its own port, entirely outside `config/urls.py` — cannot appear in the
+  OpenAPI schema by construction, not by an exclusion rule that could be
+  forgotten.
+- **Proven, not assumed**: `config/tests/test_celery_metrics.py` includes a
+  genuine cross-process test — a real Python subprocess sets
+  `PROMETHEUS_MULTIPROC_DIR` and records a metric *before ever importing*
+  `observability.metrics` (required for the mmap-backed value class to be
+  selected), then this test process reads the resulting mmap files back
+  via `MultiProcessCollector`, exactly as a real scrape would. A second
+  test binds a live listener and scrapes it over a real HTTP connection.
+  Stale-directory cleanup on a second "worker master start" and the
+  disabled-by-default no-op path are both covered too.
+
+## Domain instrumentation (Block 3)
+
+Extends metrics/tracing from HTTP+Celery infrastructure to the actual
+business operations Phase 11 was always meant to cover. Every metric here
+follows the same "single call site, bounded labels" discipline as
+`observe_http_request`/`observe_celery_task` — see `observability/metrics.py`
+for each metric's exact label-set docstring.
+
+### Agent runs
+
+`supportpilot_agent_runs_total{trigger, outcome}` and
+`supportpilot_agent_run_duration_seconds{trigger}`, recorded from
+`agents/services.py`'s five terminal-transition functions (`_complete_run`,
+`_fail_run`, `_budget_exceeded_run`, `_complete_run_as_handoff`,
+`cancel_agent_run`) — the same `select_for_update` + status-check guarded,
+single-fire boundaries that already make Phase 5's terminal transitions
+idempotent, so metric recording inherits that guarantee for free. `trigger`
+is `AgentRunTrigger` (manual/conversation/ticket/api); `outcome` is exactly
+`AGENT_RUN_TERMINAL_STATUSES` (succeeded/failed/cancelled/budget_exceeded/
+handed_off).
+
+- **`WAITING_FOR_APPROVAL` is never observed here** — it is not a terminal
+  status (`AGENT_RUN_TERMINAL_STATUSES` excludes it), so no code path ever
+  calls `observe_agent_run_terminal` for it.
+- **`HANDED_OFF` observes as `outcome="handed_off"`, not `"failed"`** — a
+  successful escalation, not a system failure (section 13).
+- **Duration is end-to-end** (`created_at` -> the terminal timestamp:
+  `completed_at`, or `cancelled_at` for a cancellation), documented as such
+  rather than "active compute time" — a run that spent time
+  `WAITING_FOR_APPROVAL` includes that human wait, because `AgentRun` has no
+  separate compute-only timestamp to derive a narrower measure from
+  (section 14).
+- **Recorded via `transaction.on_commit`** inside each terminal function's
+  own `atomic()` block (section 36-37) — a later rollback can never leave a
+  phantom count.
+- **One `agent.run` domain span per orchestration attempt**
+  (`agents/services.py::execute_claimed_agent_run`), a parent of the
+  `llm.generate`/`tool.execute` spans triggered underneath it via ordinary
+  span-context nesting. Always ends within the same synchronous call, even
+  for a `WAITING_FOR_APPROVAL`/`HANDED_OFF` outcome (section 42-43) — never
+  held open across the human-approval wait. Safe attributes only:
+  `supportpilot.agent_run_id` (for trace/log correlation — never a
+  Prometheus label) and the bounded outcome; never the input message,
+  system prompt, or model output.
+- **The post-approval resume is a *fresh* `agent.run.resume` span**, not a
+  child of the original (already-ended) `agent.run` span (section 42) — a
+  forced synchronous parent-child relationship across an arbitrarily long
+  human wait would misrepresent the trace. The stable link back to the
+  original run is `agent_run_id` itself (present on every step/log/audit
+  record for the run already), not span parentage.
+
+### LLM provider calls
+
+`supportpilot_llm_requests_total{provider, outcome}`,
+`supportpilot_llm_request_duration_seconds{provider}`, and
+`supportpilot_llm_tokens_total{provider, token_type}`, recorded from
+`agents/runtime/graph.py`'s `_generate_response` node — the only place
+`LLMProvider.generate` is ever called. `provider` is the adapter's own
+`name` (fake/openai today; unrecognized values collapse to `other`).
+`outcome` is `success` or a `agents.providers.errors.ProviderError`
+subclass's own `code` — a small, closed, code-owned taxonomy. **No `model`
+label** — `AgentVersion.model` is an operator-settable free-text field, not
+a bounded value (section 16-17). Token counts are only observed because
+every `LLMProvider.generate` response (including the fake provider's)
+already carries real `usage` figures — never estimated or fabricated
+(section 17). A `llm.generate` domain span wraps the call, attributed only
+with `llm.provider` and the bounded outcome — never the prompt, response,
+or a provider's raw exception text (section 18).
+
+### Tool executions
+
+`supportpilot_tool_executions_total{tool_name, outcome}` and
+`supportpilot_tool_execution_duration_seconds{tool_name}`, recorded from
+the shared, guarded transition functions `tools/execution.py` already had
+— `_finalize_success`, `_finalize_failure`, `_transition_blocked_by_policy`
+— plus `approvals/services.py::_terminate_execution` for the
+`approval_terminated` outcome (a plain queryset `.update()`, guarded by its
+own affected-row-count check). These functions are shared by both
+`execute_tool` and `resume_after_approval`, so instrumenting them once
+covers both paths without risking a missed call site or double-counting an
+idempotent replay (`execute_tool`'s `reused=True` short-circuit never
+reaches them at all). `outcome` is exactly
+`TOOL_EXECUTION_TERMINAL_STATUSES` (succeeded/failed/timed_out/cancelled/
+blocked_by_policy/approval_terminated) — the tool's actual status enum, not
+an invented taxonomy (section 20). `tool_name` is the tool's registered,
+code-owned registry key. A `tool.execute` domain span wraps the handler
+invocation in both `execute_tool` and `resume_after_approval`, attributed
+with `tool.name`, `supportpilot.tool_execution_id`, and the bounded
+outcome — never arguments or the result payload (section 21).
+
+### Policy decisions
+
+`supportpilot_policy_decisions_total{decision}`, recorded from
+`tools/execution.py::_run_policy_gate` once its `PolicyEffect` decision has
+already committed. `decision` is `allow`/`deny`/`require_approval` — the
+actual `PolicyEffect` enum. A fail-closed evaluation-failure observes as
+`deny` (the same effect it was actually persisted as on `PolicyEvaluation`)
+rather than an invented fourth category. No workspace/policy/tool/user
+label (section 22) — none of those are provably bounded across a whole
+deployment's policy/tool catalog.
+
+### Approvals
+
+`supportpilot_approval_requests_total` (created, no labels),
+`supportpilot_approval_decisions_total{outcome}`, and
+`supportpilot_approval_wait_duration_seconds{outcome}`, recorded from
+`approvals/services.py`'s `create_or_reuse_approval_request` (created-only
+branch), `decide_approval` (approved/rejected), `_expire_if_stale`/
+`expire_stale_approvals` (expired), and `cancel_approval_for_execution`
+(cancelled) — the real `APPROVAL_TERMINAL_STATUSES` set, and each already
+guarded by its own single-fire transition (or, for `decide_approval`, an
+idempotent-replay branch that never reaches the metric call at all —
+proven by a dedicated no-double-count test). Wait duration is
+`created_at -> resolved_at`, never observed for a still-pending request.
+Buckets span 10s-24h (`APPROVAL_WAIT_DURATION_SECONDS`), not web-request
+latency — a human decision can reasonably take anywhere from seconds to the
+request's own TTL. Never in metrics or spans: the approver's private
+comment, requester/approver identity, or frozen tool arguments (section
+26) — approval ids may appear in structured logs/traces for operational
+correlation, never as a metric label.
+
+### Human handoffs
+
+`supportpilot_handoffs_total{reason_code}` (created, from
+`tickets/services.py::create_or_reuse_handoff`'s new-row branch) and
+`supportpilot_handoff_duration_seconds` (`created_at -> resolved_at`, from
+`resolve_handoff` only). `reason_code` is the real, code-owned
+`HumanHandoffReason` enum. **Cancellation never observes a duration** — a
+cancelled handoff was never actually worked, so a wait/duration figure for
+it would be misleading, not merely incomplete (section 27-28); it is
+reflected only in audit/webhook records, matching what the repository
+actually implements (no fabricated "resolved" instrumentation for a
+transition that never happened).
+
+### Known limitations (honestly scoped, not silently dropped)
+
+- A `ToolExecution` cancelled as a side effect of `cancel_agent_run`
+  cascading into a pending approval (the direct queryset `.update()` to
+  `CANCELLED` inside `agents/services.py::cancel_agent_run`) is not yet
+  metered — every other tool-execution terminal path is. A rare edge case
+  (cancelling a run that has an approval in flight), left for a follow-up
+  rather than rushed under time pressure.
+- No dedicated lightweight span exists for the policy-decision boundary
+  itself (only the metric) — the brief marked a policy span "acceptable,"
+  not required, and the agent/LLM/tool spans already give section 41's
+  trace-lineage test a coherent parent chain to assert against.

@@ -5,7 +5,54 @@
 Accepted (Phase 11, Block 1 — metrics foundation; Block 2 — correlation-id
 propagation and task-level metrics across the Celery boundary, then
 extended within Block 2 by a remediation adding vendor-neutral distributed
-tracing — see "Amendment" below; extended further by later blocks).
+tracing; Block 3 — Celery metrics exposition, an OTLP exporter, and agent/
+LLM/tool/policy/approval/handoff domain instrumentation — see the
+Amendments below).
+
+## Amendment (Block 3): telemetry egress closed, domain instrumentation added
+
+Block 3 closed both operational gaps the Block 1/2 amendment below left
+open, and extended metrics/tracing from HTTP+Celery infrastructure to the
+actual business operations Phase 11's brief always intended them to cover
+("metrics must represent business operations, not merely HTTP calls").
+
+**Celery metrics exposition** (`config/celery_metrics.py`): a prefork-safe
+HTTP listener, using the same structural pattern
+`config/gunicorn_conf.py` already established for Gunicorn's own
+multiprocess metrics, translated onto Celery's actual process-lifecycle
+signals (`worker_init` fires in the parent before the prefork pool forks
+any child; `worker_process_shutdown` — despite its name — also fires in the
+parent, with the dead child's pid, from
+`celery.concurrency.prefork.process_destructor`). Exactly one listener
+binds, in the parent, before any child exists; children never bind a port.
+Loopback-only by default and off by default — see the module's own
+docstring for the full security/lifecycle rationale. Proven with a genuine
+cross-process test (a real subprocess writes multiprocess mmap files before
+this process ever imports `observability.metrics`, then this process reads
+them back via `MultiProcessCollector`), not merely a mock.
+
+**OTLP exporter** (`observability/tracing.py`): a `BatchSpanProcessor` +
+`OTLPSpanExporter` (HTTP/protobuf transport), attached only when
+`OBSERVABILITY_OTLP_ENDPOINT` is configured — endpoint absent remains
+Block 2's explicit local/no-export mode, never a silently-chosen default
+collector. Batched/async by construction (never a synchronous network call
+on the request/task thread); exporter construction or export failure both
+fail open, proven by a real unreachable-collector test.
+
+**Domain instrumentation**: `observability/metrics.py` gained agent run,
+LLM provider call, tool execution, policy decision, approval, and handoff
+metrics; `observability/tracing.py` gained a generic `domain_span`/
+`finalize_domain_span` pair used at each of those boundaries. Every new
+metric's label set was chosen the same way the original decision below
+chose HTTP's `route`/Celery's `task_name`: bounded, code-owned enums only
+(`AgentRunTrigger`, the actual `AgentRunStatus`/`ToolExecutionStatus`/
+`ApprovalStatus` terminal sets, `ProviderError` codes, the tool registry's
+own key) — never a workspace/run/execution/approval/handoff id. See
+`docs/architecture/observability.md`'s "Domain instrumentation" section for
+the full boundary-by-boundary rationale, including why counters are
+recorded via `transaction.on_commit` (never inside the transaction being
+measured) and why `WAITING_FOR_APPROVAL`/`HANDED_OFF` are handled as the
+non-failure outcomes they actually are.
 
 ## Amendment (Block 2 remediation, Part B): distributed tracing added
 
@@ -135,20 +182,17 @@ business correctness.
 
 - Distributed tracing (added by the Block 2 remediation amendment above)
   gives a real span/parent relationship across the HTTP -> Celery boundary,
-  but ships no exporter yet — spans are not sent anywhere until a future
-  block adds one. Until then, tracing's operational value is limited to
-  in-process propagation correctness and trace/span-id log correlation,
-  not an actual trace waterfall an operator can view.
+  but shipped no exporter — spans were not sent anywhere until Block 3
+  added one (see the Block 3 amendment above), and remain unexported unless
+  `OBSERVABILITY_OTLP_ENDPOINT` is actually configured.
 - Multiprocess Prometheus metrics require the `PROMETHEUS_MULTIPROC_DIR`
   environment variable to be set correctly, before import, in every process
   that should aggregate correctly (`config/gunicorn_conf.py` handles this
-  for Gunicorn) — a real operational detail an operator must understand
-  before adding metrics to a new process type. Block 2 adds Celery
-  task-level metrics recorded correctly in each worker's default
-  single-process registry, but does not yet expose them for scraping — that
-  needs a worker-process-safe HTTP exposition strategy (prefork's multiple
-  child processes cannot share one port the way Gunicorn's multiprocess
-  directory does) and is deferred to Block 3.
+  for Gunicorn; `config/celery_metrics.py`, added in Block 3, handles the
+  equivalent for Celery workers via their own, separately-configured
+  `OBSERVABILITY_CELERY_PROMETHEUS_MULTIPROC_DIR`) — a real operational
+  detail an operator must understand before adding metrics to a new process
+  type.
 - Bounded-cardinality labels mean a metric alone cannot answer "which
   specific delivery/customer is affected" — that question is answered by
   correlating a metric's timestamp/outcome with structured logs and the
