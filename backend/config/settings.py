@@ -141,6 +141,24 @@ env = environ.Env(
     # than a surprise default. Disabled mode must need no collector/backend
     # and add no startup dependency (section 6).
     OBSERVABILITY_TRACING_ENABLED=(bool, False),
+    # Phase 11 Block 3: the OTLP/HTTP export destination for spans. Empty
+    # (default) means "tracing enabled, but explicit local/no-export mode"
+    # -- never a silently-chosen remote default collector (section 9).
+    OBSERVABILITY_OTLP_ENDPOINT=(str, ""),
+    # Phase 11 Block 3: prefork-safe Celery worker Prometheus exposition
+    # (config/celery_metrics.py). Off by default -- an operator opts in
+    # deliberately, same reasoning as OBSERVABILITY_TRACING_ENABLED.
+    OBSERVABILITY_CELERY_METRICS_ENABLED=(bool, False),
+    # Loopback by default (section 6): this listener has no
+    # authentication of its own (it is infrastructure telemetry, not a
+    # tenant API), so a non-default bind is an explicit, deployment-owned
+    # decision to rely on the surrounding network boundary instead.
+    OBSERVABILITY_CELERY_METRICS_HOST=(str, "127.0.0.1"),
+    OBSERVABILITY_CELERY_METRICS_PORT=(int, 9808),
+    OBSERVABILITY_CELERY_PROMETHEUS_MULTIPROC_DIR=(
+        str,
+        "/tmp/supportpilot-celery-prometheus-multiproc",
+    ),
 )
 
 environ.Env.read_env(os.path.join(BASE_DIR.parent, ".env"))
@@ -514,6 +532,17 @@ if OBSERVABILITY_METRICS_ENABLED and not DEBUG and not OBSERVABILITY_METRICS_TOK
 # to exist for the application to start or run normally either way
 # (section 6/34).
 OBSERVABILITY_TRACING_ENABLED = env("OBSERVABILITY_TRACING_ENABLED")
+OBSERVABILITY_OTLP_ENDPOINT = env("OBSERVABILITY_OTLP_ENDPOINT")
+
+# Celery worker Prometheus exposition (Phase 11 Block 3) — see
+# config/celery_metrics.py. Independent of Gunicorn's own multiprocess
+# directory/lifecycle (section 5): a separate directory and, where
+# Django/Gunicorn and Celery run as separate containers/process groups, no
+# assumption that the two share a filesystem at all.
+OBSERVABILITY_CELERY_METRICS_ENABLED = env("OBSERVABILITY_CELERY_METRICS_ENABLED")
+OBSERVABILITY_CELERY_METRICS_HOST = env("OBSERVABILITY_CELERY_METRICS_HOST")
+OBSERVABILITY_CELERY_METRICS_PORT = env("OBSERVABILITY_CELERY_METRICS_PORT")
+OBSERVABILITY_CELERY_PROMETHEUS_MULTIPROC_DIR = env("OBSERVABILITY_CELERY_PROMETHEUS_MULTIPROC_DIR")
 
 # Logging
 LOGGING = {

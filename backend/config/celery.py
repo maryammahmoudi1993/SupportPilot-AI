@@ -23,6 +23,14 @@ app = Celery("supportpilot")
 app.config_from_object("django.conf:settings", namespace="CELERY")
 app.autodiscover_tasks()
 
+# Phase 11 Block 3: side-effect import — connects the worker_init /
+# worker_process_shutdown signal handlers that implement prefork-safe
+# Celery metrics exposition (config/celery_metrics.py). A no-op at import
+# time; everything inside is itself gated on
+# OBSERVABILITY_CELERY_METRICS_ENABLED and only actually runs once a real
+# worker process starts.
+from . import celery_metrics  # noqa: E402,F401
+
 
 def _delivery_sweep_interval_seconds() -> float:
     """Read lazily, at beat-schedule build time (not at import time): the

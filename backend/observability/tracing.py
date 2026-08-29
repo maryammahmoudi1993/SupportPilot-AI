@@ -1,4 +1,5 @@
-"""Vendor-neutral distributed tracing boundary (Phase 11 Block 2, Part B).
+"""Vendor-neutral distributed tracing boundary (Phase 11 Block 2 Part B,
+extended by Block 3 with a real OTLP exporter).
 
 Everything OpenTelemetry-specific in this application goes through this one
 module (section 7's "one call site" principle, applied here the same way it
@@ -11,16 +12,14 @@ directly.
 Design choices, matching ADR 0009's original trade-off note that adding
 OpenTelemetry later "does not foreclose" on the metrics decision:
 
-* **No span processor/exporter is installed in this block.** Nothing in
-  this repository yet needs spans to leave the process — this block adds
-  the *propagation* half (W3C context flowing correctly across the HTTP ->
-  Celery boundary, trace/span ids available for log correlation), not a
-  production tracing backend integration. A ``TracerProvider`` with no
-  processor still creates real spans with real, correctly-propagated
-  ``trace_id``/``span_id`` — it simply has nowhere to send them when they
-  end, which costs nothing (no thread, no network call). Wiring a real
-  exporter is future-block scope (see section 27/38 of the remediation
-  brief) and must not be fabricated as already done here.
+* **Exporter is opt-in and explicit, never a silent default.** Block 2
+  shipped a ``TracerProvider`` with no processor — spans were created with
+  real, correctly-propagated ``trace_id``/``span_id`` but had nowhere to
+  go. Block 3 adds an OTLP/HTTP exporter (``BatchSpanProcessor`` +
+  ``OTLPSpanExporter``), attached *only* when ``OBSERVABILITY_OTLP_ENDPOINT``
+  is actually configured. Endpoint absent (the default) is deliberate,
+  documented local/no-export mode, not a degraded or accidental state — no
+  remote collector is ever silently chosen.
 * **Fails open, always.** Every public function in this module catches its
   own OpenTelemetry-specific failures and degrades to "no span"/"no
   context" rather than raising — mirroring
@@ -51,11 +50,13 @@ from contextlib import contextmanager
 
 from django.conf import settings
 from opentelemetry import trace
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.propagate import extract as _otel_extract
 from opentelemetry.propagate import inject as _otel_inject
 from opentelemetry.propagate import set_global_textmap
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.trace import Span, SpanKind
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 from opentelemetry.trace.status import Status, StatusCode
@@ -94,7 +95,32 @@ _provider_lock = threading.Lock()
 
 def _build_provider() -> TracerProvider:
     resource = Resource.create({"service.name": settings.OBSERVABILITY_SERVICE_NAME})
-    return TracerProvider(resource=resource)
+    provider = TracerProvider(resource=resource)
+    endpoint = settings.OBSERVABILITY_OTLP_ENDPOINT
+    if endpoint:
+        # Phase 11 Block 3 (section 8-11): the one place a real exporter is
+        # attached. Explicit local/no-export mode (endpoint absent) is the
+        # default and is not an error — see the module docstring's
+        # "Amendment" note and ADR 0009. Construction failure (a malformed
+        # endpoint URL, for instance) must not prevent the provider itself
+        # from existing — spans still work locally, just unexported —
+        # matching this module's fail-open guarantee everywhere else.
+        try:
+            exporter = OTLPSpanExporter(endpoint=endpoint)
+            # BatchSpanProcessor buffers/exports on its own background
+            # thread — never synchronously on the request/task thread
+            # (section 10/45) — and every export call is independently
+            # wrapped by OTel's own exporter (never raises into the
+            # caller); collector-unavailable/timeout/non-2xx responses are
+            # swallowed there, not here. Constructed lazily, per-process,
+            # the same way the provider itself is (section 10: never at
+            # Gunicorn pre-fork, never depending on Gunicorn from a Celery
+            # worker) — this function is only ever called from
+            # ``get_tracer_provider``'s lazy, per-process path.
+            provider.add_span_processor(BatchSpanProcessor(exporter))
+        except Exception:  # noqa: BLE001 - telemetry must fail open
+            logger.warning("tracing_otlp_exporter_init_failed", extra={"event": "tracing_error"})
+    return provider
 
 
 def get_tracer_provider() -> TracerProvider:

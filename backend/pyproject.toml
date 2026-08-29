@@ -65,6 +65,13 @@ dependencies = [
     # ``opentelemetry.propagate``, both included in ``opentelemetry-api``.
     "opentelemetry-api==1.44.0",
     "opentelemetry-sdk==1.44.0",
+    # Phase 11 Block 3: the vendor-neutral production export path for the
+    # spans Block 2 already creates. HTTP/protobuf transport specifically
+    # (not gRPC) - reuses the already-pinned ``requests`` as its transport
+    # rather than adding a grpc dependency, and needs no extra system
+    # packages to deploy. No exporter is attached unless
+    # OBSERVABILITY_OTLP_ENDPOINT is actually configured (observability/tracing.py).
+    "opentelemetry-exporter-otlp-proto-http==1.44.0",
 ]
 
 [project.optional-dependencies]
