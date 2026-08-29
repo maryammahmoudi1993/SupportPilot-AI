@@ -519,12 +519,20 @@ LOGGING = {
         "require_debug_true": {
             "()": "django.utils.log.RequireDebugTrue",
         },
+        # Phase 11 Block 2: injects the current request/task's correlation
+        # id (common.correlation) into every log record so it survives the
+        # HTTP -> Celery boundary without every call site passing it via
+        # extra= by hand.
+        "correlation_id": {
+            "()": "common.correlation.CorrelationIdLogFilter",
+        },
     },
     "handlers": {
         "console": {
             "level": "INFO",
             "class": "logging.StreamHandler",
             "formatter": "json" if not DEBUG else "verbose",
+            "filters": ["correlation_id"],
         },
     },
     "loggers": {

@@ -97,6 +97,8 @@ def dispatch_delivery_for_processing(delivery_id: uuid.UUID | str) -> None:
     exception — it only means nobody woke up a worker immediately; the
     delivery is already persisted and due, so the next sweep can still find
     and claim it later."""
+    from common.correlation import get_correlation_id
+
     from .tasks import process_delivery_task
 
     logger.info(
@@ -104,7 +106,7 @@ def dispatch_delivery_for_processing(delivery_id: uuid.UUID | str) -> None:
         extra={"event": "delivery_dispatch_attempted", "delivery_id": str(delivery_id)},
     )
     try:
-        process_delivery_task.delay(str(delivery_id))
+        process_delivery_task.delay(str(delivery_id), correlation_id=get_correlation_id())
     except Exception:  # noqa: BLE001 - broker/transport errors are unbounded in type
         logger.warning(
             "delivery_dispatch_failed",

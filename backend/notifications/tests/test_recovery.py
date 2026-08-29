@@ -160,8 +160,8 @@ def test_initial_broker_failure_then_sweeper_recovery_end_to_end(monkeypatch, fa
     assert len(fake_channel_calls) == 0
 
     # Broker returns — publication now actually reaches a worker.
-    def _broker_up(delivery_id):
-        process_delivery_task.apply(args=[delivery_id]).get()
+    def _broker_up(delivery_id, **kwargs):
+        process_delivery_task.apply(args=[delivery_id], kwargs=kwargs).get()
 
     monkeypatch.setattr(tasks_module.process_delivery_task, "delay", _broker_up)
 
@@ -273,8 +273,8 @@ def test_expired_claim_recovered_through_task_boundary_marks_old_attempt_abandon
     # it run synchronously here so the test can observe the recovered
     # outcome without a live worker process (mirrors the broker-return half
     # of ``test_initial_broker_failure_then_sweeper_recovery_end_to_end``).
-    def _synchronous_delay(delivery_id):
-        process_delivery_task.apply(args=[delivery_id]).get()
+    def _synchronous_delay(delivery_id, **kwargs):
+        process_delivery_task.apply(args=[delivery_id], kwargs=kwargs).get()
 
     monkeypatch.setattr(tasks_module.process_delivery_task, "delay", _synchronous_delay)
 

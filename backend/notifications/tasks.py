@@ -9,9 +9,15 @@ from __future__ import annotations
 
 from celery import shared_task
 
+from common.tasks import CorrelatedTask
 
-@shared_task(bind=True, max_retries=0)
-def process_delivery_task(self, delivery_id: str) -> str:
+
+@shared_task(bind=True, base=CorrelatedTask, max_retries=0)
+def process_delivery_task(self, delivery_id: str, correlation_id: str | None = None) -> str:
+    # ``correlation_id`` is declared only so Celery's argument validation
+    # accepts it from ``dispatch_delivery_for_processing`` — see the
+    # identical note on ``agents.tasks.execute_agent_run_task`` (Phase 11
+    # Block 2).
     from .services import process_claimed_delivery
 
     return process_claimed_delivery(delivery_id)
@@ -30,14 +36,14 @@ def process_delivery_task(self, delivery_id: str) -> str:
 # decide ownership.
 
 
-@shared_task(bind=True, max_retries=0)
+@shared_task(bind=True, base=CorrelatedTask, max_retries=0)
 def dispatch_due_deliveries_task(self) -> int:
     from .recovery import dispatch_due_deliveries
 
     return dispatch_due_deliveries()
 
 
-@shared_task(bind=True, max_retries=0)
+@shared_task(bind=True, base=CorrelatedTask, max_retries=0)
 def recover_expired_delivery_claims_task(self) -> int:
     from .recovery import recover_expired_delivery_claims
 

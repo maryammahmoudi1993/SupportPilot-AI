@@ -253,9 +253,11 @@ def create_agent_run(
 
 
 def _dispatch_run(run_id: uuid.UUID) -> None:
+    from common.correlation import get_correlation_id
+
     from .tasks import execute_agent_run_task
 
-    execute_agent_run_task.delay(str(run_id))
+    execute_agent_run_task.delay(str(run_id), correlation_id=get_correlation_id())
 
 
 def claim_agent_run(run_id: uuid.UUID | str) -> AgentRun | None:

@@ -399,6 +399,8 @@ def _emit_expired_event(locked: ApprovalRequest) -> None:
 
 
 def _dispatch_resume(approval_id: uuid.UUID) -> None:
+    from common.correlation import get_correlation_id
+
     from .tasks import resume_approved_action_task
 
-    resume_approved_action_task.delay(str(approval_id))
+    resume_approved_action_task.delay(str(approval_id), correlation_id=get_correlation_id())

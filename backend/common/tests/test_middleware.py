@@ -2,9 +2,14 @@
 
 import logging
 import uuid
+from unittest.mock import MagicMock
 
 import pytest
+from django.test import RequestFactory
 from rest_framework.test import APIClient
+
+from common.correlation import get_correlation_id
+from common.middleware import RequestIdMiddleware
 
 
 @pytest.fixture
@@ -34,6 +39,29 @@ class TestRequestIdMiddleware:
         second = api_client.get("/health/").headers.get("X-Request-ID")
 
         assert first != second
+
+    def test_binds_the_correlation_scope_for_the_lifetime_of_the_request(self):
+        """Phase 11 Block 2: the request's id must be readable via
+        ``common.correlation.get_correlation_id()`` while the response is
+        being built (so anything it triggers, including a
+        ``transaction.on_commit`` Celery dispatch, sees it), and unbound
+        again once the middleware returns."""
+        observed = {}
+
+        def get_response(request):
+            observed["correlation_id"] = get_correlation_id()
+            response = MagicMock()
+            response.__setitem__ = MagicMock()
+            return response
+
+        middleware = RequestIdMiddleware(get_response)
+        request = RequestFactory().get("/health/")
+
+        assert get_correlation_id() is None
+        middleware(request)
+
+        assert observed["correlation_id"] == request.request_id
+        assert get_correlation_id() is None
 
 
 @pytest.mark.django_db

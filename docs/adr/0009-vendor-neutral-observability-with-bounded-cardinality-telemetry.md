@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted (Phase 11, Block 1 — metrics foundation; extended by later blocks).
+Accepted (Phase 11, Block 1 — metrics foundation; Block 2 — correlation-id
+propagation and task-level metrics across the Celery boundary; extended by
+later blocks).
 
 ## Context
 
@@ -106,8 +108,12 @@ business correctness.
   environment variable to be set correctly, before import, in every process
   that should aggregate correctly (`config/gunicorn_conf.py` handles this
   for Gunicorn) — a real operational detail an operator must understand
-  before adding metrics to a new process type (e.g. Celery workers, in a
-  later block).
+  before adding metrics to a new process type. Block 2 adds Celery
+  task-level metrics recorded correctly in each worker's default
+  single-process registry, but does not yet expose them for scraping — that
+  needs a worker-process-safe HTTP exposition strategy (prefork's multiple
+  child processes cannot share one port the way Gunicorn's multiprocess
+  directory does) and is deferred to Block 3.
 - Bounded-cardinality labels mean a metric alone cannot answer "which
   specific delivery/customer is affected" — that question is answered by
   correlating a metric's timestamp/outcome with structured logs and the

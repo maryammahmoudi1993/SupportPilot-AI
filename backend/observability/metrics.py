@@ -48,7 +48,10 @@ __all__ = [
     "METRICS_CONTENT_TYPE",
     "HTTP_REQUESTS_TOTAL",
     "HTTP_REQUEST_DURATION_SECONDS",
+    "CELERY_TASKS_TOTAL",
+    "CELERY_TASK_DURATION_SECONDS",
     "observe_http_request",
+    "observe_celery_task",
     "render_metrics",
 ]
 
@@ -108,6 +111,55 @@ def observe_http_request(
     status_class = _status_class(status_code)
     HTTP_REQUESTS_TOTAL.labels(method=method_label, route=route, status_class=status_class).inc()
     HTTP_REQUEST_DURATION_SECONDS.labels(method=method_label, route=route).observe(duration_seconds)
+
+
+# ---------------------------------------------------------------------------
+# Celery tasks (Phase 11 Block 2)
+# ---------------------------------------------------------------------------
+#
+# Recorded from ``common.tasks.CorrelatedTask`` — every first-party
+# ``@shared_task`` is defined with ``base=CorrelatedTask``, so this is the
+# single call site for both metrics, exactly like ``observe_http_request``
+# above.
+#
+# Deployment note: Celery workers deliberately run in ``prometheus_client``'s
+# default single-process mode (see ``docs/architecture/observability.md``),
+# so these metrics accumulate correctly in-process but are not yet exposed
+# for scraping from a worker — that requires a worker-process-safe HTTP
+# exposition strategy (multiple prefork children cannot share one port) and
+# is left to a later block, matching the operational gap ADR 0009 already
+# flagged. Until then these metrics are directly assertable in tests and
+# ready for that later block to expose, not yet scrapeable in production.
+
+#: Labels: ``task_name`` (the Celery task's registered name — bounded
+#: because it is drawn from this codebase's own ``@shared_task``
+#: definitions, never from task input), ``outcome`` (``"success"`` /
+#: ``"failure"`` / ``"retry"`` — 3 values).
+CELERY_TASKS_TOTAL = Counter(
+    f"{METRIC_NAMESPACE}_celery_tasks_total",
+    "Total Celery tasks executed, by task name and outcome.",
+    ["task_name", "outcome"],
+)
+
+#: Same bounded label set as ``HTTP_REQUEST_DURATION_SECONDS``'s ``route``:
+#: ``task_name`` only — outcome-independent cost, keeping bucket-count
+#: multiplication bounded.
+CELERY_TASK_DURATION_SECONDS = Histogram(
+    f"{METRIC_NAMESPACE}_celery_task_duration_seconds",
+    "Celery task execution duration in seconds, by task name.",
+    ["task_name"],
+    buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 300),
+)
+
+_CELERY_OUTCOMES = frozenset({"success", "failure", "retry"})
+
+
+def observe_celery_task(*, task_name: str, outcome: str, duration_seconds: float) -> None:
+    """The single call site every Celery metrics recorder must go through
+    (mirrors ``observe_http_request`` above)."""
+    outcome_label = outcome if outcome in _CELERY_OUTCOMES else "failure"
+    CELERY_TASKS_TOTAL.labels(task_name=task_name, outcome=outcome_label).inc()
+    CELERY_TASK_DURATION_SECONDS.labels(task_name=task_name).observe(duration_seconds)
 
 
 # ---------------------------------------------------------------------------

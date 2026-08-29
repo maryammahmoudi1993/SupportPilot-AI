@@ -178,9 +178,10 @@ added.
 
 ## Trace/log correlation
 
-Phase 11 Block 1 does not add distributed tracing or an OpenTelemetry SDK
-(see [ADR 0009](../adr/0009-vendor-neutral-observability-with-bounded-cardinality-telemetry.md)
-for why). Correlation across a request today already exists through:
+Phase 11 does not add distributed tracing or an OpenTelemetry SDK (see
+[ADR 0009](../adr/0009-vendor-neutral-observability-with-bounded-cardinality-telemetry.md)
+for why). Correlation across a request, and now across the Celery boundary,
+exists through:
 
 - `request.request_id` (`common.middleware.RequestIdMiddleware`), present on
   every structured log line the request produces
@@ -188,7 +189,56 @@ for why). Correlation across a request today already exists through:
 - The existing model relationships an operator can already query — an
   `AgentRun`, `ToolExecution`, or `Delivery` id already links back to its
   workspace and, transitively, to the request that produced it.
+- **Block 2**: `common.correlation` — a single `contextvars.ContextVar`
+  bound once at whichever boundary owns the id (`RequestIdMiddleware` for an
+  HTTP request, `common.tasks.CorrelatedTask` for a Celery task) and read
+  everywhere else via `get_correlation_id()`. `CorrelationIdLogFilter`
+  (wired into `LOGGING["handlers"]["console"]["filters"]`) injects it into
+  every structured log record automatically, so no call site threads it
+  through `extra=` by hand — the field is simply always present (empty
+  string outside any bound scope).
 
-Block 2 hardens and extends this path explicitly across the Celery boundary;
-this document's [Trace/log correlation](#tracelog-correlation) section will
-grow to describe that once it lands.
+### Celery boundary (Block 2)
+
+Every first-party `@shared_task` is declared with
+`base=common.tasks.CorrelatedTask`. A dispatch call site passes
+`correlation_id=get_correlation_id()` as an ordinary task keyword argument
+(never as message headers, and never mixed into the task's real business
+arguments) — falling back to `None` when there is no active scope, e.g. a
+Beat-triggered sweep with no originating request. `CorrelatedTask.__call__`:
+
+1. pops `correlation_id` off the incoming kwargs before the task body ever
+   sees it (so no existing task signature had to change);
+2. binds it for the duration of the task body via `correlation_scope`,
+   generating a fresh id first if none was passed, so every task execution
+   is always attributable to *some* correlation id;
+3. records a bounded Celery task metric (below) with the same
+   fail-open guarantee as `MetricsMiddleware` — a broken metrics call never
+   affects the task's own result.
+
+This deliberately mirrors `transaction.on_commit`'s existing thin-dispatch
+pattern (`_dispatch_run`, `_dispatch_resume`, `_dispatch_ingestion`,
+`dispatch_delivery_for_processing`): those functions are the only call
+sites that changed, each gaining one `correlation_id=get_correlation_id()`
+keyword argument.
+
+### Celery task metrics (Block 2)
+
+| Metric | Type | Labels |
+| --- | --- | --- |
+| `supportpilot_celery_tasks_total` | Counter | `task_name`, `outcome` (`success`/`failure`/`retry`) |
+| `supportpilot_celery_task_duration_seconds` | Histogram | `task_name` |
+
+`task_name` is bounded because it is drawn from this codebase's own
+`@shared_task` definitions, never from task input — the same reasoning that
+lets the HTTP `route` label use the resolved URL name.
+
+**Known gap, deferred to a later block**: these metrics accumulate
+correctly in each Celery worker process (default single-process
+`prometheus_client` mode, as decided in Block 1 — see
+[ADR 0009](../adr/0009-vendor-neutral-observability-with-bounded-cardinality-telemetry.md)),
+but are not yet exposed for scraping from a worker. Doing so safely needs a
+worker-process-safe HTTP exposition strategy (multiple prefork children
+cannot simply share one port the way Gunicorn's multiprocess directory
+handles it) — this is the same operational gap ADR 0009 already flagged for
+"a later block," now scoped specifically to Block 3.
