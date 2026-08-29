@@ -161,6 +161,33 @@ class TestExpositionServerFailureIsolation:
             celery_metrics.reset_for_tests()
 
 
+class TestRenderFailureIsolation:
+    def test_broken_render_metrics_returns_500_not_a_crashed_listener(self, settings, monkeypatch):
+        settings.OBSERVABILITY_CELERY_METRICS_HOST = "127.0.0.1"
+        settings.OBSERVABILITY_CELERY_METRICS_PORT = _free_port()
+        celery_metrics.reset_for_tests()
+        monkeypatch.setattr(
+            "observability.metrics.render_metrics",
+            lambda: (_ for _ in ()).throw(RuntimeError("registry exploded")),
+        )
+        try:
+            celery_metrics._start_exposition_server()
+
+            url = (
+                f"http://{settings.OBSERVABILITY_CELERY_METRICS_HOST}:"
+                f"{settings.OBSERVABILITY_CELERY_METRICS_PORT}/metrics"
+            )
+            try:
+                urllib.request.urlopen(url, timeout=5)
+                raised = False
+            except Exception as exc:  # noqa: BLE001
+                raised = True
+                assert "500" in str(exc)
+            assert raised
+        finally:
+            celery_metrics.reset_for_tests()
+
+
 class TestLiveScrapeIncludesRecordedMetrics:
     """A real end-to-end proof, not a mock: bind the actual listener and
     scrape it over a real HTTP connection."""

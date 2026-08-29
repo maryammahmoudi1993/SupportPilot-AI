@@ -118,6 +118,38 @@ class TestTaskSpanCreation:
         assert set(finished.attributes.keys()) <= {"celery.task_name", "supportpilot.task_outcome"}
 
 
+class TestDomainSpanCreation:
+    def test_creates_an_internal_span_with_extra_attributes(self, traced):
+        with tracing.domain_span(
+            "agent.run", attributes={"supportpilot.agent_run_id": "x"}
+        ) as span:
+            assert span is not None
+        finished = traced.get_finished_spans()[0]
+        assert finished.kind == SpanKind.INTERNAL
+        assert finished.name == "agent.run"
+        assert finished.attributes["supportpilot.agent_run_id"] == "x"
+
+    def test_finalize_domain_span_records_outcome_and_extra_attributes(self, traced):
+        with tracing.domain_span("tool.execute") as span:
+            tracing.finalize_domain_span(
+                span, outcome="succeeded", extra_attributes={"tool.name": "payment.refund"}
+            )
+        finished = traced.get_finished_spans()[0]
+        assert finished.attributes["supportpilot.outcome"] == "succeeded"
+        assert finished.attributes["tool.name"] == "payment.refund"
+        assert finished.status.status_code == StatusCode.OK
+
+    def test_finalize_domain_span_is_error_sets_error_status_only(self, traced):
+        with tracing.domain_span("tool.execute") as span:
+            tracing.finalize_domain_span(span, outcome="failed", is_error=True)
+        finished = traced.get_finished_spans()[0]
+        assert finished.status.status_code == StatusCode.ERROR
+        assert not finished.status.description
+
+    def test_finalize_domain_span_with_no_span_is_a_safe_no_op(self):
+        tracing.finalize_domain_span(None, outcome="success")  # must not raise
+
+
 class TestBusinessExceptionPropagation:
     """A tracing span must never swallow the caller's own exception."""
 
@@ -240,6 +272,13 @@ class TestFailureIsolation:
                 raise RuntimeError("set_attribute exploded")
 
         tracing.finalize_task_span(_BrokenSpan(), outcome="success")  # must not raise
+
+    def test_finalize_domain_span_failure_does_not_raise(self, traced):
+        class _BrokenSpan:
+            def set_attribute(self, *args, **kwargs):
+                raise RuntimeError("set_attribute exploded")
+
+        tracing.finalize_domain_span(_BrokenSpan(), outcome="success")  # must not raise
 
     def test_get_trace_id_failure_returns_none(self, settings, monkeypatch):
         settings.OBSERVABILITY_TRACING_ENABLED = True
