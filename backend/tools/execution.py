@@ -26,6 +26,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 from agents.models import AgentRun, AgentRunStatus, AgentStepStatus, AgentStepType
 from common.redaction import redact
+from observability.tracing import domain_span, finalize_domain_span
 from workspaces.models import Workspace
 
 from .contracts import Tool, ToolExecutionContext
@@ -248,51 +249,68 @@ def execute_tool(
         actor_user_id=str(agent_run.created_by_id) if agent_run.created_by_id else None,
     )
 
-    try:
-        output = _run_with_retries(
-            execution=execution,
-            tool=tool,
-            context=context,
-            arguments=validated_arguments,
-            timeout_seconds=effective_timeout,
-        )
-    except ToolTimeoutError as exc:
-        _finalize_failure(
-            execution, status=ToolExecutionStatus.TIMED_OUT, code=exc.code, message=exc.safe_message
-        )
-        _increment_tool_call_count(agent_run)
-        _step(
-            AgentStepType.TOOL_EXECUTION_TIMED_OUT,
-            AgentStepStatus.FAILED,
-            error_code=exc.code,
-            safe_metadata={"tool_key": tool_key, "tool_execution_id": str(execution.id)},
-        )
-        raise
-    except ToolError as exc:
-        _finalize_failure(
-            execution, status=ToolExecutionStatus.FAILED, code=exc.code, message=exc.safe_message
-        )
-        _increment_tool_call_count(agent_run)
-        _step(
-            AgentStepType.TOOL_EXECUTION_FAILED,
-            AgentStepStatus.FAILED,
-            error_code=exc.code,
-            safe_metadata={"tool_key": tool_key, "tool_execution_id": str(execution.id)},
-        )
-        raise
+    # Phase 11 Block 3 (section 21): one tool execution span per handler
+    # invocation, a child of whatever agent/LLM span is already current.
+    # Safe attributes only — the tool's registered (bounded) name and the
+    # execution id for trace/log correlation, never args/result payload.
+    with domain_span(
+        "tool.execute",
+        attributes={"tool.name": tool_key, "supportpilot.tool_execution_id": str(execution.id)},
+    ) as tool_span:
+        try:
+            output = _run_with_retries(
+                execution=execution,
+                tool=tool,
+                context=context,
+                arguments=validated_arguments,
+                timeout_seconds=effective_timeout,
+            )
+        except ToolTimeoutError as exc:
+            _finalize_failure(
+                execution,
+                status=ToolExecutionStatus.TIMED_OUT,
+                code=exc.code,
+                message=exc.safe_message,
+            )
+            finalize_domain_span(tool_span, outcome=ToolExecutionStatus.TIMED_OUT, is_error=True)
+            _increment_tool_call_count(agent_run)
+            _step(
+                AgentStepType.TOOL_EXECUTION_TIMED_OUT,
+                AgentStepStatus.FAILED,
+                error_code=exc.code,
+                safe_metadata={"tool_key": tool_key, "tool_execution_id": str(execution.id)},
+            )
+            raise
+        except ToolError as exc:
+            _finalize_failure(
+                execution,
+                status=ToolExecutionStatus.FAILED,
+                code=exc.code,
+                message=exc.safe_message,
+            )
+            finalize_domain_span(tool_span, outcome=ToolExecutionStatus.FAILED, is_error=True)
+            _increment_tool_call_count(agent_run)
+            _step(
+                AgentStepType.TOOL_EXECUTION_FAILED,
+                AgentStepStatus.FAILED,
+                error_code=exc.code,
+                safe_metadata={"tool_key": tool_key, "tool_execution_id": str(execution.id)},
+            )
+            raise
 
-    _finalize_success(execution, output=output)
-    _increment_tool_call_count(agent_run)
-    _step(
-        AgentStepType.TOOL_EXECUTION_SUCCEEDED,
-        AgentStepStatus.SUCCEEDED,
-        safe_metadata={
-            "tool_key": tool_key,
-            "tool_execution_id": str(execution.id),
-            "attempt_count": execution.attempt_count,
-        },
-    )
-    return ToolExecutionResult(execution=execution, output=output, reused=False)
+        _finalize_success(execution, output=output)
+        finalize_domain_span(tool_span, outcome=ToolExecutionStatus.SUCCEEDED)
+        _increment_tool_call_count(agent_run)
+        _step(
+            AgentStepType.TOOL_EXECUTION_SUCCEEDED,
+            AgentStepStatus.SUCCEEDED,
+            safe_metadata={
+                "tool_key": tool_key,
+                "tool_execution_id": str(execution.id),
+                "attempt_count": execution.attempt_count,
+            },
+        )
+        return ToolExecutionResult(execution=execution, output=output, reused=False)
 
 
 # ---------------------------------------------------------------------------
@@ -553,6 +571,16 @@ def _run_policy_gate(
                 outcome, reason = "require_approval", decision.safe_reason
     # transaction.atomic() committed here — outcome/reason now safe to act on.
 
+    # Phase 11 Block 3 (section 22-23): recorded once per gate pass, after
+    # the decision above has already committed — ``evaluation_failed``
+    # persisted the same ``PolicyEffect.DENY`` the plain ``deny`` branch did
+    # (fail-closed), so both observe as "deny", the actual bounded decision
+    # value that was written to ``PolicyEvaluation``, never an invented
+    # fourth category.
+    from observability.metrics import observe_policy_decision
+
+    observe_policy_decision(decision="deny" if outcome == "evaluation_failed" else outcome)
+
     if outcome == "allow":
         step(
             AgentStepType.POLICY_EVALUATED,
@@ -588,6 +616,41 @@ def _run_policy_gate(
     raise ToolApprovalRequiredError(reason)
 
 
+def _schedule_tool_execution_observation(execution: ToolExecution, *, outcome: str) -> None:
+    """Phase 11 Block 3 (section 19-20, 35-37): the single place every
+    ToolExecution terminal-transition metric/span is recorded from. Shared
+    by ``_finalize_success``/``_finalize_failure`` (called from both
+    ``execute_tool`` and ``resume_after_approval`` — the same guarded,
+    single-fire DB transition either way) and
+    ``_transition_blocked_by_policy``; ``approvals.services._terminate_execution``
+    calls :func:`observability.metrics.observe_tool_execution` directly for
+    the ``approval_terminated`` outcome (a plain queryset ``.update()``, not
+    one of this module's own locked-transition functions). Recorded via
+    ``transaction.on_commit`` — never inside the ``atomic()`` block itself —
+    so a later rollback can never leave a phantom count."""
+    duration_seconds = (
+        (execution.completed_at - execution.started_at).total_seconds()
+        if execution.started_at is not None and execution.completed_at is not None
+        else None
+    )
+    tool_name = execution.tool_definition.key
+
+    def _record() -> None:
+        from observability.metrics import observe_tool_execution
+
+        try:
+            observe_tool_execution(
+                tool_name=tool_name, outcome=outcome, duration_seconds=duration_seconds
+            )
+        except Exception:  # noqa: BLE001 - telemetry must fail open
+            logger.warning(
+                "tool_execution_metrics_recording_failed",
+                extra={"event": "metrics_error", "tool_execution_id": str(execution.id)},
+            )
+
+    transaction.on_commit(_record)
+
+
 def _transition_blocked_by_policy(execution: ToolExecution, *, message: str) -> None:
     with transaction.atomic():
         locked = ToolExecution.objects.select_for_update().get(pk=execution.pk)
@@ -606,6 +669,7 @@ def _transition_blocked_by_policy(execution: ToolExecution, *, message: str) -> 
                 "updated_at",
             ]
         )
+        _schedule_tool_execution_observation(locked, outcome="blocked_by_policy")
     execution.status = locked.status
 
 
@@ -735,35 +799,56 @@ def resume_after_approval(
         safe_metadata={"tool_execution_id": str(execution.id)},
     )
 
-    try:
-        output = _run_with_retries(
-            execution=execution,
-            tool=tool,
-            context=context,
-            arguments=validated_arguments,
-            timeout_seconds=effective_timeout,
-        )
-    except ToolTimeoutError as exc:
-        _finalize_failure(
-            execution, status=ToolExecutionStatus.TIMED_OUT, code=exc.code, message=exc.safe_message
-        )
-        _increment_tool_call_count(execution.agent_run)
-        raise
-    except ToolError as exc:
-        _finalize_failure(
-            execution, status=ToolExecutionStatus.FAILED, code=exc.code, message=exc.safe_message
-        )
-        _increment_tool_call_count(execution.agent_run)
-        raise
+    # Phase 11 Block 3 (section 21): same ``tool.execute`` span as the
+    # ordinary ``execute_tool`` path — a child of whatever this resume's own
+    # task/domain span is (``agents.services._continue_run_after_resumed_tool``'s
+    # ``agent.run.resume``), never a false parent back to the original
+    # pre-approval trace (section 42).
+    with domain_span(
+        "tool.execute",
+        attributes={
+            "tool.name": execution.tool_definition.key,
+            "supportpilot.tool_execution_id": str(execution.id),
+        },
+    ) as tool_span:
+        try:
+            output = _run_with_retries(
+                execution=execution,
+                tool=tool,
+                context=context,
+                arguments=validated_arguments,
+                timeout_seconds=effective_timeout,
+            )
+        except ToolTimeoutError as exc:
+            _finalize_failure(
+                execution,
+                status=ToolExecutionStatus.TIMED_OUT,
+                code=exc.code,
+                message=exc.safe_message,
+            )
+            finalize_domain_span(tool_span, outcome=ToolExecutionStatus.TIMED_OUT, is_error=True)
+            _increment_tool_call_count(execution.agent_run)
+            raise
+        except ToolError as exc:
+            _finalize_failure(
+                execution,
+                status=ToolExecutionStatus.FAILED,
+                code=exc.code,
+                message=exc.safe_message,
+            )
+            finalize_domain_span(tool_span, outcome=ToolExecutionStatus.FAILED, is_error=True)
+            _increment_tool_call_count(execution.agent_run)
+            raise
 
-    _finalize_success(execution, output=output)
-    _increment_tool_call_count(execution.agent_run)
-    _step(
-        AgentStepType.TOOL_EXECUTION_SUCCEEDED,
-        AgentStepStatus.SUCCEEDED,
-        safe_metadata={"tool_execution_id": str(execution.id)},
-    )
-    return ToolExecutionResult(execution=execution, output=output, reused=False)
+        _finalize_success(execution, output=output)
+        finalize_domain_span(tool_span, outcome=ToolExecutionStatus.SUCCEEDED)
+        _increment_tool_call_count(execution.agent_run)
+        _step(
+            AgentStepType.TOOL_EXECUTION_SUCCEEDED,
+            AgentStepStatus.SUCCEEDED,
+            safe_metadata={"tool_execution_id": str(execution.id)},
+        )
+        return ToolExecutionResult(execution=execution, output=output, reused=False)
 
 
 def _claim_resume(execution: ToolExecution) -> ToolExecution | None:
@@ -792,6 +877,7 @@ def _finalize_success(execution: ToolExecution, *, output: dict[str, Any]) -> No
         locked.save(
             update_fields=["status", "result_redacted", "completed_at", "duration_ms", "updated_at"]
         )
+        _schedule_tool_execution_observation(locked, outcome="succeeded")
     execution.status = locked.status
     execution.result_redacted = locked.result_redacted
 
@@ -817,6 +903,7 @@ def _finalize_failure(execution: ToolExecution, *, status: str, code: str, messa
                 "updated_at",
             ]
         )
+        _schedule_tool_execution_observation(locked, outcome=status)
     execution.status = locked.status
 
 

@@ -66,6 +66,41 @@ def role_satisfies_requirement(*, actor_role: str, required_role: str) -> bool:
     return _APPROVAL_ROLE_RANK.get(actor_role, 0) >= _APPROVAL_ROLE_RANK.get(required_role, 99)
 
 
+def _schedule_approval_decision_observation(approval: ApprovalRequest, *, outcome: str) -> None:
+    """Phase 11 Block 3 (section 24-26, 35-37): the single place every
+    ApprovalRequest terminal-transition metric is recorded from —
+    ``decide_approval`` (approved/rejected), ``_expire_if_stale``/
+    ``expire_stale_approvals`` (expired), and
+    ``cancel_approval_for_execution`` (cancelled). Every call site already
+    guards its own single-fire DB transition (``select_for_update`` + a
+    status check, or the idempotent-replay branch in ``decide_approval``
+    that never reaches this at all), so this is never called twice for the
+    same request. Recorded via ``transaction.on_commit``, matching every
+    other domain metric here."""
+    wait_duration_seconds = (
+        (approval.resolved_at - approval.created_at).total_seconds()
+        if approval.resolved_at is not None
+        else None
+    )
+    if wait_duration_seconds is None:  # pragma: no cover - defensive, every caller sets it first
+        return
+
+    def _record() -> None:
+        from observability.metrics import observe_approval_decision
+
+        try:
+            observe_approval_decision(outcome=outcome, wait_duration_seconds=wait_duration_seconds)
+        except Exception:  # noqa: BLE001 - telemetry must fail open
+            import logging
+
+            logging.getLogger("supportpilot").warning(
+                "approval_metrics_recording_failed",
+                extra={"event": "metrics_error", "approval_request_id": str(approval.id)},
+            )
+
+    transaction.on_commit(_record)
+
+
 # ---------------------------------------------------------------------------
 # Creation — called only from the tool-execution policy gate.
 # ---------------------------------------------------------------------------
@@ -145,6 +180,21 @@ def create_or_reuse_approval_request(
                 "expires_at": approval.expires_at.isoformat(),
             },
         )
+
+        def _record_created() -> None:
+            from observability.metrics import observe_approval_request_created
+
+            try:
+                observe_approval_request_created()
+            except Exception:  # noqa: BLE001 - telemetry must fail open
+                import logging
+
+                logging.getLogger("supportpilot").warning(
+                    "approval_metrics_recording_failed",
+                    extra={"event": "metrics_error", "approval_request_id": str(approval.id)},
+                )
+
+        transaction.on_commit(_record_created)
     return approval
 
 
@@ -260,6 +310,12 @@ def decide_approval(
                             error_code="approval_rejected",
                             error_message="This action was rejected.",
                         )
+                    _schedule_approval_decision_observation(
+                        locked,
+                        outcome=(
+                            "approved" if decision == ApprovalDecisionValue.APPROVE else "rejected"
+                        ),
+                    )
                     # Section 41-45: a decision (approve *or* reject) always
                     # dispatches the same bounded resume continuation — the
                     # continuation service itself branches on the approval's
@@ -298,6 +354,7 @@ def _expire_if_stale(locked: ApprovalRequest) -> bool:
         metadata={"approval_request_id": str(locked.id)},
     )
     _emit_expired_event(locked)
+    _schedule_approval_decision_observation(locked, outcome="expired")
     # Section 46-49: expiry never leaves the run waiting indefinitely — the
     # same bounded resume continuation used for reject dispatches here too,
     # never an LLM call inside this transaction (section 48).
@@ -335,6 +392,7 @@ def expire_stale_approvals(*, now=None) -> int:
                 metadata={"approval_request_id": str(locked.id)},
             )
             _emit_expired_event(locked)
+            _schedule_approval_decision_observation(locked, outcome="expired")
             # Section 48-49: dispatched per-row, after this row's own commit
             # — never inside a shared transaction spanning the whole sweep,
             # so one stuck/slow continuation can never block another row's
@@ -368,10 +426,11 @@ def cancel_approval_for_execution(
             workspace=approval.workspace,
             metadata={"approval_request_id": str(approval.id), "reason": reason},
         )
+        _schedule_approval_decision_observation(approval, outcome="cancelled")
 
 
 def _terminate_execution(approval: ApprovalRequest, *, error_code: str, error_message: str) -> None:
-    ToolExecution.objects.filter(
+    updated = ToolExecution.objects.filter(
         pk=approval.tool_execution_id, status=ToolExecutionStatus.WAITING_FOR_APPROVAL
     ).update(
         status=ToolExecutionStatus.APPROVAL_TERMINATED,
@@ -380,6 +439,43 @@ def _terminate_execution(approval: ApprovalRequest, *, error_code: str, error_me
         completed_at=timezone.now(),
         updated_at=timezone.now(),
     )
+    if updated:
+        # Phase 11 Block 3 (section 19-20): the ``approval_terminated``
+        # ToolExecution outcome — a plain queryset ``.update()``, not one of
+        # ``tools/execution.py``'s own locked-transition functions, so it
+        # is recorded here instead. ``updated`` (the row-count the ``UPDATE``
+        # actually touched) is this call's own single-fire guard, mirroring
+        # the ``select_for_update`` + status-check guard every other
+        # terminal transition uses.
+        transaction.on_commit(
+            lambda: _schedule_tool_execution_metric(approval.tool_execution_id, error_code)
+        )
+
+
+def _schedule_tool_execution_metric(tool_execution_id, error_code: str) -> None:
+    from observability.metrics import observe_tool_execution
+
+    try:
+        execution = ToolExecution.objects.select_related("tool_definition").get(
+            pk=tool_execution_id
+        )
+        duration_seconds = (
+            (execution.completed_at - execution.started_at).total_seconds()
+            if execution.started_at is not None and execution.completed_at is not None
+            else None
+        )
+        observe_tool_execution(
+            tool_name=execution.tool_definition.key,
+            outcome="approval_terminated",
+            duration_seconds=duration_seconds,
+        )
+    except Exception:  # noqa: BLE001 - telemetry must fail open
+        import logging
+
+        logging.getLogger("supportpilot").warning(
+            "tool_execution_metrics_recording_failed",
+            extra={"event": "metrics_error", "tool_execution_id": str(tool_execution_id)},
+        )
 
 
 def _emit_expired_event(locked: ApprovalRequest) -> None:
