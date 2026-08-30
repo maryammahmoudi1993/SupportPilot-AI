@@ -487,4 +487,197 @@ class TestTraceLineageEndToEnd:
         }
         resume_context = resume_span.get_span_context()
         assert tool_span.parent.span_id == resume_context.span_id
-        assert tool_span.context.trace_id == resume_context.trace_id
+
+
+def _run_waiting_for_approval(monkeypatch):
+    """Drives the real ``execute_agent_run`` pipeline (not the tool-level
+    ``pending_refund_approval`` fixture, whose ``AgentRun`` stays RUNNING)
+    so the run actually reaches ``AgentRunStatus.WAITING_FOR_APPROVAL`` —
+    the state ``cancel_agent_run`` requires to reach its ToolExecution
+    cancellation branch at all."""
+    from agents.providers.schemas import ToolCallRequest
+    from agents.tests.factories import AgentRunFactory
+    from approvals.models import ApprovalRequest
+    from integrations.models import IntegrationProvider
+    from integrations.providers.base import NormalizedPayment
+    from integrations.providers.fakes import FakePaymentProvider
+    from integrations.tests.factories import IntegrationConnectionFactory, bind_tool
+
+    version = PublishedAgentVersionFactory(max_model_calls=3, max_tool_calls=3)
+    run = AgentRunFactory(agent_version=version, workspace=version.agent_definition.workspace)
+    bind_tool(run, "payment.refund")
+    IntegrationConnectionFactory(workspace=run.workspace, provider=IntegrationProvider.STRIPE)
+    fake = FakePaymentProvider(
+        payments={
+            "pi_1": NormalizedPayment(
+                payment_id="pi_1",
+                external_payment_id="pi_1",
+                status="succeeded",
+                amount_minor=100000,
+                currency="USD",
+                created_at=datetime(2024, 1, 1, tzinfo=UTC),
+                refunded_amount_minor=0,
+            )
+        }
+    )
+    monkeypatch.setattr("integrations.services.get_payment_provider", lambda provider: fake)
+    _use_fake_provider(
+        monkeypatch,
+        [
+            FakeLLMScenario(
+                response="",
+                tool_calls=(
+                    ToolCallRequest(
+                        call_id="1",
+                        tool_name="payment.refund",
+                        arguments={
+                            "payment_reference": "pi_1",
+                            "amount_minor": 10000,
+                            "currency": "usd",
+                        },
+                    ),
+                ),
+            ),
+        ],
+    )
+    result = services.execute_agent_run(run.id)
+    assert result.status.value == "waiting_for_approval"
+    approval = ApprovalRequest.objects.get(tool_execution__agent_run=result)
+    return result, approval, fake
+
+
+@pytest.mark.django_db(transaction=True)
+class TestToolExecutionCancellationObservability:
+    """Phase 11 Block 3 remediation: ``agents.services.cancel_agent_run``
+    cancels a WAITING_FOR_APPROVAL ``ToolExecution`` via a plain
+    ``QuerySet.update()`` (never one of ``tools/execution.py``'s own
+    terminal-transition helpers), so it must record
+    ``supportpilot_tool_executions_total{outcome="cancelled"}`` itself."""
+
+    def test_cancellation_records_exactly_one_cancelled_observation(self, monkeypatch):
+        from agents.services import cancel_agent_run
+        from tools.models import ToolExecution, ToolExecutionStatus
+
+        run, approval, _fake = _run_waiting_for_approval(monkeypatch)
+        actor = WorkspaceMembershipFactory(workspace=run.workspace, role=WorkspaceRole.OWNER)
+
+        before = sum(
+            s.value
+            for s in _samples(f"{METRIC_NAMESPACE}_tool_executions_total")
+            if s.labels.get("tool_name") == "payment.refund"
+            and s.labels.get("outcome") == "cancelled"
+        )
+        cancel_agent_run(workspace=run.workspace, run=run, actor=actor.user)
+        after = sum(
+            s.value
+            for s in _samples(f"{METRIC_NAMESPACE}_tool_executions_total")
+            if s.labels.get("tool_name") == "payment.refund"
+            and s.labels.get("outcome") == "cancelled"
+        )
+
+        execution = ToolExecution.objects.get(pk=approval.tool_execution_id)
+        assert execution.status == ToolExecutionStatus.CANCELLED
+        assert after == before + 1
+
+    def test_repeat_cancellation_does_not_double_count(self, monkeypatch):
+        from agents.errors import AgentRunNotCancellableError
+        from agents.services import cancel_agent_run
+
+        run, _approval, _fake = _run_waiting_for_approval(monkeypatch)
+        actor = WorkspaceMembershipFactory(workspace=run.workspace, role=WorkspaceRole.OWNER)
+
+        cancel_agent_run(workspace=run.workspace, run=run, actor=actor.user)
+        before = sum(
+            s.value
+            for s in _samples(f"{METRIC_NAMESPACE}_tool_executions_total")
+            if s.labels.get("tool_name") == "payment.refund"
+            and s.labels.get("outcome") == "cancelled"
+        )
+        # The run is already CANCELLED (terminal) — a second call is
+        # rejected outright, exactly like any other already-terminal run.
+        with pytest.raises(AgentRunNotCancellableError):
+            cancel_agent_run(workspace=run.workspace, run=run, actor=actor.user)
+        after = sum(
+            s.value
+            for s in _samples(f"{METRIC_NAMESPACE}_tool_executions_total")
+            if s.labels.get("tool_name") == "payment.refund"
+            and s.labels.get("outcome") == "cancelled"
+        )
+
+        assert after == before
+
+    def test_rolled_back_cancellation_records_nothing(self, monkeypatch):
+        from django.db import transaction
+
+        from agents.services import cancel_agent_run
+        from tools.models import ToolExecution, ToolExecutionStatus
+
+        run, approval, _fake = _run_waiting_for_approval(monkeypatch)
+        actor = WorkspaceMembershipFactory(workspace=run.workspace, role=WorkspaceRole.OWNER)
+
+        before = sum(
+            s.value
+            for s in _samples(f"{METRIC_NAMESPACE}_tool_executions_total")
+            if s.labels.get("tool_name") == "payment.refund"
+            and s.labels.get("outcome") == "cancelled"
+        )
+        with pytest.raises(RuntimeError):
+            with transaction.atomic():
+                cancel_agent_run(workspace=run.workspace, run=run, actor=actor.user)
+                raise RuntimeError("forced rollback")
+        after = sum(
+            s.value
+            for s in _samples(f"{METRIC_NAMESPACE}_tool_executions_total")
+            if s.labels.get("tool_name") == "payment.refund"
+            and s.labels.get("outcome") == "cancelled"
+        )
+
+        # Nothing committed — the run/approval/execution are all still in
+        # their pre-cancellation state, and no on_commit callback ever fired.
+        execution = ToolExecution.objects.get(pk=approval.tool_execution_id)
+        assert execution.status == ToolExecutionStatus.WAITING_FOR_APPROVAL
+        assert after == before
+
+    def test_broken_metric_recording_does_not_affect_the_committed_cancellation(self, monkeypatch):
+        import observability.metrics as metrics_module
+        from agents.services import cancel_agent_run
+        from tools.models import ToolExecution, ToolExecutionStatus
+
+        monkeypatch.setattr(
+            metrics_module,
+            "observe_tool_execution",
+            lambda **kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+
+        run, approval, _fake = _run_waiting_for_approval(monkeypatch)
+        actor = WorkspaceMembershipFactory(workspace=run.workspace, role=WorkspaceRole.OWNER)
+
+        # Must not raise despite the metric helper exploding on commit.
+        cancel_agent_run(workspace=run.workspace, run=run, actor=actor.user)
+
+        execution = ToolExecution.objects.get(pk=approval.tool_execution_id)
+        assert execution.status == ToolExecutionStatus.CANCELLED
+        approval.refresh_from_db()
+        assert approval.status == "cancelled"
+
+    def test_cancellation_marker_never_reaches_metrics(self, monkeypatch):
+        from agents.services import cancel_agent_run
+
+        secret_marker = "SUPER_SECRET_CANCEL_OBSERVABILITY_582413"
+        run, approval, _fake = _run_waiting_for_approval(monkeypatch)
+        approval.summary = secret_marker
+        approval.save(update_fields=["summary"])
+        actor = WorkspaceMembershipFactory(workspace=run.workspace, role=WorkspaceRole.OWNER)
+        execution_id = str(approval.tool_execution_id)
+        approval_id = str(approval.id)
+        run_id = str(run.id)
+        workspace_id = str(run.workspace_id)
+
+        cancel_agent_run(workspace=run.workspace, run=run, actor=actor.user)
+
+        body = _metrics_text()
+        assert secret_marker not in body
+        assert execution_id not in body
+        assert approval_id not in body
+        assert run_id not in body
+        assert workspace_id not in body

@@ -319,9 +319,14 @@ def cancel_agent_run(
             from approvals.services import cancel_approval_for_execution
             from tools.models import ToolExecution, ToolExecutionStatus
 
+            # ``select_related("tool_definition")`` so the metric label
+            # captured below reuses the row already loaded for the cancel
+            # call, rather than issuing a second query per execution.
+            cancelled_at = timezone.now()
+            cancelled_tool_observations: list[tuple[str, float | None]] = []
             for execution in locked.tool_executions.filter(
                 status=ToolExecutionStatus.WAITING_FOR_APPROVAL
-            ):
+            ).select_related("tool_definition"):
                 cancel_approval_for_execution(execution=execution, reason="run_cancelled")
                 # Section 21, 130: a conditional UPDATE, not a blind
                 # overwrite — a racing approve-resume may have already
@@ -329,13 +334,33 @@ def cancel_agent_run(
                 # possibly all the way to SUCCEEDED) between the queryset
                 # above and here. This never clobbers that outcome back to
                 # CANCELLED; it only cancels a row still genuinely waiting.
-                ToolExecution.objects.filter(
+                updated = ToolExecution.objects.filter(
                     pk=execution.pk, status=ToolExecutionStatus.WAITING_FOR_APPROVAL
                 ).update(
                     status=ToolExecutionStatus.CANCELLED,
-                    completed_at=timezone.now(),
-                    updated_at=timezone.now(),
+                    completed_at=cancelled_at,
+                    updated_at=cancelled_at,
                 )
+                if updated:
+                    # Phase 11 Block 3 remediation: the ``cancelled``
+                    # ToolExecution outcome — a plain queryset ``.update()``,
+                    # not one of ``tools/execution.py``'s own locked
+                    # terminal-transition functions, so it is recorded here
+                    # instead. ``updated`` (the row-count the ``UPDATE``
+                    # actually touched) is this row's own single-fire guard,
+                    # mirroring ``approvals.services._terminate_execution`` —
+                    # a racing approve-resume that already claimed the row
+                    # observes nothing here.
+                    duration_seconds = (
+                        (cancelled_at - execution.started_at).total_seconds()
+                        if execution.started_at is not None
+                        else None
+                    )
+                    cancelled_tool_observations.append(
+                        (execution.tool_definition.key, duration_seconds)
+                    )
+            if cancelled_tool_observations:
+                _schedule_cancelled_tool_execution_observations(cancelled_tool_observations)
         # Section 113: a still-active human handoff for a now-cancelled run
         # becomes non-actionable too — imported locally to avoid a
         # module-level agents<->tickets import cycle, matching the approvals
@@ -899,6 +924,39 @@ def _schedule_agent_run_terminal_observation(
                 "agent_run_metrics_recording_failed",
                 extra={"event": "metrics_error", "agent_run_id": run_id},
             )
+
+    transaction.on_commit(_record)
+
+
+def _schedule_cancelled_tool_execution_observations(
+    observations: list[tuple[str, float | None]],
+) -> None:
+    """Phase 11 Block 3 remediation: mirrors
+    ``_schedule_agent_run_terminal_observation`` for the ``ToolExecution``
+    rows ``cancel_agent_run`` cancels directly via ``QuerySet.update()``
+    (never routed through ``tools/execution.py``'s own terminal-transition
+    helpers, so nothing else records this outcome). Deferred to
+    ``transaction.on_commit`` so a rolled-back cancellation never leaves a
+    phantom count behind, and the ``observe_tool_execution`` import stays
+    local so tests can monkeypatch ``observability.metrics.
+    observe_tool_execution`` and have it take effect here too. One failed
+    observation must not skip the rest, and no observation may ever raise
+    into the caller — telemetry fails open, never the committed
+    cancellation."""
+
+    def _record() -> None:
+        from observability.metrics import observe_tool_execution
+
+        for tool_name, duration_seconds in observations:
+            try:
+                observe_tool_execution(
+                    tool_name=tool_name, outcome="cancelled", duration_seconds=duration_seconds
+                )
+            except Exception:  # noqa: BLE001 - telemetry must fail open
+                logger.warning(
+                    "tool_execution_metrics_recording_failed",
+                    extra={"event": "metrics_error", "tool_name": tool_name},
+                )
 
     transaction.on_commit(_record)
 
