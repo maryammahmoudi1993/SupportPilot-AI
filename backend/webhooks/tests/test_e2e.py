@@ -141,7 +141,7 @@ def test_webhook_500_then_recovery_sweep_then_204_end_to_end(monkeypatch, settin
 
     monkeypatch.setattr("webhooks.services.send_pinned_request", fake_transport)
 
-    def _synchronous_dispatch(delivery_id):
+    def _synchronous_dispatch(delivery_id, **kwargs):
         process_delivery_task.apply(args=[delivery_id]).get()
 
     monkeypatch.setattr(
@@ -212,7 +212,7 @@ def test_fanout_delivers_independently_across_two_endpoints(monkeypatch, setting
 
     monkeypatch.setattr("webhooks.services.send_pinned_request", fake_transport)
 
-    def _synchronous_dispatch(delivery_id):
+    def _synchronous_dispatch(delivery_id, **kwargs):
         process_delivery_task.apply(args=[delivery_id]).get()
 
     monkeypatch.setattr(

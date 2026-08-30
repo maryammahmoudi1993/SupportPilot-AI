@@ -162,7 +162,7 @@ def test_disabled_endpoint_stays_unsent_through_the_recovery_sweeper(monkeypatch
 
     monkeypatch.setattr("webhooks.services.send_pinned_request", _fail_if_called)
 
-    def _synchronous_dispatch(delivery_id):
+    def _synchronous_dispatch(delivery_id, **kwargs):
         process_delivery_task.apply(args=[delivery_id]).get()
 
     monkeypatch.setattr(

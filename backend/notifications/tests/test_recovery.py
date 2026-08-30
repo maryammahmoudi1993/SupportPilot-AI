@@ -67,7 +67,10 @@ def _run_in_threads(*targets):
 @pytest.mark.django_db
 def test_dispatch_due_deliveries_only_publishes_due_pending_and_retry_scheduled(monkeypatch):
     published: list = []
-    monkeypatch.setattr("notifications.recovery.dispatch_delivery_for_processing", published.append)
+    monkeypatch.setattr(
+        "notifications.recovery.dispatch_delivery_for_processing",
+        lambda delivery_id, **kwargs: published.append(delivery_id),
+    )
 
     now = timezone.now()
     due_pending = DeliveryFactory(
@@ -90,7 +93,10 @@ def test_dispatch_due_deliveries_only_publishes_due_pending_and_retry_scheduled(
 @pytest.mark.django_db
 def test_dispatch_due_deliveries_respects_batch_size(monkeypatch):
     published: list = []
-    monkeypatch.setattr("notifications.recovery.dispatch_delivery_for_processing", published.append)
+    monkeypatch.setattr(
+        "notifications.recovery.dispatch_delivery_for_processing",
+        lambda delivery_id, **kwargs: published.append(delivery_id),
+    )
     now = timezone.now()
     for _ in range(5):
         DeliveryFactory(status=DeliveryStatus.PENDING, next_attempt_at=now - timedelta(seconds=1))
@@ -106,7 +112,10 @@ def test_recover_expired_delivery_claims_only_publishes_expired_claims(monkeypat
     import uuid
 
     published: list = []
-    monkeypatch.setattr("notifications.recovery.dispatch_delivery_for_processing", published.append)
+    monkeypatch.setattr(
+        "notifications.recovery.dispatch_delivery_for_processing",
+        lambda delivery_id, **kwargs: published.append(delivery_id),
+    )
     now = timezone.now()
     expired = DeliveryFactory(
         status=DeliveryStatus.CLAIMED,
@@ -424,7 +433,10 @@ def test_stale_worker_after_recovery_cannot_overwrite_newer_completion_via_task_
 @pytest.mark.django_db
 def test_recovery_functions_depend_only_on_database_state(monkeypatch):
     published: list = []
-    monkeypatch.setattr("notifications.recovery.dispatch_delivery_for_processing", published.append)
+    monkeypatch.setattr(
+        "notifications.recovery.dispatch_delivery_for_processing",
+        lambda delivery_id, **kwargs: published.append(delivery_id),
+    )
     now = timezone.now()
     delivery = DeliveryFactory(
         status=DeliveryStatus.PENDING, next_attempt_at=now - timedelta(seconds=1)

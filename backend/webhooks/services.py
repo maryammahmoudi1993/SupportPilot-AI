@@ -27,14 +27,18 @@ from notifications.services import (
     create_delivery,
     dispatch_delivery_for_processing,
 )
+from observability.tracing import domain_span, finalize_domain_span
 
 from . import selectors
 from .classification import classify_http_status
 from .errors import (
     WebhookDeliveryNotRedrivableError,
+    WebhookDestinationBlockedError,
+    WebhookDnsResolutionError,
     WebhookEndpointDisabledError,
     WebhookError,
     WebhookInvalidEventTypeError,
+    WebhookInvalidURLError,
     WebhookSigningNotConfiguredError,
 )
 from .models import WebhookDelivery, WebhookEndpoint, WebhookEndpointStatus, WebhookEvent
@@ -334,7 +338,22 @@ def redrive_webhook_delivery(
             request_id=request_id,
         )
         transaction.on_commit(partial(dispatch_delivery_for_processing, locked.id))
+        # Phase 11 Block 4 (section 27, 29): only an *accepted* redrive
+        # (past the disabled-endpoint/not-redrivable guards above) ever
+        # reaches here, and only once this same transaction commits — never
+        # counted as a new logical delivery (see
+        # ``observe_delivery_created``'s own docstring).
+        transaction.on_commit(partial(_observe_webhook_redrive, locked.channel))
     return webhook_delivery
+
+
+def _observe_webhook_redrive(channel: str) -> None:
+    from observability.metrics import observe_delivery_redrive
+
+    try:
+        observe_delivery_redrive(channel=channel)
+    except Exception:  # noqa: BLE001 - telemetry must fail open
+        logger.warning("delivery_metrics_recording_failed", extra={"event": "metrics_error"})
 
 
 # ---------------------------------------------------------------------------
@@ -381,74 +400,109 @@ def handle_webhook_delivery_attempt(*, delivery: Delivery, claim_token: uuid.UUI
         return
 
     event = webhook_delivery.event
-    try:
-        secret = _current_secret(endpoint)
-        parsed = parse_webhook_url(endpoint.url)
-        # DNS resolved and validated fresh, every attempt (section 23) —
-        # never trusting a value cached from endpoint creation or a prior
-        # attempt.
-        ip = resolve_and_validate(parsed.hostname, parsed.port)
-        envelope = build_event_envelope(event)
-        signed = build_signed_request(
-            secret=secret,
-            envelope=envelope,
-            event_id=str(event.id),
-            delivery_id=str(delivery.id),
-        )
-        result = send_pinned_request(
-            scheme=parsed.scheme,
-            ip=ip,
-            port=parsed.port,
-            hostname=parsed.hostname,
-            path_and_query=parsed.path_and_query,
-            headers=signed.headers,
-            body=signed.raw_body,
-        )
-    except WebhookError as exc:
-        complete_delivery_failure(
-            delivery_id=delivery.id,
-            claim_token=claim_token,
-            safe_error_code=exc.code,
-            retryable=exc.retryable,
-        )
-        return
-    except (
-        Exception
-    ) as exc:  # noqa: BLE001 - untrusted transport boundary, see notification_delivery.py
-        # Same Block 2 remediation rule (section 32): never log str(exc),
-        # repr(exc), exc.args, or a traceback for an untrusted exception —
-        # only stable, safe metadata.
-        logger.error(
-            "webhook_delivery_unexpected_error",
-            extra={
-                "event": "webhook_delivery_unexpected_error",
-                "workspace_id": str(delivery.workspace_id),
-                "delivery_id": str(delivery.id),
-                "endpoint_id": str(endpoint.id),
-                "attempt_number": delivery.attempt_count,
-                "exception_type": type(exc).__name__,
-            },
-        )
-        complete_delivery_failure(
-            delivery_id=delivery.id,
-            claim_token=claim_token,
-            safe_error_code=UNEXPECTED_ERROR_CODE,
-            retryable=False,
-        )
-        return
+    # Phase 11 Block 4 (section 28-29, 32): one span per actual external
+    # attempt — bounded, safe attributes only (channel, attempt number, a
+    # server-owned outcome label); never the endpoint URL, payload, or
+    # signing secret. Never kept open across a retry (a later retry is a
+    # fresh Celery task execution, hence a fresh span, section 29).
+    with domain_span(
+        "delivery.attempt",
+        attributes={
+            "delivery.channel": str(DeliveryChannel.WEBHOOK),
+            "attempt.number": str(delivery.attempt_count),
+        },
+    ) as span:
+        try:
+            secret = _current_secret(endpoint)
+            parsed = parse_webhook_url(endpoint.url)
+            # DNS resolved and validated fresh, every attempt (section 23) —
+            # never trusting a value cached from endpoint creation or a
+            # prior attempt.
+            ip = resolve_and_validate(parsed.hostname, parsed.port)
+            envelope = build_event_envelope(event)
+            signed = build_signed_request(
+                secret=secret,
+                envelope=envelope,
+                event_id=str(event.id),
+                delivery_id=str(delivery.id),
+            )
+            result = send_pinned_request(
+                scheme=parsed.scheme,
+                ip=ip,
+                port=parsed.port,
+                hostname=parsed.hostname,
+                path_and_query=parsed.path_and_query,
+                headers=signed.headers,
+                body=signed.raw_body,
+            )
+        except WebhookError as exc:
+            if isinstance(
+                exc,
+                (WebhookInvalidURLError, WebhookDestinationBlockedError, WebhookDnsResolutionError),
+            ):
+                _observe_webhook_destination_rejection(exc.code)
+            finalize_domain_span(span, outcome="failed", is_error=True)
+            complete_delivery_failure(
+                delivery_id=delivery.id,
+                claim_token=claim_token,
+                safe_error_code=exc.code,
+                retryable=exc.retryable,
+            )
+            return
+        except (
+            Exception
+        ) as exc:  # noqa: BLE001 - untrusted transport boundary, see notification_delivery.py
+            # Same Block 2 remediation rule (section 32): never log str(exc),
+            # repr(exc), exc.args, or a traceback for an untrusted
+            # exception — only stable, safe metadata.
+            logger.error(
+                "webhook_delivery_unexpected_error",
+                extra={
+                    "event": "webhook_delivery_unexpected_error",
+                    "workspace_id": str(delivery.workspace_id),
+                    "delivery_id": str(delivery.id),
+                    "endpoint_id": str(endpoint.id),
+                    "attempt_number": delivery.attempt_count,
+                    "exception_type": type(exc).__name__,
+                },
+            )
+            finalize_domain_span(span, outcome="failed", is_error=True)
+            complete_delivery_failure(
+                delivery_id=delivery.id,
+                claim_token=claim_token,
+                safe_error_code=UNEXPECTED_ERROR_CODE,
+                retryable=False,
+            )
+            return
 
-    if 200 <= result.status_code <= 299:
-        complete_delivery_success(
+        if 200 <= result.status_code <= 299:
+            finalize_domain_span(span, outcome="succeeded")
+            complete_delivery_success(
+                delivery_id=delivery.id,
+                claim_token=claim_token,
+                response_status_code=result.status_code,
+            )
+            return
+        retryable, safe_error_code = classify_http_status(result.status_code)
+        finalize_domain_span(span, outcome="failed", is_error=True)
+        complete_delivery_failure(
             delivery_id=delivery.id,
             claim_token=claim_token,
+            safe_error_code=safe_error_code,
+            retryable=retryable,
             response_status_code=result.status_code,
         )
-        return
-    retryable, safe_error_code = classify_http_status(result.status_code)
-    complete_delivery_failure(
-        delivery_id=delivery.id,
-        claim_token=claim_token,
-        safe_error_code=safe_error_code,
-        retryable=retryable,
-        response_status_code=result.status_code,
-    )
+
+
+def _observe_webhook_destination_rejection(code: str) -> None:
+    from observability.metrics import observe_webhook_destination_rejection
+
+    reason_map = {
+        WebhookInvalidURLError.code: "invalid_url",
+        WebhookDestinationBlockedError.code: "destination_blocked",
+        WebhookDnsResolutionError.code: "dns_error",
+    }
+    try:
+        observe_webhook_destination_rejection(reason=reason_map.get(code, "destination_blocked"))
+    except Exception:  # noqa: BLE001 - telemetry must fail open
+        logger.warning("delivery_metrics_recording_failed", extra={"event": "metrics_error"})

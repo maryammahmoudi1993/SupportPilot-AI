@@ -42,7 +42,7 @@ def dispatch_due_deliveries(*, batch_size: int | None = None, now=None) -> int:
         selectors.due_claimable_deliveries(now=now).values_list("id", flat=True)[:batch_size]
     )
     for delivery_id in delivery_ids:
-        dispatch_delivery_for_processing(delivery_id)
+        dispatch_delivery_for_processing(delivery_id, source="sweeper")
     if delivery_ids:
         logger.info(
             "delivery_retry_due",
@@ -65,7 +65,7 @@ def recover_expired_delivery_claims(*, batch_size: int | None = None, now=None) 
         selectors.expired_claimed_deliveries(now=now).values_list("id", flat=True)[:batch_size]
     )
     for delivery_id in delivery_ids:
-        dispatch_delivery_for_processing(delivery_id)
+        dispatch_delivery_for_processing(delivery_id, source="sweeper")
     if delivery_ids:
         logger.info(
             "delivery_claim_recovered",

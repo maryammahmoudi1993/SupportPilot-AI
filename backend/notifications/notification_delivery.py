@@ -20,6 +20,7 @@ from django.conf import settings
 
 from integrations.errors import IntegrationError
 from integrations.services import send_notification
+from observability.tracing import domain_span, finalize_domain_span
 from workspaces.models import Workspace
 
 from .models import Delivery, DeliveryChannel, NotificationDelivery, NotificationMedium
@@ -98,68 +99,83 @@ def handle_notification_delivery_attempt(*, delivery: Delivery, claim_token: uui
         )
         return
 
-    try:
-        # The Phase 6 tool-execution deadline that originally bounded
-        # ``notification.send`` no longer applies here — this call runs
-        # from an independent, later worker attempt, so it gets its own
-        # full server-owned timeout budget (section 74-75 of the Phase 7
-        # conventions still apply: the provider-level timeout is bounded by
-        # the same settings, just not by a specific tool call's remaining
-        # time).
-        message = send_notification(
-            workspace=delivery.workspace,
-            remaining_seconds=float(settings.INTEGRATIONS_MAX_TIMEOUT_SECONDS),
-            recipient_email=notification_delivery.recipient_email,
-            subject=notification_delivery.subject,
-            body=notification_delivery.body,
-            idempotency_key=notification_delivery.idempotency_key,
-        )
-    except IntegrationError as exc:
-        # Reuses the existing Phase 7 normalized error taxonomy directly
-        # (section 13, 15) rather than inventing a second classifier:
-        # ``exc.code`` is always a safe, stable string and ``exc.retryable``
-        # already encodes exactly the timeout/rate-limit/unavailable ->
-        # retryable, auth/config/invalid-request -> terminal policy this
-        # block calls for. Only ``.code`` is ever persisted — never
-        # ``.safe_message`` or ``str(exc)`` — so a value that happened to be
-        # passed into an error's message can never reach a stored field.
-        complete_delivery_failure(
-            delivery_id=delivery.id,
-            claim_token=claim_token,
-            safe_error_code=exc.code,
-            retryable=exc.retryable,
-        )
-        return
-    except Exception as exc:  # noqa: BLE001 - the documented fail-closed boundary above
-        # Section 27, 34 (Block 2 remediation): this exception is untrusted
-        # — it may originate from a provider/library we do not control and
-        # could carry credential- or secret-like text in its message or
-        # args. Never ``logger.exception``/``exc_info=True`` here: with
-        # ``DEBUG`` on, the plain "verbose" formatter renders a full
-        # traceback (including ``str(exc)``) into the log line, and no
-        # formatter is trusted to redact it. Only stable, safe metadata is
-        # ever logged — never ``str(exc)``, ``repr(exc)``, ``exc.args``, or
-        # a traceback.
-        logger.error(
-            "notification_delivery_unexpected_error",
-            extra={
-                "event": "notification_delivery_unexpected_error",
-                "workspace_id": str(delivery.workspace_id),
-                "delivery_id": str(delivery.id),
-                "attempt_number": delivery.attempt_count,
-                "exception_type": type(exc).__name__,
-            },
-        )
-        complete_delivery_failure(
-            delivery_id=delivery.id,
-            claim_token=claim_token,
-            safe_error_code=UNEXPECTED_ERROR_CODE,
-            retryable=False,
-        )
-        return
+    # Phase 11 Block 4 (section 28-29): one span per actual external
+    # provider attempt — bounded, safe attributes only; never the
+    # recipient, subject, or body.
+    with domain_span(
+        "delivery.attempt",
+        attributes={
+            "delivery.channel": str(DeliveryChannel.NOTIFICATION),
+            "attempt.number": str(delivery.attempt_count),
+        },
+    ) as span:
+        try:
+            # The Phase 6 tool-execution deadline that originally bounded
+            # ``notification.send`` no longer applies here — this call runs
+            # from an independent, later worker attempt, so it gets its own
+            # full server-owned timeout budget (section 74-75 of the Phase 7
+            # conventions still apply: the provider-level timeout is bounded
+            # by the same settings, just not by a specific tool call's
+            # remaining time).
+            message = send_notification(
+                workspace=delivery.workspace,
+                remaining_seconds=float(settings.INTEGRATIONS_MAX_TIMEOUT_SECONDS),
+                recipient_email=notification_delivery.recipient_email,
+                subject=notification_delivery.subject,
+                body=notification_delivery.body,
+                idempotency_key=notification_delivery.idempotency_key,
+            )
+        except IntegrationError as exc:
+            # Reuses the existing Phase 7 normalized error taxonomy directly
+            # (section 13, 15) rather than inventing a second classifier:
+            # ``exc.code`` is always a safe, stable string and
+            # ``exc.retryable`` already encodes exactly the timeout/
+            # rate-limit/unavailable -> retryable, auth/config/invalid-
+            # request -> terminal policy this block calls for. Only
+            # ``.code`` is ever persisted — never ``.safe_message`` or
+            # ``str(exc)`` — so a value that happened to be passed into an
+            # error's message can never reach a stored field.
+            finalize_domain_span(span, outcome="failed", is_error=True)
+            complete_delivery_failure(
+                delivery_id=delivery.id,
+                claim_token=claim_token,
+                safe_error_code=exc.code,
+                retryable=exc.retryable,
+            )
+            return
+        except Exception as exc:  # noqa: BLE001 - the documented fail-closed boundary above
+            # Section 27, 34 (Block 2 remediation): this exception is
+            # untrusted — it may originate from a provider/library we do not
+            # control and could carry credential- or secret-like text in
+            # its message or args. Never ``logger.exception``/
+            # ``exc_info=True`` here: with ``DEBUG`` on, the plain
+            # "verbose" formatter renders a full traceback (including
+            # ``str(exc)``) into the log line, and no formatter is trusted
+            # to redact it. Only stable, safe metadata is ever logged —
+            # never ``str(exc)``, ``repr(exc)``, ``exc.args``, or a
+            # traceback.
+            logger.error(
+                "notification_delivery_unexpected_error",
+                extra={
+                    "event": "notification_delivery_unexpected_error",
+                    "workspace_id": str(delivery.workspace_id),
+                    "delivery_id": str(delivery.id),
+                    "attempt_number": delivery.attempt_count,
+                    "exception_type": type(exc).__name__,
+                },
+            )
+            finalize_domain_span(span, outcome="failed", is_error=True)
+            complete_delivery_failure(
+                delivery_id=delivery.id,
+                claim_token=claim_token,
+                safe_error_code=UNEXPECTED_ERROR_CODE,
+                retryable=False,
+            )
+            return
 
-    if message.message_id:
-        NotificationDelivery.objects.filter(pk=notification_delivery.pk).update(
-            provider_message_id=message.message_id
-        )
-    complete_delivery_success(delivery_id=delivery.id, claim_token=claim_token)
+        if message.message_id:
+            NotificationDelivery.objects.filter(pk=notification_delivery.pk).update(
+                provider_message_id=message.message_id
+            )
+        finalize_domain_span(span, outcome="succeeded")
+        complete_delivery_success(delivery_id=delivery.id, claim_token=claim_token)

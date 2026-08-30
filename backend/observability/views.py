@@ -14,11 +14,14 @@ another valid token exists").
 from __future__ import annotations
 
 import hmac
+import logging
 
 from django.conf import settings
 from django.http import HttpResponse
 
-from .metrics import METRICS_CONTENT_TYPE, render_metrics
+from .metrics import METRICS_CONTENT_TYPE, refresh_delivery_backlog_gauges, render_metrics
+
+logger = logging.getLogger("supportpilot")
 
 _DENIED_RESPONSE_KWARGS = {"content": b"Not Found", "status": 404, "content_type": "text/plain"}
 
@@ -43,4 +46,15 @@ def metrics_view(request):
         return HttpResponse(**_DENIED_RESPONSE_KWARGS)
     if not _token_is_valid(request):
         return HttpResponse(**_DENIED_RESPONSE_KWARGS)
+    # Phase 11 Block 4 (section 20-21): the one deliberate scrape point that
+    # recomputes the DB-derived delivery backlog gauges — never the Celery
+    # worker's own metrics listener (``config/celery_metrics.py``), which
+    # calls ``render_metrics()`` directly with no DB query of its own. Fails
+    # open internally (``refresh_delivery_backlog_gauges``'s own try/except)
+    # so a PostgreSQL error here degrades those specific gauges to their
+    # last-known value, never the whole scrape.
+    try:
+        refresh_delivery_backlog_gauges()
+    except Exception:  # noqa: BLE001 - telemetry must fail open
+        logger.warning("delivery_backlog_gauge_refresh_failed", extra={"event": "metrics_error"})
     return HttpResponse(render_metrics(), content_type=METRICS_CONTENT_TYPE)

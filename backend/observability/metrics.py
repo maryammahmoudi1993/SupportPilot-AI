@@ -32,16 +32,20 @@ worker-lifecycle cleanup hook.
 
 from __future__ import annotations
 
+import logging
 import os
 
 from prometheus_client import CONTENT_TYPE_LATEST as METRICS_CONTENT_TYPE
 from prometheus_client import (
     CollectorRegistry,
     Counter,
+    Gauge,
     Histogram,
     generate_latest,
     multiprocess,
 )
+
+logger = logging.getLogger("supportpilot")
 
 __all__ = [
     "METRIC_NAMESPACE",
@@ -73,6 +77,32 @@ __all__ = [
     "observe_approval_decision",
     "observe_handoff_created",
     "observe_handoff_terminal",
+    "DELIVERIES_CREATED_TOTAL",
+    "DELIVERY_ATTEMPTS_TOTAL",
+    "DELIVERY_ATTEMPT_DURATION_SECONDS",
+    "DELIVERY_ATTEMPT_FAILURES_TOTAL",
+    "DELIVERY_RETRIES_TOTAL",
+    "DELIVERY_TERMINAL_TOTAL",
+    "DELIVERY_END_TO_END_DURATION_SECONDS",
+    "DELIVERY_CLAIM_RECOVERIES_TOTAL",
+    "DELIVERY_BROKER_PUBLICATION_FAILURES_TOTAL",
+    "DELIVERY_REDRIVES_TOTAL",
+    "WEBHOOK_RESPONSES_TOTAL",
+    "WEBHOOK_DESTINATION_REJECTIONS_TOTAL",
+    "DELIVERY_DUE_COUNT",
+    "DELIVERY_EXPIRED_CLAIM_COUNT",
+    "DELIVERY_OLDEST_DUE_AGE_SECONDS",
+    "observe_delivery_created",
+    "observe_delivery_attempt_claimed",
+    "observe_delivery_attempt_outcome",
+    "observe_delivery_retry_scheduled",
+    "observe_delivery_terminal",
+    "observe_delivery_claim_recovery",
+    "observe_delivery_broker_publication_failure",
+    "observe_delivery_redrive",
+    "observe_webhook_response",
+    "observe_webhook_destination_rejection",
+    "refresh_delivery_backlog_gauges",
     "render_metrics",
 ]
 
@@ -513,6 +543,496 @@ def observe_handoff_terminal(*, duration_seconds: float | None) -> None:
     docstring)."""
     if duration_seconds is not None:
         HANDOFF_DURATION_SECONDS.observe(duration_seconds)
+
+
+# ---------------------------------------------------------------------------
+# Durable delivery / webhook reliability (Phase 11 Block 4)
+#
+# Every metric here represents an authoritative, already-committed
+# ``notifications.models.Delivery``/``DeliveryAttempt`` state transition —
+# never a Celery task execution and never a broker publish, which are
+# disposable transport, not ownership (see ``notifications/services.py``'s
+# own module docstring). ``channel`` (``notification``/``webhook``, 2 values,
+# ``DeliveryChannel``-owned) is the only per-delivery label most of these
+# carry; nothing here is ever labeled by a delivery/attempt/workspace/
+# endpoint/event id, a URL, a hostname, an IP, or raw exception/response
+# text (section 5 of the Block 4 brief — a hard gate, no exceptions).
+# ---------------------------------------------------------------------------
+
+_DELIVERY_CHANNELS = frozenset({"notification", "webhook"})
+
+
+def _delivery_channel_label(channel: str) -> str:
+    return channel if channel in _DELIVERY_CHANNELS else "notification"
+
+
+# --- Creation -------------------------------------------------------------
+
+DELIVERIES_CREATED_TOTAL = Counter(
+    f"{METRIC_NAMESPACE}_deliveries_created_total",
+    "Total Delivery rows successfully committed, by channel.",
+    ["channel"],
+)
+
+
+def observe_delivery_created(*, channel: str) -> None:
+    """The single call site for a newly-committed ``Delivery`` row
+    (``notifications/services.py``'s ``create_delivery``, scheduled via
+    ``transaction.on_commit`` so a rolled-back creation is never counted —
+    section 6). A reused logical delivery (``notification.send`` replay
+    finding an existing ``NotificationDelivery``, a webhook redrive) never
+    calls ``create_delivery`` at all, so this never double-counts those
+    cases by construction — see ``observe_delivery_redrive`` below."""
+    DELIVERIES_CREATED_TOTAL.labels(channel=_delivery_channel_label(channel)).inc()
+
+
+# --- Attempts ---------------------------------------------------------------
+
+#: Incremented once per genuine claim/reclaim ownership acquisition — the
+#: exact moment a real ``DeliveryAttempt`` row is created (section 7). A
+#: redelivered/duplicate Celery message that finds nothing claimable never
+#: reaches this call site at all.
+DELIVERY_ATTEMPTS_TOTAL = Counter(
+    f"{METRIC_NAMESPACE}_delivery_attempts_total",
+    "Total DeliveryAttempt rows that actually obtained ownership, by channel.",
+    ["channel"],
+)
+
+#: ``outcome`` (4 values, bounded): ``succeeded`` / ``retryable_failure`` /
+#: ``terminal_failure`` (both from ``complete_delivery_failure``, split by
+#: whether the delivery could still retry) / ``abandoned`` (an expired
+#: claim's orphaned in-flight attempt, observed by the reclaim path — see
+#: ``observe_delivery_claim_recovery``). Seconds-scale buckets (section 8,
+#: 55): this measures the external attempt itself — DNS/connection/response
+#: handling for webhooks, the provider call for notifications — never
+#: PENDING wait, retry backoff, or approval wait.
+DELIVERY_ATTEMPT_DURATION_SECONDS = Histogram(
+    f"{METRIC_NAMESPACE}_delivery_attempt_duration_seconds",
+    "DeliveryAttempt execution duration in seconds, by channel and outcome.",
+    ["channel", "outcome"],
+    buckets=(0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60),
+)
+
+_DELIVERY_ATTEMPT_OUTCOMES = frozenset(
+    {"succeeded", "retryable_failure", "terminal_failure", "abandoned"}
+)
+
+#: Bounded, server-owned failure taxonomy (section 9, 24) — never a raw
+#: ``safe_error_code`` string (that set is broader — includes per-business
+#: ``IntegrationError`` codes and per-HTTP-status ``webhook_http_4xx``-style
+#: codes — see ``_delivery_error_category`` below, which maps *into* this
+#: fixed set). Only incremented for a failed attempt (``retryable_failure``/
+#: ``terminal_failure``/``abandoned``) — never for ``succeeded``.
+DELIVERY_ATTEMPT_FAILURES_TOTAL = Counter(
+    f"{METRIC_NAMESPACE}_delivery_attempt_failures_total",
+    "Total failed DeliveryAttempt outcomes, by channel and safe error category.",
+    ["channel", "error_category"],
+)
+
+_DELIVERY_ERROR_CATEGORIES = frozenset(
+    {
+        "timeout",
+        "rate_limit",
+        "connection",
+        "dns",
+        "tls",
+        "blocked_destination",
+        "remote_4xx",
+        "remote_5xx",
+        "auth",
+        "configuration",
+        "invalid_request",
+        "redirect",
+        "internal",
+        "other",
+    }
+)
+
+#: Maps a delivery-domain ``safe_error_code`` (``notifications.errors``,
+#: ``webhooks.errors``/``classification.classify_http_status``,
+#: ``integrations.errors.IntegrationError.code`` — every code
+#: ``complete_delivery_failure`` ever receives) to the fixed category set
+#: above. Deliberately a lookup table, not string-prefix heuristics on
+#: caller-supplied text (section 9): every key is a real, stable code this
+#: codebase itself defines — an unrecognized code (a future error type this
+#: table has not been updated for) safely collapses to ``"other"``, never a
+#: new label value.
+_ERROR_CODE_TO_CATEGORY: dict[str, str] = {
+    # webhooks.errors
+    "webhook_invalid_url": "configuration",
+    "webhook_destination_blocked": "blocked_destination",
+    "webhook_dns_resolution_failed": "dns",
+    "webhook_endpoint_disabled": "configuration",
+    "webhook_signing_not_configured": "configuration",
+    "webhook_redirect_rejected": "redirect",
+    "webhook_timeout": "timeout",
+    "webhook_connection_failed": "connection",
+    "webhook_tls_error": "tls",
+    "webhook_invalid_event_type": "configuration",
+    "webhook_unexpected_transport_error": "internal",
+    "webhook_delivery_unexpected_error": "internal",
+    "webhook_delivery_missing": "internal",
+    "webhook_not_found": "internal",
+    # notifications
+    "notification_delivery_unexpected_error": "internal",
+    "notification_delivery_missing": "internal",
+    # integrations.errors.IntegrationError (Phase 7 taxonomy, reused as-is —
+    # section 28 forbids inventing a second classifier for these).
+    "integration_not_configured": "configuration",
+    "integration_disabled": "configuration",
+    "integration_authentication_failed": "auth",
+    "integration_permission_denied": "auth",
+    "integration_rate_limited": "rate_limit",
+    "integration_timeout": "timeout",
+    "integration_temporarily_unavailable": "other",
+    "integration_invalid_request": "invalid_request",
+    "integration_not_found": "invalid_request",
+    "integration_conflict": "invalid_request",
+    "integration_malformed_response": "internal",
+    "integration_configuration_error": "configuration",
+    "integration_provider_not_supported": "configuration",
+    "customer_not_found": "invalid_request",
+    "order_not_found": "invalid_request",
+    "shipment_not_found": "invalid_request",
+    "ticket_not_found": "invalid_request",
+    "payment_not_found": "invalid_request",
+    "refund_not_allowed_by_provider": "invalid_request",
+    "refund_already_exists": "invalid_request",
+    "calendar_slot_unavailable": "invalid_request",
+    "booking_already_exists": "invalid_request",
+    "integration_unknown_error": "other",
+}
+
+
+def _delivery_error_category(safe_error_code: str) -> str:
+    if safe_error_code.startswith("webhook_http_"):
+        # ``classify_http_status`` mints one code per status code
+        # (``webhook_http_404``, ``webhook_http_500``, ...) — deliberately
+        # never used as a label value directly (unbounded-in-principle);
+        # collapsed to the 4xx/5xx status class instead (section 9, 22-23).
+        digits = safe_error_code.removeprefix("webhook_http_")
+        if digits[:1] == "4":
+            return "remote_4xx"
+        if digits[:1] == "5":
+            return "remote_5xx"
+        return "other"
+    return _ERROR_CODE_TO_CATEGORY.get(safe_error_code, "other")
+
+
+def observe_delivery_attempt_claimed(*, channel: str) -> None:
+    """The single call site for genuine claim/reclaim ownership acquisition
+    (``notifications/services.py``'s ``_claim_row``, on commit — section 7).
+    Called for *both* a plain due claim and an expired-claim reclaim; the
+    reclaim path additionally calls ``observe_delivery_claim_recovery``."""
+    DELIVERY_ATTEMPTS_TOTAL.labels(channel=_delivery_channel_label(channel)).inc()
+
+
+def observe_delivery_attempt_outcome(
+    *, channel: str, outcome: str, duration_seconds: float | None, safe_error_code: str = ""
+) -> None:
+    """The single call site every completed ``DeliveryAttempt`` outcome
+    goes through (``complete_delivery_success``/``complete_delivery_failure``
+    on commit, and the reclaim path's own ``abandoned`` observation).
+    ``safe_error_code`` is only consulted for a failed outcome, and only
+    ever to look up a bounded category — never stored or labeled itself."""
+    channel_label = _delivery_channel_label(channel)
+    outcome_label = outcome if outcome in _DELIVERY_ATTEMPT_OUTCOMES else "terminal_failure"
+    if duration_seconds is not None:
+        DELIVERY_ATTEMPT_DURATION_SECONDS.labels(
+            channel=channel_label, outcome=outcome_label
+        ).observe(duration_seconds)
+    if outcome_label != "succeeded":
+        category = _delivery_error_category(safe_error_code)
+        category_label = category if category in _DELIVERY_ERROR_CATEGORIES else "other"
+        DELIVERY_ATTEMPT_FAILURES_TOTAL.labels(
+            channel=channel_label, error_category=category_label
+        ).inc()
+
+
+# --- Retries / terminal transitions -----------------------------------------
+
+DELIVERY_RETRIES_TOTAL = Counter(
+    f"{METRIC_NAMESPACE}_delivery_retries_total",
+    "Total committed Delivery transitions to RETRY_SCHEDULED, by channel.",
+    ["channel"],
+)
+
+
+def observe_delivery_retry_scheduled(*, channel: str) -> None:
+    """The single call site for a committed DB transition to
+    ``DeliveryStatus.RETRY_SCHEDULED`` (``complete_delivery_failure``, on
+    commit — section 10). Deliberately distinct from
+    ``observability.metrics.observe_celery_task``'s own ``outcome="retry"``
+    label: Phase 10 retry authority is PostgreSQL, never Celery — the two
+    counters measure different layers and must never be conflated."""
+    DELIVERY_RETRIES_TOTAL.labels(channel=_delivery_channel_label(channel)).inc()
+
+
+#: ``outcome`` (3 values): ``delivered`` / ``failed`` (retryable failure,
+#: attempt budget exhausted) / ``dead`` (explicit non-retryable terminal
+#: failure) — the actual ``DeliveryStatus`` terminal split (section 11),
+#: kept distinguishable rather than merged.
+DELIVERY_TERMINAL_TOTAL = Counter(
+    f"{METRIC_NAMESPACE}_delivery_terminal_total",
+    "Total committed Delivery terminal transitions, by channel and outcome.",
+    ["channel", "outcome"],
+)
+
+_DELIVERY_TERMINAL_OUTCOMES = frozenset({"delivered", "failed", "dead"})
+
+#: end-to-end (creation -> DELIVERED, including any retries/backoff) —
+#: minutes-scale buckets (section 12, 55), deliberately not the same bucket
+#: set as attempt duration: this can legitimately span a full retry
+#: schedule, not just one external call.
+DELIVERY_END_TO_END_DURATION_SECONDS = Histogram(
+    f"{METRIC_NAMESPACE}_delivery_end_to_end_duration_seconds",
+    "Delivery end-to-end duration in seconds (created_at to DELIVERED), by channel.",
+    ["channel"],
+    buckets=(0.5, 1, 2, 5, 10, 30, 60, 120, 300, 900, 3600),
+)
+
+
+def observe_delivery_terminal(
+    *, channel: str, outcome: str, end_to_end_duration_seconds: float | None = None
+) -> None:
+    """The single call site for a committed ``Delivery`` terminal
+    transition (``complete_delivery_success``'s ``delivered`` outcome,
+    ``complete_delivery_failure``'s ``failed``/``dead`` outcomes — both on
+    commit, and both already guarding their own single-fire DB transition
+    with ``select_for_update`` + an active-claim check, section 15 of the
+    Block 3 remediation's same guarantee applied here). Only ``delivered``
+    ever passes a duration (section 12) — FAILED/DEAD deliveries never
+    fabricate one."""
+    channel_label = _delivery_channel_label(channel)
+    outcome_label = outcome if outcome in _DELIVERY_TERMINAL_OUTCOMES else "failed"
+    DELIVERY_TERMINAL_TOTAL.labels(channel=channel_label, outcome=outcome_label).inc()
+    if outcome_label == "delivered" and end_to_end_duration_seconds is not None:
+        DELIVERY_END_TO_END_DURATION_SECONDS.labels(channel=channel_label).observe(
+            end_to_end_duration_seconds
+        )
+
+
+# --- Claim recovery / broker publication / redrive --------------------------
+
+DELIVERY_CLAIM_RECOVERIES_TOTAL = Counter(
+    f"{METRIC_NAMESPACE}_delivery_claim_recoveries_total",
+    "Total expired CLAIMED deliveries successfully reclaimed, by channel.",
+    ["channel"],
+)
+
+
+def observe_delivery_claim_recovery(*, channel: str) -> None:
+    """The single call site for a successful expired-claim reclaim
+    (``notifications/services.py``'s ``_claim_row``, the
+    ``reclaim_expired_delivery`` branch only — section 13). One observation
+    per reclaimed delivery, regardless of how many sweeps republished its
+    id (``notifications/recovery.py`` never calls this itself — only the
+    claim primitive that actually changed ownership does, section 15)."""
+    DELIVERY_CLAIM_RECOVERIES_TOTAL.labels(channel=_delivery_channel_label(channel)).inc()
+
+
+#: ``source`` (2 values): ``initial`` (``create_delivery``'s own
+#: post-commit dispatch, or a manual redrive's) / ``sweeper`` (the Block 4
+#: recovery sweepers republishing a due/expired-claim delivery id).
+DELIVERY_BROKER_PUBLICATION_FAILURES_TOTAL = Counter(
+    f"{METRIC_NAMESPACE}_delivery_broker_publication_failures_total",
+    "Total best-effort Celery publication failures, by channel and source.",
+    ["channel", "source"],
+)
+
+_DELIVERY_PUBLICATION_SOURCES = frozenset({"initial", "sweeper"})
+
+
+def observe_delivery_broker_publication_failure(*, channel: str, source: str) -> None:
+    """The single call site for a failed best-effort Celery publish
+    (``notifications/services.py``'s ``dispatch_delivery_for_processing``,
+    on the caught broker/transport exception — section 14). Never implies
+    an external attempt occurred and never consumes attempt budget — the
+    delivery stays exactly as durably persisted, recoverable by the next
+    sweep."""
+    source_label = source if source in _DELIVERY_PUBLICATION_SOURCES else "initial"
+    DELIVERY_BROKER_PUBLICATION_FAILURES_TOTAL.labels(
+        channel=_delivery_channel_label(channel), source=source_label
+    ).inc()
+
+
+DELIVERY_REDRIVES_TOTAL = Counter(
+    f"{METRIC_NAMESPACE}_delivery_redrives_total",
+    "Total accepted manual Delivery redrives, by channel.",
+    ["channel"],
+)
+
+
+def observe_delivery_redrive(*, channel: str) -> None:
+    """The single call site for an *accepted* manual redrive
+    (``webhooks/services.py``'s ``redrive_webhook_delivery``, on commit —
+    section 27, 29). A rejected redrive request (wrong status, disabled
+    endpoint) never reaches this — no exception path calls it. Never
+    implies a new logical ``Delivery`` was created (see
+    ``observe_delivery_created``'s own docstring) — the same row, same
+    attempt history, continues."""
+    DELIVERY_REDRIVES_TOTAL.labels(channel=_delivery_channel_label(channel)).inc()
+
+
+# --- Webhook-specific: receiver response class / destination rejection -----
+
+#: ``status_class`` (``2xx``/``3xx``/``4xx``/``5xx`` — never a raw status
+#: code, section 22-23). 3xx is recorded defensively even though Phase 10
+#: never persists it as a delivery outcome (a redirect response is rejected
+#: before classification, section 23 — see ``webhooks/transport.py``); kept
+#: here only so a future transport change can never silently create an
+#: unbounded label rather than being caught by this fixed set.
+WEBHOOK_RESPONSES_TOTAL = Counter(
+    f"{METRIC_NAMESPACE}_webhook_responses_total",
+    "Total webhook receiver HTTP responses observed, by status class.",
+    ["status_class"],
+)
+
+_WEBHOOK_STATUS_CLASSES = frozenset({"2xx", "3xx", "4xx", "5xx"})
+
+
+def observe_webhook_response(*, status_code: int) -> None:
+    """The single call site for an actually-received webhook receiver
+    response (``notifications/services.py``'s completion functions, only
+    when ``response_status_code`` is present — i.e. only ever for the
+    webhook channel, section 22). A transport failure that never received a
+    response (timeout/connection/DNS/TLS) never calls this — see
+    ``DELIVERY_ATTEMPT_FAILURES_TOTAL`` for those."""
+    status_class = f"{status_code // 100}xx"
+    label = status_class if status_class in _WEBHOOK_STATUS_CLASSES else "other"
+    if label == "other":
+        return
+    WEBHOOK_RESPONSES_TOTAL.labels(status_class=label).inc()
+
+
+#: Fixed, server-owned SSRF/destination-validation rejection taxonomy
+#: (section 25), drawn directly from ``webhooks.security``'s actual
+#: exception classes — never hostname/IP/URL.
+_WEBHOOK_DESTINATION_REJECTION_REASONS = frozenset(
+    {"invalid_url", "destination_blocked", "dns_error"}
+)
+
+WEBHOOK_DESTINATION_REJECTIONS_TOTAL = Counter(
+    f"{METRIC_NAMESPACE}_webhook_destination_rejections_total",
+    "Total webhook destinations rejected at send-time validation, by reason.",
+    ["reason"],
+)
+
+
+def observe_webhook_destination_rejection(*, reason: str) -> None:
+    """The single call site for a send-time destination-validation
+    rejection (``webhooks/services.py``'s ``handle_webhook_delivery_attempt``,
+    at the point ``parse_webhook_url``/``resolve_and_validate`` raise —
+    section 25). Deliberately observed at the *actual attempted send*, not
+    endpoint-creation time (``_best_effort_ssrf_check`` never calls this) —
+    DNS can legitimately change between creation and send."""
+    reason_label = (
+        reason if reason in _WEBHOOK_DESTINATION_REJECTION_REASONS else "destination_blocked"
+    )
+    WEBHOOK_DESTINATION_REJECTIONS_TOTAL.labels(reason=reason_label).inc()
+
+
+# --- Backlog / recovery-lag gauges (DB-derived — section 16-21) -------------
+#
+# ``multiprocess_mode="mostrecent"`` (not the ``Gauge`` default of summing
+# every process's last-written value): these gauges represent one current
+# global count, not a per-process contribution to a total, so summing across
+# however many Gunicorn workers have ever handled a ``/metrics/`` scrape
+# would silently multiply the real value. "Most recently written, across
+# whichever process wrote last" is the correct aggregation for a value that
+# is recomputed fresh, from the same source of truth, by whichever process
+# happens to serve a given scrape (see ``refresh_delivery_backlog_gauges``
+# below and its one call site, ``observability/views.py::metrics_view`` —
+# never a Celery worker's own metrics listener, section 20).
+
+DELIVERY_DUE_COUNT = Gauge(
+    f"{METRIC_NAMESPACE}_delivery_due_count",
+    "Current count of Deliveries eligible to be claimed now, by channel.",
+    ["channel"],
+    multiprocess_mode="mostrecent",
+)
+
+DELIVERY_EXPIRED_CLAIM_COUNT = Gauge(
+    f"{METRIC_NAMESPACE}_delivery_expired_claim_count",
+    "Current count of CLAIMED Deliveries whose lease has expired, by channel.",
+    ["channel"],
+    multiprocess_mode="mostrecent",
+)
+
+#: Seconds a delivery has been overdue: ``now - next_attempt_at`` for the
+#: oldest currently-eligible row (section 18 — never ``created_at``, which
+#: would misrepresent a delivery legitimately scheduled into the future by
+#: retry backoff). ``0`` when there is no due backlog at all (documented
+#: choice, section 18) rather than omitting the sample — an absent time
+#: series and a healthy "0 lag" series are easy to conflate in a dashboard/
+#: alert expression, so this always reports a value once any delivery of
+#: that channel has ever existed... in practice: once this gauge has ever
+#: been refreshed for that channel (see ``refresh_delivery_backlog_gauges``).
+DELIVERY_OLDEST_DUE_AGE_SECONDS = Gauge(
+    f"{METRIC_NAMESPACE}_delivery_oldest_due_age_seconds",
+    "Age in seconds of the oldest currently-due Delivery, by channel (0 if none).",
+    ["channel"],
+    multiprocess_mode="mostrecent",
+)
+
+
+def refresh_delivery_backlog_gauges(*, now=None) -> None:
+    """Recompute the three DB-derived backlog gauges above from PostgreSQL
+    and set them (section 16-19).
+
+    Deliberately **not** called from :func:`render_metrics` (which the
+    Celery worker's own metrics listener also calls, ``config/celery_metrics.py``
+    — section 20): every Celery child would otherwise issue these queries on
+    every scrape. This function has exactly one call site,
+    ``observability/views.py::metrics_view`` (the Django/Gunicorn scrape
+    path), so the query cost is bounded by however often *that* endpoint is
+    scraped, never multiplied by worker-process count.
+
+    Two bounded aggregate queries total (section 19) — one grouped
+    ``COUNT``/``MIN`` over the due-claimable selector, one grouped ``COUNT``
+    over the expired-claim selector — never one query per delivery, never a
+    full row fetch. Every known channel is always set explicitly (including
+    to 0), even when a channel currently has no matching rows: leaving a
+    channel unset here would let a stale prior value linger under
+    ``mostrecent`` aggregation forever once that channel's backlog clears.
+
+    Fails open (section 21, 41): a DB error here is logged and swallowed —
+    it never prevents the rest of a metrics scrape from rendering, and it
+    never touches business/delivery state (this function only reads).
+    """
+    from django.db.models import Count, Min
+    from django.utils import timezone as _timezone
+
+    from notifications.selectors import due_claimable_deliveries, expired_claimed_deliveries
+
+    now = now or _timezone.now()
+    try:
+        due_by_channel = {
+            row["channel"]: row
+            for row in due_claimable_deliveries(now=now)
+            .values("channel")
+            .annotate(count=Count("id"), oldest=Min("next_attempt_at"))
+        }
+        expired_by_channel = {
+            row["channel"]: row["count"]
+            for row in expired_claimed_deliveries(now=now)
+            .values("channel")
+            .annotate(count=Count("id"))
+        }
+        for channel in _DELIVERY_CHANNELS:
+            due_row = due_by_channel.get(channel)
+            due_count = due_row["count"] if due_row else 0
+            DELIVERY_DUE_COUNT.labels(channel=channel).set(due_count)
+            if due_row and due_row["oldest"] is not None:
+                oldest_age = max((now - due_row["oldest"]).total_seconds(), 0.0)
+            else:
+                oldest_age = 0.0
+            DELIVERY_OLDEST_DUE_AGE_SECONDS.labels(channel=channel).set(oldest_age)
+            DELIVERY_EXPIRED_CLAIM_COUNT.labels(channel=channel).set(
+                expired_by_channel.get(channel, 0)
+            )
+    except Exception:  # noqa: BLE001 - telemetry must fail open
+        logger.warning("delivery_backlog_gauge_refresh_failed", extra={"event": "metrics_error"})
 
 
 # ---------------------------------------------------------------------------

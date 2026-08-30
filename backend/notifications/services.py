@@ -69,6 +69,11 @@ def create_delivery(
         # by Block 4's sweeper — rather than being rolled back merely
         # because Redis/the broker was unavailable at this instant.
         transaction.on_commit(partial(dispatch_delivery_for_processing, delivery.id))
+        # Phase 11 Block 4 (section 6): only a committed row is ever
+        # counted — a reused logical delivery (an idempotent
+        # ``notification.send`` replay, a webhook redrive) never calls this
+        # function at all, so it can never double-count by construction.
+        transaction.on_commit(partial(_observe_delivery_created, channel))
     logger.info(
         "delivery_created",
         extra={
@@ -81,7 +86,7 @@ def create_delivery(
     return delivery
 
 
-def dispatch_delivery_for_processing(delivery_id: uuid.UUID | str) -> None:
+def dispatch_delivery_for_processing(delivery_id: uuid.UUID | str, source: str = "initial") -> None:
     """Best-effort Celery publication (section 9-10) — the single publication
     primitive shared by initial creation (``create_delivery``), the Block 4
     due-work/expired-claim recovery sweepers, and manual webhook redrive.
@@ -96,7 +101,13 @@ def dispatch_delivery_for_processing(delivery_id: uuid.UUID | str) -> None:
     provider failure, consume an attempt slot, or expose a raw Celery/Kombu
     exception — it only means nobody woke up a worker immediately; the
     delivery is already persisted and due, so the next sweep can still find
-    and claim it later."""
+    and claim it later.
+
+    ``source`` (Phase 11 Block 4, section 14) is telemetry-only —
+    ``"initial"`` (creation, redrive) or ``"sweeper"`` (the recovery
+    sweepers) — never consulted for any publication/business decision, only
+    to label a failure metric so the two are distinguishable operationally.
+    """
     from common.correlation import get_correlation_id
 
     from .tasks import process_delivery_task
@@ -112,6 +123,31 @@ def dispatch_delivery_for_processing(delivery_id: uuid.UUID | str) -> None:
             "delivery_dispatch_failed",
             extra={"event": "delivery_dispatch_failed", "delivery_id": str(delivery_id)},
         )
+        _observe_broker_publication_failure(delivery_id, source)
+
+
+def _observe_delivery_created(channel: str) -> None:
+    from observability.metrics import observe_delivery_created
+
+    try:
+        observe_delivery_created(channel=channel)
+    except Exception:  # noqa: BLE001 - telemetry must fail open
+        logger.warning("delivery_metrics_recording_failed", extra={"event": "metrics_error"})
+
+
+def _observe_broker_publication_failure(delivery_id: uuid.UUID | str, source: str) -> None:
+    """Never consumes an attempt slot or touches delivery state (section
+    14) — a read-only channel lookup purely to label the failure metric,
+    wrapped fail-open like every other observability call site here."""
+    from observability.metrics import observe_delivery_broker_publication_failure
+
+    try:
+        channel = Delivery.objects.filter(pk=delivery_id).values_list("channel", flat=True).first()
+        if channel is None:
+            return
+        observe_delivery_broker_publication_failure(channel=channel, source=source)
+    except Exception:  # noqa: BLE001 - telemetry must fail open
+        logger.warning("delivery_metrics_recording_failed", extra={"event": "metrics_error"})
 
 
 # ---------------------------------------------------------------------------
@@ -144,6 +180,8 @@ def _claim_row(
     lease_seconds = (
         lease_seconds if lease_seconds is not None else settings.DELIVERY_CLAIM_LEASE_SECONDS
     )
+    is_reclaim = False
+    abandoned_duration_seconds: float | None = None
     with transaction.atomic():
         # skip_locked=True is the concurrency primitive (section 8): a
         # worker that loses the race for this row never blocks on the
@@ -168,6 +206,13 @@ def _claim_row(
             # explicitly marked rather than left ambiguously "in_progress"
             # forever (section 15) — its eventual completion call is
             # independently rejected by StaleClaimError regardless.
+            is_reclaim = True
+            # Phase 11 Block 4 (section 13): captured before ``locked`` is
+            # overwritten below — ``claimed_at`` is exactly the abandoned
+            # attempt's own ``started_at`` (see the ``DeliveryAttempt.create``
+            # call this mirrors), so this needs no extra query.
+            if locked.claimed_at is not None:
+                abandoned_duration_seconds = max((now - locked.claimed_at).total_seconds(), 0.0)
             DeliveryAttempt.objects.filter(
                 delivery=locked, claim_token=locked.claim_token, status=AttemptStatus.IN_PROGRESS
             ).update(status=AttemptStatus.ABANDONED, completed_at=now, updated_at=now)
@@ -198,6 +243,19 @@ def _claim_row(
             status=AttemptStatus.IN_PROGRESS,
             started_at=now,
         )
+        # Phase 11 Block 4 (section 7, 13): scheduled once the claim/reclaim
+        # transition above is guaranteed to commit — a genuine ownership
+        # acquisition every time (never merely "a Celery task ran"), plus
+        # the reclaim-specific claim-recovery + abandoned-attempt
+        # observations when this is a reclaim.
+        transaction.on_commit(
+            partial(
+                _observe_delivery_claimed,
+                locked.channel,
+                is_reclaim,
+                abandoned_duration_seconds,
+            )
+        )
     logger.info(
         "delivery_claimed",
         extra={
@@ -209,6 +267,28 @@ def _claim_row(
         },
     )
     return locked, token
+
+
+def _observe_delivery_claimed(
+    channel: str, is_reclaim: bool, abandoned_duration_seconds: float | None
+) -> None:
+    from observability.metrics import (
+        observe_delivery_attempt_claimed,
+        observe_delivery_attempt_outcome,
+        observe_delivery_claim_recovery,
+    )
+
+    try:
+        observe_delivery_attempt_claimed(channel=channel)
+        if is_reclaim:
+            observe_delivery_claim_recovery(channel=channel)
+            observe_delivery_attempt_outcome(
+                channel=channel,
+                outcome="abandoned",
+                duration_seconds=abandoned_duration_seconds,
+            )
+    except Exception:  # noqa: BLE001 - telemetry must fail open
+        logger.warning("delivery_metrics_recording_failed", extra={"event": "metrics_error"})
 
 
 def claim_delivery(
@@ -308,7 +388,7 @@ def complete_delivery_success(
     with transaction.atomic():
         locked = _lock_delivery_or_raise(delivery_id)
         _assert_active_claim(locked, claim_token)
-        _complete_active_attempt(
+        attempt = _complete_active_attempt(
             delivery=locked,
             claim_token=claim_token,
             status=AttemptStatus.SUCCEEDED,
@@ -332,6 +412,21 @@ def complete_delivery_success(
                 "updated_at",
             ]
         )
+        # Phase 11 Block 4 (section 11-12, 22): a single committed
+        # terminal-transition observation carrying both the attempt outcome
+        # (with real latency) and the end-to-end duration — never
+        # fabricated for a not-yet-delivered row (unreachable here; this
+        # function only ever runs on the actual DELIVERED transition).
+        end_to_end_seconds = max((locked.delivered_at - locked.created_at).total_seconds(), 0.0)
+        transaction.on_commit(
+            partial(
+                _observe_delivery_delivered,
+                locked.channel,
+                attempt.latency_ms / 1000 if attempt.latency_ms is not None else None,
+                end_to_end_seconds,
+                response_status_code,
+            )
+        )
     logger.info(
         "delivery_succeeded",
         extra={
@@ -343,6 +438,64 @@ def complete_delivery_success(
         },
     )
     return locked
+
+
+def _observe_delivery_delivered(
+    channel: str,
+    attempt_duration_seconds: float | None,
+    end_to_end_seconds: float,
+    response_status_code: int | None,
+) -> None:
+    from observability.metrics import (
+        observe_delivery_attempt_outcome,
+        observe_delivery_terminal,
+        observe_webhook_response,
+    )
+
+    try:
+        observe_delivery_attempt_outcome(
+            channel=channel, outcome="succeeded", duration_seconds=attempt_duration_seconds
+        )
+        observe_delivery_terminal(
+            channel=channel, outcome="delivered", end_to_end_duration_seconds=end_to_end_seconds
+        )
+        if response_status_code is not None:
+            observe_webhook_response(status_code=response_status_code)
+    except Exception:  # noqa: BLE001 - telemetry must fail open
+        logger.warning("delivery_metrics_recording_failed", extra={"event": "metrics_error"})
+
+
+def _observe_delivery_failed(
+    channel: str,
+    attempt_duration_seconds: float | None,
+    safe_error_code: str,
+    can_retry: bool,
+    delivery_status: str,
+    response_status_code: int | None,
+) -> None:
+    from observability.metrics import (
+        observe_delivery_attempt_outcome,
+        observe_delivery_retry_scheduled,
+        observe_delivery_terminal,
+        observe_webhook_response,
+    )
+
+    try:
+        observe_delivery_attempt_outcome(
+            channel=channel,
+            outcome="retryable_failure" if can_retry else "terminal_failure",
+            duration_seconds=attempt_duration_seconds,
+            safe_error_code=safe_error_code,
+        )
+        if can_retry:
+            observe_delivery_retry_scheduled(channel=channel)
+        else:
+            outcome = "dead" if delivery_status == DeliveryStatus.DEAD else "failed"
+            observe_delivery_terminal(channel=channel, outcome=outcome)
+        if response_status_code is not None:
+            observe_webhook_response(status_code=response_status_code)
+    except Exception:  # noqa: BLE001 - telemetry must fail open
+        logger.warning("delivery_metrics_recording_failed", extra={"event": "metrics_error"})
 
 
 def complete_delivery_failure(
@@ -367,7 +520,7 @@ def complete_delivery_failure(
     with transaction.atomic():
         locked = _lock_delivery_or_raise(delivery_id)
         _assert_active_claim(locked, claim_token)
-        _complete_active_attempt(
+        attempt = _complete_active_attempt(
             delivery=locked,
             claim_token=claim_token,
             status=AttemptStatus.FAILED,
@@ -403,6 +556,21 @@ def complete_delivery_failure(
                 "failed_at",
                 "updated_at",
             ]
+        )
+        # Phase 11 Block 4 (section 9-11, 22): one committed observation —
+        # ``retryable_failure``/``retry_scheduled`` when attempt budget
+        # remains, else the actual terminal split (``failed``/``dead``,
+        # never merged — section 11) this same block just decided.
+        transaction.on_commit(
+            partial(
+                _observe_delivery_failed,
+                locked.channel,
+                attempt.latency_ms / 1000 if attempt.latency_ms is not None else None,
+                safe_error_code,
+                can_retry,
+                locked.status,
+                response_status_code,
+            )
         )
     logger.info(
         "delivery_failed",
