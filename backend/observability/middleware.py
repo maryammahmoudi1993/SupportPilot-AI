@@ -17,10 +17,17 @@ from .metrics import observe_http_request
 
 logger = logging.getLogger("supportpilot")
 
-#: Route names excluded from HTTP request metrics entirely (section 58): the
-#: metrics endpoint itself must not generate an ever-growing self-referential
-#: entry in its own scrape output every time it is scraped.
-_EXCLUDED_ROUTE_NAMES = frozenset({"metrics"})
+#: Route names excluded from HTTP request metrics entirely. ``metrics``
+#: (section 58): the metrics endpoint itself must not generate an
+#: ever-growing self-referential entry in its own scrape output every time
+#: it is scraped. ``health:health``/``health:readiness`` (Phase 11 Block 5,
+#: section 61): high-frequency liveness/readiness probe traffic is not
+#: eligible traffic for the API availability/latency SLOs
+#: (``docs/observability/slos.md``, sections 1-2, already document this
+#: exclusion) — left included, probe volume dominating the denominator
+#: would dilute a real 5xx spike's visible ratio, and probes' near-zero
+#: latency would skew p95 optimistic exactly when real traffic is slow.
+_EXCLUDED_ROUTE_NAMES = frozenset({"metrics", "health:health", "health:readiness"})
 
 #: Raw path (not route name — unresolved at span-start time, before
 #: ``get_response`` runs URL resolution) excluded from *tracing* entirely

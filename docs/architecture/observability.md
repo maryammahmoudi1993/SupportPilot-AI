@@ -70,7 +70,14 @@ completed request, after `common.middleware.StructuredLoggingMiddleware` in
 fail the actual HTTP response (see [Failure isolation](#failure-isolation)).
 The metrics endpoint itself (`route == "metrics"`) is excluded from these
 metrics so scraping it does not create an ever-growing self-referential
-entry in its own output.
+entry in its own output. `/health/`/`/ready/` (`route ==
+"health:health"`/`"health:readiness"`) are excluded too (Phase 11 Block 5):
+high-frequency, always-200, near-zero-latency probe traffic is not eligible
+traffic for the API availability/latency SLOs
+(`docs/observability/slos.md`) — left included, probe volume would dilute a
+real 5xx spike's visible ratio and skew p95 latency optimistic. They remain
+traced (see [Tracing](#tracing) below) — only the request-count/duration
+*metrics* exclude them.
 
 Later blocks add agent/tool/policy/approval/handoff/delivery/webhook
 metrics; this table will grow with them.

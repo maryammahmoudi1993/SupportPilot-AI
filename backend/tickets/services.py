@@ -527,7 +527,14 @@ def resolve_handoff(
         from observability.metrics import observe_handoff_terminal
 
         try:
-            duration_seconds = (resolved_at - locked.created_at).total_seconds()
+            # Phase 11 Block 5 (section 34/49): clamped defensively, same as
+            # every other wall-clock-derived duration in this codebase
+            # (``notifications/services.py``) — ``resolved_at`` and
+            # ``created_at`` both come from ``timezone.now()``/``auto_now_add``
+            # on this same app server, so this should never actually go
+            # negative, but a Prometheus histogram must never receive a
+            # negative observation regardless of how unlikely the cause.
+            duration_seconds = max((resolved_at - locked.created_at).total_seconds(), 0.0)
             observe_handoff_terminal(duration_seconds=duration_seconds)
         except Exception:  # noqa: BLE001 - telemetry must fail open
             import logging
