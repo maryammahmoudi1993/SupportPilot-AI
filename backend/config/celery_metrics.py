@@ -113,7 +113,15 @@ def _setup_multiproc_dir() -> None:
     ``config/gunicorn_conf.py::on_starting`` exactly: stale mmap files left
     by a previous worker master must never be aggregated into a new one's
     scrape as if they were live processes."""
+    from observability.prometheus_paths import assert_safe_multiprocess_dir
+
     multiproc_dir = settings.OBSERVABILITY_CELERY_PROMETHEUS_MULTIPROC_DIR
+    # Phase 11 Block 5 (section 23-24): same guard as
+    # ``config/gunicorn_conf.py::on_starting`` — an unsafe path here raises,
+    # which the caller (``on_worker_init``) already wraps fail-open, so a
+    # misconfigured value degrades to "no exposition this worker", never a
+    # catastrophic ``rmtree``.
+    assert_safe_multiprocess_dir(multiproc_dir)
     shutil.rmtree(multiproc_dir, ignore_errors=True)
     os.makedirs(multiproc_dir, exist_ok=True)
     os.environ["PROMETHEUS_MULTIPROC_DIR"] = multiproc_dir

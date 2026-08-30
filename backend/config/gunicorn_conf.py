@@ -50,7 +50,15 @@ _DEFAULT_MULTIPROC_DIR = "/tmp/supportpilot-prometheus-multiproc"
 
 
 def on_starting(server):  # noqa: ARG001 - required Gunicorn hook signature
+    from observability.prometheus_paths import assert_safe_multiprocess_dir
+
     multiproc_dir = os.environ.get("PROMETHEUS_MULTIPROC_DIR", _DEFAULT_MULTIPROC_DIR)
+    # Phase 11 Block 5 (section 23-24): a misconfigured value here (empty,
+    # "/", a drive root, the checkout/home directory) must fail Gunicorn's
+    # own startup loudly rather than silently ``rmtree`` something
+    # catastrophic — this intentionally raises, uncaught, so the master
+    # process refuses to start.
+    assert_safe_multiprocess_dir(multiproc_dir)
     shutil.rmtree(multiproc_dir, ignore_errors=True)
     os.makedirs(multiproc_dir, exist_ok=True)
     os.environ["PROMETHEUS_MULTIPROC_DIR"] = multiproc_dir
