@@ -6,8 +6,76 @@ Accepted (Phase 11, Block 1 — metrics foundation; Block 2 — correlation-id
 propagation and task-level metrics across the Celery boundary, then
 extended within Block 2 by a remediation adding vendor-neutral distributed
 tracing; Block 3 — Celery metrics exposition, an OTLP exporter, and agent/
-LLM/tool/policy/approval/handoff domain instrumentation — see the
-Amendments below).
+LLM/tool/policy/approval/handoff domain instrumentation, plus a narrow
+remediation closing the one metering gap Block 3 left in `ToolExecution`
+cancellation; Block 4 — durable delivery/webhook reliability
+instrumentation, DB-derived backlog gauges, and SLO/alert/runbook
+documentation — see the Amendments below).
+
+## Amendment (Block 4): durable delivery / webhook reliability instrumentation
+
+Block 4 extended the same "single call site, bounded labels, commit-safe,
+fail-open" discipline to Phase 10's durable delivery layer — the one
+significant remaining piece of business-operational surface Block 3's
+domain instrumentation did not yet cover.
+
+**Ownership boundary, not transport.** The central design decision: every
+new metric represents a committed `Delivery`/`DeliveryAttempt` state
+transition, never a Celery task execution and never a best-effort broker
+publish — both are disposable transport in Phase 10's own design (a
+duplicate task, two racing recovery sweepers, or a broker outage must never
+be visible downstream as a duplicated external attempt). `supportpilot_delivery_attempts_total`
+increments only where `notifications/services.py::_claim_row` — the shared
+primitive behind both `claim_delivery` and `reclaim_expired_delivery` —
+actually wins the underlying `select_for_update(skip_locked=True)` race and
+commits a real `DeliveryAttempt` row; a losing duplicate task or a
+redundant sweep publish never reaches that call site at all.
+
+**Retry authority stays distinct.** `supportpilot_delivery_retries_total`
+(the DB-controlled `RETRY_SCHEDULED` transition) is deliberately never
+conflated with `supportpilot_celery_tasks_total{outcome="retry"}` — Phase
+10's retry authority is PostgreSQL, not Celery, and `process_delivery_task`
+never raises to trigger the latter regardless of the delivery's own
+outcome.
+
+**DB-derived backlog gauges, one deliberate collector.** The three
+recovery-lag gauges (`supportpilot_delivery_due_count`,
+`supportpilot_delivery_expired_claim_count`,
+`supportpilot_delivery_oldest_due_age_seconds`) are the first *DB-derived*
+metrics in this registry — every prior metric was purely in-process/
+event-driven. Recomputing them required a real architectural decision:
+`refresh_delivery_backlog_gauges` has exactly one call site
+(`observability/views.py::metrics_view`, the Django/Gunicorn scrape path),
+never `render_metrics()` itself, because that function is also called by
+`config/celery_metrics.py`'s worker-side exposition listener — putting the
+DB query there would have meant every Celery child re-running it on every
+scrape. The gauges also use `multiprocess_mode="mostrecent"` rather than
+`Gauge`'s summing default, since they represent one current global count
+recomputed fresh by whichever Gunicorn worker serves a given scrape, not a
+per-process partial contribution.
+
+**Receiver vs. platform failure, kept structurally separate.** A bounded
+14-value `error_category` taxonomy (`observability/metrics.py`'s
+`_delivery_error_category`) maps every `safe_error_code` this codebase
+produces — `notifications.errors`, `webhooks.errors`,
+`webhooks.classification.classify_http_status`'s per-status codes, and the
+reused Phase 7 `integrations.errors.IntegrationError.code` taxonomy — into
+one fixed set, so a receiver's own 4xx/5xx (`remote_4xx`/`remote_5xx`) is
+structurally distinguishable from a platform-side transport/configuration
+failure. `docs/observability/slos.md` carries this split through into two
+separate delivery-success SLIs rather than one merged ratio, specifically
+so a customer's degrading endpoint is never misread as a SupportPilot
+outage.
+
+**No new dependencies, no new tables.** Reuses `prometheus_client`'s
+existing `Counter`/`Histogram`/`Gauge` primitives and the existing
+`observe_*`-function-per-metric convention; no telemetry is ever persisted
+back into PostgreSQL.
+
+See `docs/architecture/observability.md`'s "Durable delivery / webhook
+reliability" section for the full metric-by-metric rationale, and
+`docs/observability/slos.md`/`docs/observability/runbook.md` for the
+resulting operational objectives and response guidance.
 
 ## Amendment (Block 3): telemetry egress closed, domain instrumentation added
 

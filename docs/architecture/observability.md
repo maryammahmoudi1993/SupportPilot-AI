@@ -490,13 +490,243 @@ transition that never happened).
 
 ### Known limitations (honestly scoped, not silently dropped)
 
-- A `ToolExecution` cancelled as a side effect of `cancel_agent_run`
-  cascading into a pending approval (the direct queryset `.update()` to
-  `CANCELLED` inside `agents/services.py::cancel_agent_run`) is not yet
-  metered — every other tool-execution terminal path is. A rare edge case
-  (cancelling a run that has an approval in flight), left for a follow-up
-  rather than rushed under time pressure.
 - No dedicated lightweight span exists for the policy-decision boundary
   itself (only the metric) — the brief marked a policy span "acceptable,"
   not required, and the agent/LLM/tool spans already give section 41's
   trace-lineage test a coherent parent chain to assert against.
+
+A `ToolExecution` cancelled as a side effect of `cancel_agent_run` cascading
+into a pending approval (the direct queryset `.update()` to `CANCELLED`
+inside `agents/services.py::cancel_agent_run`) was the one Block 3 gap noted
+above; it is closed — see `_schedule_cancelled_tool_execution_observations`
+in `agents/services.py`, which records `supportpilot_tool_executions_total{outcome="cancelled"}`
+via `transaction.on_commit`, guarded by the same conditional-`UPDATE`
+row-count single-fire check every other terminal transition here uses.
+
+## Durable delivery / webhook reliability (Block 4)
+
+Extends the same "single call site, bounded labels, commit-safe, fail-open"
+discipline to Phase 10's durable delivery layer
+(`notifications/services.py`'s `Delivery`/`DeliveryAttempt` state machine and
+`webhooks/services.py`'s webhook channel). Every metric here represents an
+authoritative, already-committed `Delivery`/`DeliveryAttempt` state
+transition — **never** a Celery task execution and **never** a broker
+publish, both of which are disposable transport, not ownership (see
+`notifications/services.py`'s own module docstring). This is the central
+distinction Block 4 exists to get right: a duplicated Celery message, a
+redundant sweeper publish, or a broker outage must never be visible as a
+duplicated external attempt.
+
+### Metric inventory
+
+| Metric | Type | Labels |
+| --- | --- | --- |
+| `supportpilot_deliveries_created_total` | Counter | `channel` |
+| `supportpilot_delivery_attempts_total` | Counter | `channel` |
+| `supportpilot_delivery_attempt_duration_seconds` | Histogram | `channel`, `outcome` |
+| `supportpilot_delivery_attempt_failures_total` | Counter | `channel`, `error_category` |
+| `supportpilot_delivery_retries_total` | Counter | `channel` |
+| `supportpilot_delivery_terminal_total` | Counter | `channel`, `outcome` |
+| `supportpilot_delivery_end_to_end_duration_seconds` | Histogram | `channel` |
+| `supportpilot_delivery_claim_recoveries_total` | Counter | `channel` |
+| `supportpilot_delivery_broker_publication_failures_total` | Counter | `channel`, `source` |
+| `supportpilot_delivery_redrives_total` | Counter | `channel` |
+| `supportpilot_webhook_responses_total` | Counter | `status_class` |
+| `supportpilot_webhook_destination_rejections_total` | Counter | `reason` |
+| `supportpilot_delivery_due_count` | Gauge (DB-derived) | `channel` |
+| `supportpilot_delivery_expired_claim_count` | Gauge (DB-derived) | `channel` |
+| `supportpilot_delivery_oldest_due_age_seconds` | Gauge (DB-derived) | `channel` |
+
+`channel` is `notification`/`webhook` (`DeliveryChannel`); every other label
+is one of the small, fixed, server-owned taxonomies documented next to its
+`observe_*`/gauge definition in `observability/metrics.py`. As everywhere
+else in this registry: no `delivery_id`, `delivery_attempt_id`,
+`workspace_id`, `webhook_endpoint_id`, `webhook_event_id`, `request_id`,
+`trace_id`, URL, hostname, IP, or raw exception/response text ever becomes a
+label.
+
+### Creation, attempts, and the ownership boundary
+
+`observe_delivery_created` fires from `create_delivery`'s own
+`transaction.on_commit` — a rolled-back creation, or a reused logical
+delivery (an idempotent `notification.send` replay finding an existing
+`NotificationDelivery`, or a webhook redrive reusing the same row) never
+reaches it, because those callers never call `create_delivery` at all.
+
+`observe_delivery_attempt_claimed` fires once per genuine ownership
+acquisition — the exact moment `notifications/services.py::_claim_row`
+(shared by `claim_delivery` and `reclaim_expired_delivery`) creates a real
+`DeliveryAttempt` row, on commit. A duplicated Celery message, or two
+sweepers publishing the same delivery id, never doubles this: only the row
+that actually wins the `select_for_update(skip_locked=True)` race reaches
+the `on_commit` hook at all — the loser raises `DeliveryNotClaimableError`
+before ever getting there.
+
+### Attempt outcome and duration
+
+`observe_delivery_attempt_outcome` is the one call site for a completed
+attempt's outcome — `succeeded` (from `complete_delivery_success`),
+`retryable_failure`/`terminal_failure` (from `complete_delivery_failure`,
+split by whether the delivery could still retry), or `abandoned` (the
+reclaim path's own observation for an expired claim's orphaned in-flight
+attempt — see below). Duration is the real attempt latency
+(`DeliveryAttempt.latency_ms`, or the abandoned attempt's own
+claimed-to-reclaimed span) — never PENDING wait, retry backoff, or approval
+wait.
+
+A failed outcome additionally increments
+`supportpilot_delivery_attempt_failures_total{channel, error_category}`.
+`error_category` is a fixed, server-owned 14-value taxonomy
+(`_delivery_error_category` in `observability/metrics.py`) that every
+`safe_error_code` this codebase produces maps into — `notifications.errors`,
+`webhooks.errors`, `webhooks.classification.classify_http_status`'s
+per-status codes (collapsed to `remote_4xx`/`remote_5xx`, never the raw
+status code as a label), and the reused Phase 7 `integrations.errors.IntegrationError.code`
+taxonomy. An unrecognized code — a future error type this table has not
+been updated for — collapses to `other`, never a new label value.
+
+### Retries and terminal transitions
+
+`observe_delivery_retry_scheduled` fires only on the committed DB
+transition to `RETRY_SCHEDULED` inside `complete_delivery_failure` —
+**deliberately distinct** from `supportpilot_celery_tasks_total{outcome="retry"}`.
+Phase 10 retry authority is PostgreSQL, never Celery (`process_delivery_task`
+never raises to trigger a Celery-level retry — it always returns normally,
+whatever the delivery outcome), so the two counters measure genuinely
+different layers and must never be read as the same thing.
+
+`observe_delivery_terminal` records the actual `DELIVERED`/`FAILED`/`DEAD`
+split — `FAILED` (retryable failure, attempt budget exhausted) and `DEAD`
+(explicit non-retryable failure) are kept distinguishable, never merged.
+Only `DELIVERED` ever carries an end-to-end duration
+(`supportpilot_delivery_end_to_end_duration_seconds`, `created_at` ->
+`delivered_at`, including any retries/backoff that occurred) — a FAILED/DEAD
+delivery never fabricates one.
+
+### Claim recovery, broker publication, redrive
+
+`observe_delivery_claim_recovery` fires once per successful expired-claim
+reclaim, from the same `_claim_row` branch that marks the abandoned worker's
+orphaned attempt `ABANDONED` — one observation per reclaimed delivery,
+regardless of how many recovery sweeps republished its id (the sweepers
+themselves, `notifications/recovery.py`, never call any delivery metric
+directly — only the claim primitive that actually changed ownership does).
+
+`observe_delivery_broker_publication_failure` fires from
+`dispatch_delivery_for_processing`'s caught broker exception, labeled by
+`source` (`initial` — `create_delivery`'s own post-commit dispatch, or a
+redrive's; `sweeper` — `notifications/recovery.py`'s two sweep functions,
+which pass `source="sweeper"` explicitly). A publication failure never
+consumes an attempt slot or touches delivery state — the delivery stays
+exactly as durably persisted, recoverable by the next sweep.
+
+`observe_delivery_redrive` fires only from `webhooks/services.py::redrive_webhook_delivery`'s
+own `transaction.on_commit`, past every rejection guard (wrong status,
+disabled endpoint) — a rejected redrive request never reaches it. It never
+implies a new logical `Delivery` was created; the same row, same attempt
+history, continues.
+
+### Webhook-specific: response class and destination rejection
+
+`observe_webhook_response` fires from the shared completion functions
+whenever `response_status_code` is present (webhook-only — notifications
+never set it), collapsed to `2xx`/`3xx`/`4xx`/`5xx`. 3xx is defined
+defensively; Phase 10 never actually reaches it as a persisted delivery
+outcome (`webhooks/transport.py::send_pinned_request` rejects a redirect
+response itself, before the completion functions ever see a status code for
+it) — the bounded set exists so a future transport change can never
+silently create an unbounded label rather than being caught by this
+classifier.
+
+`observe_webhook_destination_rejection` fires from
+`webhooks/services.py::handle_webhook_delivery_attempt`, at the exact point
+`parse_webhook_url`/`resolve_and_validate` raise during an **actual
+attempted send** — never at endpoint creation/update time
+(`_best_effort_ssrf_check` never calls it), since DNS can legitimately
+change between creation and send (the send-time re-validation this metric
+observes is the same one that defends against DNS rebinding). `reason` is
+one of `invalid_url`/`destination_blocked`/`dns_error` — drawn directly from
+`webhooks.security`'s actual exception classes, never a hostname, IP, or
+URL.
+
+### Tracing: `delivery.attempt`
+
+One `delivery.attempt` domain span per actual external attempt — wrapping
+`webhooks/services.py::handle_webhook_delivery_attempt`'s
+secret/DNS/sign/send sequence, and `notifications/notification_delivery.py::handle_notification_delivery_attempt`'s
+provider call. Attributes are bounded: `delivery.channel`,
+`attempt.number`, and the outcome `finalize_domain_span` sets at each exit
+path. Never the recipient, subject, notification body, webhook URL, webhook
+payload, or signing secret. A retried delivery gets a fresh span per
+attempt (a new Celery task execution each time) — never one span held open
+across retry backoff; the stable correlation across attempts is the
+`Delivery` id itself, present in structured logs, not span parentage.
+
+### Backlog / recovery-lag gauges — DB-derived, one deliberate collector
+
+`supportpilot_delivery_due_count`, `supportpilot_delivery_expired_claim_count`,
+and `supportpilot_delivery_oldest_due_age_seconds` are recomputed from
+PostgreSQL by `observability.metrics.refresh_delivery_backlog_gauges` — two
+bounded aggregate queries total (`COUNT`/`MIN` grouped by `channel` over
+`notifications.selectors.due_claimable_deliveries`/`expired_claimed_deliveries`,
+the same selectors the sweepers themselves use), never one query per
+delivery, never a full row fetch.
+
+**Collector architecture (deliberate, not incidental):** this function has
+exactly **one** call site — `observability/views.py::metrics_view`, the
+Django/Gunicorn `/metrics/` scrape path — and is never called from
+`render_metrics()` itself. `render_metrics()` is also what
+`config/celery_metrics.py`'s Celery-worker exposition listener calls; if the
+gauge refresh lived there, every Celery worker's own metrics scrape would
+independently re-run these DB queries. Keeping the refresh call in the one
+Django view instead bounds the query cost to however often that endpoint is
+scraped, never multiplied by worker-process count.
+
+Every known channel is set explicitly on every refresh, including to `0` —
+never left unset when a channel currently has no matching rows. This
+matters because these gauges use `multiprocess_mode="mostrecent"` (not
+`Gauge`'s default of summing every process's last-written value): they
+represent one current global count, recomputed fresh by whichever Gunicorn
+worker happens to serve a given scrape, so summing across however many
+workers have ever handled `/metrics/` would silently multiply the real
+value. "Most recently written, across whichever process wrote last" is the
+correct aggregation here; leaving a channel unset would let a stale prior
+value linger forever under that aggregation once its backlog actually
+clears.
+
+**Oldest due age** uses `next_attempt_at`, never `created_at` — a delivery
+legitimately scheduled into the future by retry backoff must never inflate
+this figure; only a delivery that is *actually* overdue right now
+contributes. `0` (not an omitted sample) is the documented value when there
+is no due backlog at all, and once this gauge has been refreshed at least
+once for a channel — an absent series and a healthy "0 lag" series are easy
+to conflate in a dashboard/alert expression.
+
+**Failure isolation**: `refresh_delivery_backlog_gauges` wraps its query in
+its own `try`/`except`, and `metrics_view` wraps the call to it in a second
+one — a PostgreSQL error degrades those three gauges to their last-known
+value; it never prevents the rest of a scrape from rendering, and it never
+touches business/delivery state (the function only reads).
+
+### Ambiguous external success remains at-least-once, never exactly-once
+
+Phase 10's own guarantee is unchanged by Block 4 and is not weakened by
+anything telemetry does: **durable at-least-once delivery**, never
+exactly-once. If a sender observes a timeout after the receiver actually
+processed the request, the metrics reflect the *observed* failure/retry —
+never an inferred receiver-side success. A later retry that succeeds
+produces a second, genuinely real `DeliveryAttempt` and a second
+`supportpilot_delivery_attempts_total` observation; nothing in this registry
+ever claims or implies exactly-once semantics, and the SLO document
+(`docs/observability/slos.md`) states this explicitly.
+
+### Receiver failures vs. platform failures
+
+A customer's webhook endpoint returning `4xx`/`5xx` is a **receiver**
+condition (`supportpilot_webhook_responses_total{status_class="4xx"/"5xx"}`,
+and `error_category="remote_4xx"/"remote_5xx"` on the attempt-failure
+counter) — not evidence of a SupportPilot platform outage. DNS/TLS/
+connection/timeout failures and SSRF rejections are the platform/transport
+side of the same boundary. `docs/observability/slos.md` keeps these two
+views separate rather than presenting every non-2xx webhook outcome as one
+undifferentiated failure rate.
