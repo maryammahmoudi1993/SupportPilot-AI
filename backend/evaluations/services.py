@@ -356,7 +356,7 @@ def execute_evaluation_case(result_id: uuid.UUID | str) -> EvaluationResult:
             )
 
         agent_run = _create_evaluation_agent_run(run=run, snapshot=snapshot)
-        agent_services.claim_agent_run(agent_run.id)
+        agent_run = agent_services.claim_agent_run(agent_run.id)
         try:
             agent_run = agent_services.execute_claimed_agent_run(agent_run, provider=fake_provider)
         except Exception:  # noqa: BLE001 - a harness/provider failure, not a case assertion failure
