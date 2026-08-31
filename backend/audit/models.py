@@ -105,6 +105,15 @@ class AuditAction(models.TextChoices):
         "webhook_delivery.manually_redriven",
         "Webhook delivery manually redriven",
     )
+    EVALUATION_DATASET_CREATED = "evaluation_dataset.created", "Evaluation dataset created"
+    EVALUATION_DATASET_UPDATED = "evaluation_dataset.updated", "Evaluation dataset updated"
+    EVALUATION_CASE_CREATED = "evaluation_case.created", "Evaluation case created"
+    EVALUATION_CASE_UPDATED = "evaluation_case.updated", "Evaluation case updated"
+    EVALUATION_RUN_CREATED = "evaluation_run.created", "Evaluation run created"
+    EVALUATION_RUN_CANCELLED = "evaluation_run.cancelled", "Evaluation run cancelled"
+    EVALUATION_RUN_COMPLETED = "evaluation_run.completed", "Evaluation run completed"
+    EVALUATION_RESULT_REPLAYED = "evaluation_result.replayed", "Evaluation result replayed"
+    EVALUATION_RUNS_COMPARED = "evaluation_runs.compared", "Evaluation runs compared"
 
 
 class AuditEvent(BaseModel):

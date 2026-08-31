@@ -184,6 +184,24 @@ class EvaluationCase(BaseModel):
             models.Index(fields=["dataset", "status"], name="eval_case_dataset_status_idx"),
         ]
 
+    def clean(self) -> None:
+        # Never store an unvalidated seeded_context/expectations shape
+        # (section 17-19) — a Pydantic ``ValidationError`` here is
+        # translated into the normal Django validation-error surface so it
+        # reaches callers the same way any other field validation does.
+        from pydantic import ValidationError as PydanticValidationError
+
+        from .schemas import validate_case_expectations, validate_seeded_context
+
+        try:
+            self.seeded_context = validate_seeded_context(self.seeded_context or {})
+        except PydanticValidationError as exc:
+            raise ValidationError({"seeded_context": str(exc)}) from exc
+        try:
+            self.expectations = validate_case_expectations(self.expectations or {})
+        except PydanticValidationError as exc:
+            raise ValidationError({"expectations": str(exc)}) from exc
+
     def __str__(self) -> str:
         return f"{self.dataset_id}:{self.key}"
 
@@ -291,15 +309,21 @@ class EvaluationCaseSnapshot(BaseModel):
 
 
 class EvaluationResult(BaseModel):
-    """One case execution's outcome. ``OneToOneField`` to the (per-run)
-    snapshot is the database invariant behind "one logical result per
-    run/case" (section 21, 46) — pre-created ``PENDING`` alongside the
-    snapshot so a worker only ever claims an existing row (never creates a
-    second one) regardless of task redelivery (section 23, 59)."""
+    """One case execution's outcome.
+
+    The *initial* (non-replay) result per snapshot is a database invariant
+    — enforced by ``eval_result_one_initial_per_snapshot`` below, a partial
+    unique constraint on ``case_snapshot`` where ``replay_of`` is null
+    (section 21, 46) — pre-created ``PENDING`` alongside the snapshot so a
+    worker only ever claims that existing row (never creates a second one)
+    regardless of task redelivery (section 23, 59). A *replay* (section 33)
+    always creates a new, additional result referencing the same snapshot
+    via ``replay_of``, which is why this is a plain ``ForeignKey`` rather
+    than a ``OneToOneField``."""
 
     run = models.ForeignKey(EvaluationRun, on_delete=models.CASCADE, related_name="results")
-    case_snapshot = models.OneToOneField(
-        EvaluationCaseSnapshot, on_delete=models.CASCADE, related_name="result"
+    case_snapshot = models.ForeignKey(
+        EvaluationCaseSnapshot, on_delete=models.CASCADE, related_name="results"
     )
     status = models.CharField(
         max_length=20,
@@ -344,9 +368,17 @@ class EvaluationResult(BaseModel):
 
     class Meta:
         ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["case_snapshot"],
+                condition=models.Q(replay_of__isnull=True),
+                name="eval_result_one_initial_per_snapshot",
+            ),
+        ]
         indexes = [
             models.Index(fields=["run", "status"], name="eval_result_run_status_idx"),
             models.Index(fields=["run", "passed"], name="eval_result_run_passed_idx"),
+            models.Index(fields=["case_snapshot"], name="eval_result_case_snap_idx"),
         ]
 
     def clean(self) -> None:
