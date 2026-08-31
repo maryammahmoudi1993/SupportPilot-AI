@@ -21,6 +21,7 @@ from django.utils import timezone
 from accounts.models import User
 from audit.models import AuditAction
 from audit.services import record_event
+from observability.tracing import domain_span, finalize_domain_span
 from workspaces.models import Workspace
 
 from .errors import (
@@ -253,9 +254,11 @@ def create_agent_run(
 
 
 def _dispatch_run(run_id: uuid.UUID) -> None:
+    from common.correlation import get_correlation_id
+
     from .tasks import execute_agent_run_task
 
-    execute_agent_run_task.delay(str(run_id))
+    execute_agent_run_task.delay(str(run_id), correlation_id=get_correlation_id())
 
 
 def claim_agent_run(run_id: uuid.UUID | str) -> AgentRun | None:
@@ -316,9 +319,14 @@ def cancel_agent_run(
             from approvals.services import cancel_approval_for_execution
             from tools.models import ToolExecution, ToolExecutionStatus
 
+            # ``select_related("tool_definition")`` so the metric label
+            # captured below reuses the row already loaded for the cancel
+            # call, rather than issuing a second query per execution.
+            cancelled_at = timezone.now()
+            cancelled_tool_observations: list[tuple[str, float | None]] = []
             for execution in locked.tool_executions.filter(
                 status=ToolExecutionStatus.WAITING_FOR_APPROVAL
-            ):
+            ).select_related("tool_definition"):
                 cancel_approval_for_execution(execution=execution, reason="run_cancelled")
                 # Section 21, 130: a conditional UPDATE, not a blind
                 # overwrite — a racing approve-resume may have already
@@ -326,13 +334,33 @@ def cancel_agent_run(
                 # possibly all the way to SUCCEEDED) between the queryset
                 # above and here. This never clobbers that outcome back to
                 # CANCELLED; it only cancels a row still genuinely waiting.
-                ToolExecution.objects.filter(
+                updated = ToolExecution.objects.filter(
                     pk=execution.pk, status=ToolExecutionStatus.WAITING_FOR_APPROVAL
                 ).update(
                     status=ToolExecutionStatus.CANCELLED,
-                    completed_at=timezone.now(),
-                    updated_at=timezone.now(),
+                    completed_at=cancelled_at,
+                    updated_at=cancelled_at,
                 )
+                if updated:
+                    # Phase 11 Block 3 remediation: the ``cancelled``
+                    # ToolExecution outcome — a plain queryset ``.update()``,
+                    # not one of ``tools/execution.py``'s own locked
+                    # terminal-transition functions, so it is recorded here
+                    # instead. ``updated`` (the row-count the ``UPDATE``
+                    # actually touched) is this row's own single-fire guard,
+                    # mirroring ``approvals.services._terminate_execution`` —
+                    # a racing approve-resume that already claimed the row
+                    # observes nothing here.
+                    duration_seconds = (
+                        (cancelled_at - execution.started_at).total_seconds()
+                        if execution.started_at is not None
+                        else None
+                    )
+                    cancelled_tool_observations.append(
+                        (execution.tool_definition.key, duration_seconds)
+                    )
+            if cancelled_tool_observations:
+                _schedule_cancelled_tool_execution_observations(cancelled_tool_observations)
         # Section 113: a still-active human handoff for a now-cancelled run
         # becomes non-actionable too — imported locally to avoid a
         # module-level agents<->tickets import cycle, matching the approvals
@@ -340,6 +368,9 @@ def cancel_agent_run(
         from tickets.services import cancel_handoffs_for_run
 
         cancel_handoffs_for_run(agent_run=locked, reason="run_cancelled")
+        _schedule_agent_run_terminal_observation(
+            locked, outcome="cancelled", terminal_at=locked.cancelled_at
+        )
     return locked
 
 
@@ -568,32 +599,53 @@ def execute_claimed_agent_run(
         request_handoff=_request_handoff_factory(run),
     )
 
-    try:
-        result = run_graph(ctx, input_message=run.input_message)
-    except Exception:  # pragma: no cover - defensive: never let an internal
-        # exception escape the worker; fail the run instead.
-        logger.exception("agent_run_unexpected_failure", extra={"agent_run_id": str(run.id)})
-        return _fail_run(
-            run, code="agent_internal_error", message="The agent run failed unexpectedly."
-        )
+    # Phase 11 Block 3 (section 15, 41-43): one domain span per orchestration
+    # attempt, a parent of the ``llm.generate``/``tool.execute`` child spans
+    # ``run_graph`` triggers via the ordinary current-span-context nesting —
+    # no explicit parent wiring needed. Always ends within this synchronous
+    # call, even when the outcome is WAITING_FOR_APPROVAL/HANDED_OFF (section
+    # 42-43: never held open across the human-wait gap). Safe attributes
+    # only: the run id (for trace/log correlation, never a Prometheus
+    # label — section 15) and the bounded outcome; never the input message,
+    # system prompt, or any model output.
+    with domain_span(
+        "agent.run", attributes={"supportpilot.agent_run_id": str(run.id)}
+    ) as agent_span:
+        try:
+            result = run_graph(ctx, input_message=run.input_message)
+        except Exception:  # pragma: no cover - defensive: never let an internal
+            # exception escape the worker; fail the run instead.
+            finalize_domain_span(agent_span, outcome="internal_error", is_error=True)
+            logger.exception("agent_run_unexpected_failure", extra={"agent_run_id": str(run.id)})
+            return _fail_run(
+                run, code="agent_internal_error", message="The agent run failed unexpectedly."
+            )
 
-    if result.get("cancelled"):
-        return AgentRun.objects.get(pk=run.pk)
-    if result.get("handoff_request"):
-        return _complete_run_as_handoff(run, result)
-    if result.get("budget_exceeded"):
-        return _budget_exceeded_run(run, reason=result.get("budget_exceeded_reason"), result=result)
-    error_code = result.get("safe_error_code")
-    if error_code == "approval_required":
-        # Section 57-58: pause, never fail. Nothing here holds a worker
-        # thread, Celery worker, or DB transaction open — the run simply
-        # sits in WAITING_FOR_APPROVAL until a human decision dispatches
-        # ``resume_approved_action_task`` (or the rejection/expiry path
-        # marks it FAILED directly).
-        return _pause_run_for_approval(run, result)
-    if error_code:
-        return _fail_or_handoff(run, error_code=error_code, result=result)
-    return _complete_run(run, result, output_metadata=output_metadata)
+        if result.get("cancelled"):
+            finalize_domain_span(agent_span, outcome="cancelled")
+            return AgentRun.objects.get(pk=run.pk)
+        if result.get("handoff_request"):
+            finalize_domain_span(agent_span, outcome="handed_off")
+            return _complete_run_as_handoff(run, result)
+        if result.get("budget_exceeded"):
+            finalize_domain_span(agent_span, outcome="budget_exceeded", is_error=True)
+            return _budget_exceeded_run(
+                run, reason=result.get("budget_exceeded_reason"), result=result
+            )
+        error_code = result.get("safe_error_code")
+        if error_code == "approval_required":
+            # Section 57-58: pause, never fail. Nothing here holds a worker
+            # thread, Celery worker, or DB transaction open — the run simply
+            # sits in WAITING_FOR_APPROVAL until a human decision dispatches
+            # ``resume_approved_action_task`` (or the rejection/expiry path
+            # marks it FAILED directly).
+            finalize_domain_span(agent_span, outcome="waiting_for_approval")
+            return _pause_run_for_approval(run, result)
+        if error_code:
+            finalize_domain_span(agent_span, outcome="failed", is_error=True)
+            return _fail_or_handoff(run, error_code=error_code, result=result)
+        finalize_domain_span(agent_span, outcome="succeeded")
+        return _complete_run(run, result, output_metadata=output_metadata)
 
 
 def fail_claimed_agent_run(*, run: AgentRun, code: str, message: str) -> AgentRun:
@@ -768,28 +820,52 @@ def _continue_run_after_resumed_tool(run: AgentRun, *, tool_result_summary: str)
         tool_result_summary=tool_result_summary,
     )
 
-    try:
-        result = run_resume_graph(ctx, state=state)
-    except Exception:  # pragma: no cover - defensive, mirrors execute_agent_run
-        logger.exception("agent_run_resume_unexpected_failure", extra={"agent_run_id": str(run.id)})
-        return _fail_run(
-            run, code="agent_internal_error", message="The agent run failed unexpectedly."
-        )
+    # Phase 11 Block 3 (section 42): deliberately a *fresh* domain span, not
+    # a child of the original ``agent.run`` span from before the
+    # WAITING_FOR_APPROVAL pause — that span already ended (section 43), and
+    # forcing a synchronous parent-child relationship across an
+    # arbitrarily-long human approval wait would misrepresent the trace.
+    # This span naturally parents under whatever *this* Celery task's own
+    # trace context is (the approval decision's request, or the expiry
+    # sweep) via ``common.tasks.CorrelatedTask``'s existing task span — the
+    # stable link back to the original run is ``agent_run_id`` itself
+    # (already present in every step/log/audit record for this run, section
+    # 42's "stable domain IDs" choice), not span parentage.
+    with domain_span(
+        "agent.run.resume", attributes={"supportpilot.agent_run_id": str(run.id)}
+    ) as agent_span:
+        try:
+            result = run_resume_graph(ctx, state=state)
+        except Exception:  # pragma: no cover - defensive, mirrors execute_agent_run
+            finalize_domain_span(agent_span, outcome="internal_error", is_error=True)
+            logger.exception(
+                "agent_run_resume_unexpected_failure", extra={"agent_run_id": str(run.id)}
+            )
+            return _fail_run(
+                run, code="agent_internal_error", message="The agent run failed unexpectedly."
+            )
 
-    if result.get("handoff_request"):
-        return _complete_run_as_handoff(run, result)
-    if result.get("budget_exceeded"):
-        return _budget_exceeded_run(run, reason=result.get("budget_exceeded_reason"), result=result)
-    error_code = result.get("safe_error_code")
-    if error_code == "approval_required":
-        # A second tool call in the same run also required approval — pause
-        # again rather than fail (rare with the deterministic fake provider,
-        # but the real graph already permits multi-turn tool use up to
-        # max_tool_calls).
-        return _pause_run_for_approval(run, result)
-    if error_code:
-        return _fail_or_handoff(run, error_code=error_code, result=result)
-    return _complete_run(run, result)
+        if result.get("handoff_request"):
+            finalize_domain_span(agent_span, outcome="handed_off")
+            return _complete_run_as_handoff(run, result)
+        if result.get("budget_exceeded"):
+            finalize_domain_span(agent_span, outcome="budget_exceeded", is_error=True)
+            return _budget_exceeded_run(
+                run, reason=result.get("budget_exceeded_reason"), result=result
+            )
+        error_code = result.get("safe_error_code")
+        if error_code == "approval_required":
+            # A second tool call in the same run also required approval — pause
+            # again rather than fail (rare with the deterministic fake provider,
+            # but the real graph already permits multi-turn tool use up to
+            # max_tool_calls).
+            finalize_domain_span(agent_span, outcome="waiting_for_approval")
+            return _pause_run_for_approval(run, result)
+        if error_code:
+            finalize_domain_span(agent_span, outcome="failed", is_error=True)
+            return _fail_or_handoff(run, error_code=error_code, result=result)
+        finalize_domain_span(agent_span, outcome="succeeded")
+        return _complete_run(run, result)
 
 
 def _provider_for(agent_version: AgentVersion):
@@ -814,6 +890,75 @@ def _apply_usage(run: AgentRun, result: Mapping[str, Any]) -> None:
     run.total_tokens = result.get("total_tokens", run.total_tokens)
     cost = result.get("estimated_cost_usd")
     run.estimated_cost_usd = Decimal(str(cost)) if cost is not None else None
+
+
+def _schedule_agent_run_terminal_observation(
+    run: AgentRun, *, outcome: str, terminal_at=None
+) -> None:
+    """Phase 11 Block 3 (section 12-14, 35-37): metrics for a committed
+    AgentRun terminal transition are recorded only once the enclosing
+    transaction actually commits — never inside the ``atomic()`` block
+    itself, where a later rollback could otherwise leave a phantom count
+    behind. Callers pass ``run`` already carrying its final terminal
+    timestamp (set moments earlier in the same block) so duration is
+    computed from values that are about to become durable, not re-read
+    after the fact. ``terminal_at`` defaults to ``run.completed_at``;
+    ``cancel_agent_run`` passes ``run.cancelled_at`` instead — the one
+    terminal transition that uses a distinct timestamp field."""
+    terminal_at = terminal_at if terminal_at is not None else run.completed_at
+    duration_seconds = (
+        (terminal_at - run.created_at).total_seconds() if terminal_at is not None else None
+    )
+    trigger = run.trigger
+    run_id = str(run.id)
+
+    def _record() -> None:
+        from observability.metrics import observe_agent_run_terminal
+
+        try:
+            observe_agent_run_terminal(
+                trigger=trigger, outcome=outcome, duration_seconds=duration_seconds
+            )
+        except Exception:  # noqa: BLE001 - telemetry must fail open
+            logger.warning(
+                "agent_run_metrics_recording_failed",
+                extra={"event": "metrics_error", "agent_run_id": run_id},
+            )
+
+    transaction.on_commit(_record)
+
+
+def _schedule_cancelled_tool_execution_observations(
+    observations: list[tuple[str, float | None]],
+) -> None:
+    """Phase 11 Block 3 remediation: mirrors
+    ``_schedule_agent_run_terminal_observation`` for the ``ToolExecution``
+    rows ``cancel_agent_run`` cancels directly via ``QuerySet.update()``
+    (never routed through ``tools/execution.py``'s own terminal-transition
+    helpers, so nothing else records this outcome). Deferred to
+    ``transaction.on_commit`` so a rolled-back cancellation never leaves a
+    phantom count behind, and the ``observe_tool_execution`` import stays
+    local so tests can monkeypatch ``observability.metrics.
+    observe_tool_execution`` and have it take effect here too. One failed
+    observation must not skip the rest, and no observation may ever raise
+    into the caller — telemetry fails open, never the committed
+    cancellation."""
+
+    def _record() -> None:
+        from observability.metrics import observe_tool_execution
+
+        for tool_name, duration_seconds in observations:
+            try:
+                observe_tool_execution(
+                    tool_name=tool_name, outcome="cancelled", duration_seconds=duration_seconds
+                )
+            except Exception:  # noqa: BLE001 - telemetry must fail open
+                logger.warning(
+                    "tool_execution_metrics_recording_failed",
+                    extra={"event": "metrics_error", "tool_name": tool_name},
+                )
+
+    transaction.on_commit(_record)
 
 
 # ---------------------------------------------------------------------------
@@ -954,6 +1099,7 @@ def _complete_run_as_handoff(run: AgentRun, result: Mapping[str, Any]) -> AgentR
             metadata={"agent_run_id": str(locked.id), "handoff_id": str(handoff.id)},
             request_id=locked.correlation_id or None,
         )
+        _schedule_agent_run_terminal_observation(locked, outcome="handed_off")
     return locked
 
 
@@ -999,6 +1145,7 @@ def _complete_run(
             metadata={"agent_run_id": str(locked.id)},
             request_id=locked.correlation_id or None,
         )
+        _schedule_agent_run_terminal_observation(locked, outcome="succeeded")
     return locked
 
 
@@ -1025,6 +1172,7 @@ def _fail_run(
             metadata={"agent_run_id": str(locked.id), "failure_code": code},
             request_id=locked.correlation_id or None,
         )
+        _schedule_agent_run_terminal_observation(locked, outcome="failed")
     return locked
 
 
@@ -1050,4 +1198,5 @@ def _budget_exceeded_run(
             metadata={"agent_run_id": str(locked.id), "failure_code": locked.failure_code},
             request_id=locked.correlation_id or None,
         )
+        _schedule_agent_run_terminal_observation(locked, outcome="budget_exceeded")
     return locked

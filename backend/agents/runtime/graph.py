@@ -33,6 +33,8 @@ from agents.providers.errors import ProviderError
 from agents.providers.protocol import LLMProvider
 from agents.providers.schemas import LLMMessage, LLMRequest, ToolDescriptor
 from agents.tool_runtime import ToolResultContext
+from observability.metrics import observe_llm_request
+from observability.tracing import domain_span, finalize_domain_span
 
 from .budgets import Budgets, check_budget
 from .state import RuntimeState, initial_state
@@ -136,24 +138,46 @@ def _generate_response(ctx: RunContext, state: RuntimeState) -> dict[str, Any]:
         provider=ctx.provider.name,
         model=ctx.model,
     )
-    try:
-        response = ctx.provider.generate(request)
-    except ProviderError as exc:
-        ctx.record_step(
-            step_type=AgentStepType.PROVIDER_CALL_FAILED,
-            status=AgentStepStatus.FAILED,
+    # Phase 11 Block 3 (section 16-18): the one place ``LLMProvider.generate``
+    # is ever called — the single boundary every LLM metric/span goes
+    # through. Never a ``model`` label/attribute (free-text,
+    # ``observability.metrics.observe_llm_request``'s own docstring) and
+    # never prompt/response/tool-call text on the span — only the provider
+    # name and a bounded, code-owned outcome/error-code taxonomy.
+    llm_started = time.monotonic()
+    with domain_span("llm.generate", attributes={"llm.provider": ctx.provider.name}) as llm_span:
+        try:
+            response = ctx.provider.generate(request)
+        except ProviderError as exc:
+            observe_llm_request(
+                provider=ctx.provider.name,
+                outcome=exc.code,
+                duration_seconds=time.monotonic() - llm_started,
+            )
+            finalize_domain_span(llm_span, outcome=exc.code, is_error=True)
+            ctx.record_step(
+                step_type=AgentStepType.PROVIDER_CALL_FAILED,
+                status=AgentStepStatus.FAILED,
+                provider=ctx.provider.name,
+                model=ctx.model,
+                error_code=exc.code,
+            )
+            return {
+                "model_call_count": state["model_call_count"] + 1,
+                "step_count": state["step_count"] + 1,
+                "attempt": attempt,
+                "safe_error_code": exc.code,
+                "safe_error_message": exc.safe_message,
+                "retryable_error": exc.retryable,
+            }
+        observe_llm_request(
             provider=ctx.provider.name,
-            model=ctx.model,
-            error_code=exc.code,
+            outcome="success",
+            duration_seconds=time.monotonic() - llm_started,
+            input_tokens=response.usage.input_tokens,
+            output_tokens=response.usage.output_tokens,
         )
-        return {
-            "model_call_count": state["model_call_count"] + 1,
-            "step_count": state["step_count"] + 1,
-            "attempt": attempt,
-            "safe_error_code": exc.code,
-            "safe_error_message": exc.safe_message,
-            "retryable_error": exc.retryable,
-        }
+        finalize_domain_span(llm_span, outcome="success")
 
     ctx.record_step(
         step_type=AgentStepType.PROVIDER_CALL_SUCCEEDED,

@@ -124,6 +124,41 @@ env = environ.Env(
     # raising ``max_attempts`` — never resets ``attempt_count`` or erases
     # attempt history. Server-owned only; never client-supplied.
     WEBHOOKS_REDRIVE_ATTEMPT_ALLOWANCE=(int, 3),
+    # Production observability (Phase 11 Block 1). Metrics are bounded,
+    # low-cardinality, vendor-neutral Prometheus exposition — never a
+    # business/tenant data API (section 26-27). Enabled by default so the
+    # normal dev/test/CI path always exercises the real instrumentation
+    # (section 64); ``METRICS_TOKEN`` has no usable default in production —
+    # see the fail-closed check below.
+    OBSERVABILITY_METRICS_ENABLED=(bool, True),
+    OBSERVABILITY_METRICS_TOKEN=(str, ""),
+    OBSERVABILITY_SERVICE_NAME=(str, "supportpilot-backend"),
+    # Distributed tracing (Phase 11 Block 2 remediation, Part B). Off by
+    # default, unlike metrics: this block ships no exporter (see
+    # ``observability/tracing.py``), so an operator opting in today gets
+    # correct W3C context propagation and trace/span-id log correlation but
+    # nothing exported anywhere yet — an explicit, informed choice rather
+    # than a surprise default. Disabled mode must need no collector/backend
+    # and add no startup dependency (section 6).
+    OBSERVABILITY_TRACING_ENABLED=(bool, False),
+    # Phase 11 Block 3: the OTLP/HTTP export destination for spans. Empty
+    # (default) means "tracing enabled, but explicit local/no-export mode"
+    # -- never a silently-chosen remote default collector (section 9).
+    OBSERVABILITY_OTLP_ENDPOINT=(str, ""),
+    # Phase 11 Block 3: prefork-safe Celery worker Prometheus exposition
+    # (config/celery_metrics.py). Off by default -- an operator opts in
+    # deliberately, same reasoning as OBSERVABILITY_TRACING_ENABLED.
+    OBSERVABILITY_CELERY_METRICS_ENABLED=(bool, False),
+    # Loopback by default (section 6): this listener has no
+    # authentication of its own (it is infrastructure telemetry, not a
+    # tenant API), so a non-default bind is an explicit, deployment-owned
+    # decision to rely on the surrounding network boundary instead.
+    OBSERVABILITY_CELERY_METRICS_HOST=(str, "127.0.0.1"),
+    OBSERVABILITY_CELERY_METRICS_PORT=(int, 9808),
+    OBSERVABILITY_CELERY_PROMETHEUS_MULTIPROC_DIR=(
+        str,
+        "/tmp/supportpilot-celery-prometheus-multiproc",
+    ),
 )
 
 environ.Env.read_env(os.path.join(BASE_DIR.parent, ".env"))
@@ -182,7 +217,9 @@ MIDDLEWARE = [
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "common.middleware.RequestIdMiddleware",
+    "observability.middleware.TracingMiddleware",
     "common.middleware.StructuredLoggingMiddleware",
+    "observability.middleware.MetricsMiddleware",
 ]
 
 ROOT_URLCONF = "config.urls"
@@ -471,6 +508,42 @@ WEBHOOKS_MAX_URL_LENGTH = env("WEBHOOKS_MAX_URL_LENGTH")
 # Manual redrive (Phase 10 Block 4) — see ``webhooks/services.py``.
 WEBHOOKS_REDRIVE_ATTEMPT_ALLOWANCE = env("WEBHOOKS_REDRIVE_ATTEMPT_ALLOWANCE")
 
+# Production observability (Phase 11 Block 1) — see ``observability/metrics.py``
+# and ``observability/views.py``. The metrics endpoint is deployment
+# infrastructure, not a tenant API (section 26): it is protected by a
+# single server-owned bearer token, never workspace RBAC. Failing startup
+# when a real deployment would otherwise silently expose an unauthenticated
+# metrics endpoint matches this repository's existing fail-closed
+# convention (e.g. ``WEBHOOKS_ALLOW_INSECURE_HTTP``) — DEBUG-only local/dev
+# runs are exempt so the endpoint stays usable without extra setup.
+OBSERVABILITY_METRICS_ENABLED = env("OBSERVABILITY_METRICS_ENABLED")
+OBSERVABILITY_METRICS_TOKEN = env("OBSERVABILITY_METRICS_TOKEN")
+OBSERVABILITY_SERVICE_NAME = env("OBSERVABILITY_SERVICE_NAME")
+
+if OBSERVABILITY_METRICS_ENABLED and not DEBUG and not OBSERVABILITY_METRICS_TOKEN:
+    raise ValueError(
+        "OBSERVABILITY_METRICS_TOKEN must be set when "
+        "OBSERVABILITY_METRICS_ENABLED is true outside DEBUG."
+    )
+
+# Distributed tracing (Phase 11 Block 2 remediation) — see
+# ``observability/tracing.py``. Reads this setting itself, lazily, so
+# flipping it requires no other code change and no collector/backend needs
+# to exist for the application to start or run normally either way
+# (section 6/34).
+OBSERVABILITY_TRACING_ENABLED = env("OBSERVABILITY_TRACING_ENABLED")
+OBSERVABILITY_OTLP_ENDPOINT = env("OBSERVABILITY_OTLP_ENDPOINT")
+
+# Celery worker Prometheus exposition (Phase 11 Block 3) — see
+# config/celery_metrics.py. Independent of Gunicorn's own multiprocess
+# directory/lifecycle (section 5): a separate directory and, where
+# Django/Gunicorn and Celery run as separate containers/process groups, no
+# assumption that the two share a filesystem at all.
+OBSERVABILITY_CELERY_METRICS_ENABLED = env("OBSERVABILITY_CELERY_METRICS_ENABLED")
+OBSERVABILITY_CELERY_METRICS_HOST = env("OBSERVABILITY_CELERY_METRICS_HOST")
+OBSERVABILITY_CELERY_METRICS_PORT = env("OBSERVABILITY_CELERY_METRICS_PORT")
+OBSERVABILITY_CELERY_PROMETHEUS_MULTIPROC_DIR = env("OBSERVABILITY_CELERY_PROMETHEUS_MULTIPROC_DIR")
+
 # Logging
 LOGGING = {
     "version": 1,
@@ -491,12 +564,26 @@ LOGGING = {
         "require_debug_true": {
             "()": "django.utils.log.RequireDebugTrue",
         },
+        # Phase 11 Block 2: injects the current request/task's correlation
+        # id (common.correlation) into every log record so it survives the
+        # HTTP -> Celery boundary without every call site passing it via
+        # extra= by hand.
+        "correlation_id": {
+            "()": "common.correlation.CorrelationIdLogFilter",
+        },
+        # Phase 11 Block 2 remediation: injects the current span's
+        # trace_id/span_id (observability.tracing), kept as fields distinct
+        # from correlation_id/request_id above (section 10/28).
+        "trace_context": {
+            "()": "observability.tracing.TraceContextLogFilter",
+        },
     },
     "handlers": {
         "console": {
             "level": "INFO",
             "class": "logging.StreamHandler",
             "formatter": "json" if not DEBUG else "verbose",
+            "filters": ["correlation_id", "trace_context"],
         },
     },
     "loggers": {

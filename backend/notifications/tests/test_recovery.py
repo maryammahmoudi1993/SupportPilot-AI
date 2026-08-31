@@ -67,7 +67,10 @@ def _run_in_threads(*targets):
 @pytest.mark.django_db
 def test_dispatch_due_deliveries_only_publishes_due_pending_and_retry_scheduled(monkeypatch):
     published: list = []
-    monkeypatch.setattr("notifications.recovery.dispatch_delivery_for_processing", published.append)
+    monkeypatch.setattr(
+        "notifications.recovery.dispatch_delivery_for_processing",
+        lambda delivery_id, **kwargs: published.append(delivery_id),
+    )
 
     now = timezone.now()
     due_pending = DeliveryFactory(
@@ -90,7 +93,10 @@ def test_dispatch_due_deliveries_only_publishes_due_pending_and_retry_scheduled(
 @pytest.mark.django_db
 def test_dispatch_due_deliveries_respects_batch_size(monkeypatch):
     published: list = []
-    monkeypatch.setattr("notifications.recovery.dispatch_delivery_for_processing", published.append)
+    monkeypatch.setattr(
+        "notifications.recovery.dispatch_delivery_for_processing",
+        lambda delivery_id, **kwargs: published.append(delivery_id),
+    )
     now = timezone.now()
     for _ in range(5):
         DeliveryFactory(status=DeliveryStatus.PENDING, next_attempt_at=now - timedelta(seconds=1))
@@ -106,7 +112,10 @@ def test_recover_expired_delivery_claims_only_publishes_expired_claims(monkeypat
     import uuid
 
     published: list = []
-    monkeypatch.setattr("notifications.recovery.dispatch_delivery_for_processing", published.append)
+    monkeypatch.setattr(
+        "notifications.recovery.dispatch_delivery_for_processing",
+        lambda delivery_id, **kwargs: published.append(delivery_id),
+    )
     now = timezone.now()
     expired = DeliveryFactory(
         status=DeliveryStatus.CLAIMED,
@@ -160,8 +169,8 @@ def test_initial_broker_failure_then_sweeper_recovery_end_to_end(monkeypatch, fa
     assert len(fake_channel_calls) == 0
 
     # Broker returns — publication now actually reaches a worker.
-    def _broker_up(delivery_id):
-        process_delivery_task.apply(args=[delivery_id]).get()
+    def _broker_up(delivery_id, **kwargs):
+        process_delivery_task.apply(args=[delivery_id], kwargs=kwargs).get()
 
     monkeypatch.setattr(tasks_module.process_delivery_task, "delay", _broker_up)
 
@@ -273,8 +282,8 @@ def test_expired_claim_recovered_through_task_boundary_marks_old_attempt_abandon
     # it run synchronously here so the test can observe the recovered
     # outcome without a live worker process (mirrors the broker-return half
     # of ``test_initial_broker_failure_then_sweeper_recovery_end_to_end``).
-    def _synchronous_delay(delivery_id):
-        process_delivery_task.apply(args=[delivery_id]).get()
+    def _synchronous_delay(delivery_id, **kwargs):
+        process_delivery_task.apply(args=[delivery_id], kwargs=kwargs).get()
 
     monkeypatch.setattr(tasks_module.process_delivery_task, "delay", _synchronous_delay)
 
@@ -424,7 +433,10 @@ def test_stale_worker_after_recovery_cannot_overwrite_newer_completion_via_task_
 @pytest.mark.django_db
 def test_recovery_functions_depend_only_on_database_state(monkeypatch):
     published: list = []
-    monkeypatch.setattr("notifications.recovery.dispatch_delivery_for_processing", published.append)
+    monkeypatch.setattr(
+        "notifications.recovery.dispatch_delivery_for_processing",
+        lambda delivery_id, **kwargs: published.append(delivery_id),
+    )
     now = timezone.now()
     delivery = DeliveryFactory(
         status=DeliveryStatus.PENDING, next_attempt_at=now - timedelta(seconds=1)

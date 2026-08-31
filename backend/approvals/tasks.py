@@ -19,15 +19,20 @@ from __future__ import annotations
 
 from celery import shared_task
 
+from common.tasks import CorrelatedTask
 
-@shared_task(bind=True, max_retries=3)
-def resume_approved_action_task(self, approval_request_id: str):
+
+@shared_task(bind=True, base=CorrelatedTask, max_retries=3)
+def resume_approved_action_task(self, approval_request_id: str, correlation_id: str | None = None):
+    # ``correlation_id`` is declared only so Celery's argument validation
+    # accepts it from ``_dispatch_resume`` — see the identical note on
+    # ``agents.tasks.execute_agent_run_task`` (Phase 11 Block 2).
     from agents.orchestration import resume_support_agent_run
 
     return resume_support_agent_run(approval_request_id)
 
 
-@shared_task
+@shared_task(base=CorrelatedTask)
 def expire_stale_approvals_task() -> int:
     """Periodic sweep (section 45) — safe to run on any cadence; each
     ``ApprovalRequest`` is only ever transitioned to ``expired`` once."""

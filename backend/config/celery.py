@@ -2,6 +2,15 @@
 
 Business logic must not live in task bodies — tasks call service functions
 defined in each domain app, per the project's architecture rules.
+
+Distributed tracing (Phase 11 Block 2 remediation, ``observability/tracing.py``)
+requires no setup here: each worker process builds its own ``TracerProvider``
+lazily, the first time ``common.tasks.CorrelatedTask`` needs one, entirely
+independent of whether/how the Gunicorn web process has initialized its own
+(section 33). ``common/tasks.py`` connects the ``before_task_publish``
+signal that injects W3C trace context into outbound message headers at
+import time — already guaranteed by every first-party task declaring
+``base=CorrelatedTask``.
 """
 
 import os
@@ -12,6 +21,25 @@ os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
 
 app = Celery("supportpilot")
 app.config_from_object("django.conf:settings", namespace="CELERY")
+
+# Phase 11 Block 3, Block 6 production-smoke regression: this import, and
+# the setup call right after it, MUST run before ``app.autodiscover_tasks()``
+# below (indeed before anything that touches ``app.tasks``). Celery's own
+# ``WorkController.setup_instance`` accesses ``app.tasks`` — which triggers
+# task-module autodiscovery, transitively importing ``observability.metrics``
+# — *before* it ever fires the ``worker_init`` signal. Waiting for
+# ``worker_init`` to set ``PROMETHEUS_MULTIPROC_DIR`` (the original Block 3
+# design) is therefore always too late in a real ``celery worker`` process:
+# ``prometheus_client.values.ValueClass`` binds permanently at first import
+# of that module, so Celery's own metrics would silently stay in single
+# -process memory forever, never reaching a scrape. See
+# ``config/celery_metrics.py`` for the full explanation and for why this is
+# still a no-op (no directory touched) for every process that is not
+# actually a Celery worker (Gunicorn, Beat, a management command).
+from . import celery_metrics  # noqa: E402
+
+celery_metrics.setup_multiproc_dir_if_worker_process()
+
 app.autodiscover_tasks()
 
 

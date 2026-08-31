@@ -94,7 +94,10 @@ def test_task_on_unclaimable_delivery_skips_safely():
 
 def test_dispatch_due_deliveries_task_delegates_to_recovery_service(monkeypatch):
     published: list = []
-    monkeypatch.setattr("notifications.recovery.dispatch_delivery_for_processing", published.append)
+    monkeypatch.setattr(
+        "notifications.recovery.dispatch_delivery_for_processing",
+        lambda delivery_id, **kwargs: published.append(delivery_id),
+    )
     delivery = DeliveryFactory(next_attempt_at=timezone.now() - timedelta(seconds=1))
     result = dispatch_due_deliveries_task.apply().get()
     assert result == 1
@@ -105,7 +108,10 @@ def test_recover_expired_delivery_claims_task_delegates_to_recovery_service(monk
     import uuid
 
     published: list = []
-    monkeypatch.setattr("notifications.recovery.dispatch_delivery_for_processing", published.append)
+    monkeypatch.setattr(
+        "notifications.recovery.dispatch_delivery_for_processing",
+        lambda delivery_id, **kwargs: published.append(delivery_id),
+    )
     now = timezone.now()
     delivery = DeliveryFactory(
         status=DeliveryStatus.CLAIMED,

@@ -117,9 +117,11 @@ def _sha256(upload: UploadedFile) -> str:
 
 
 def _dispatch_ingestion(job_id: uuid.UUID) -> None:
+    from common.correlation import get_correlation_id
+
     from .tasks import ingest_knowledge_document
 
-    ingest_knowledge_document.delay(str(job_id))
+    ingest_knowledge_document.delay(str(job_id), correlation_id=get_correlation_id())
 
 
 def upload_document(

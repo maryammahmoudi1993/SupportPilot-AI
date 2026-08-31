@@ -1,0 +1,169 @@
+# Example Prometheus alerting rules for SupportPilot AI.
+#
+# This repository does not deploy Prometheus, Alertmanager, or any scrape
+# configuration — this file is a deployment-compatible starting point an
+# operator loads into their own Prometheus-compatible system once one is
+# stood up. Every metric name below matches exactly what
+# `observability/metrics.py` (Phase 11 Blocks 1-4) actually exports.
+#
+# See docs/observability/slos.md for the SLI/target rationale behind each
+# threshold, and docs/observability/runbook.md for the response guidance
+# tied to each alert name below.
+#
+# Windows are deliberately 5-15 minutes, never instant-on-one-sample —
+# see docs/observability/slos.md's "known limitations" note on small-sample
+# volatility. None of these rules assume an alert manager is deployed;
+# `for:` durations and label sets are chosen to be broadly compatible with
+# both Prometheus's own Alertmanager and common OTLP/Prometheus-compatible
+# alerting backends.
+
+groups:
+  - name: supportpilot-api
+    rules:
+      - alert: HighApi5xxRate
+        expr: |
+          (
+            sum(rate(supportpilot_http_requests_total{status_class="5xx"}[5m]))
+            /
+            sum(rate(supportpilot_http_requests_total[5m]))
+          ) > 0.01
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Elevated API 5xx rate"
+          description: >-
+            5xx rate has exceeded 1% of eligible HTTP traffic for 5+
+            minutes. See docs/observability/runbook.md#api-5xx-spike-highapi5xxrate.
+
+      - alert: HighApiLatency
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(supportpilot_http_request_duration_seconds_bucket[5m])) by (le)
+          ) > 0.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "API p95 latency above target"
+          description: >-
+            p95 request latency has exceeded 500ms for 10+ minutes. See
+            docs/observability/runbook.md#api-latency-high-highapilatency.
+
+  - name: supportpilot-agents
+    rules:
+      - alert: AgentOrchestrationFailureSpike
+        expr: |
+          (
+            sum(rate(supportpilot_agent_runs_total{outcome=~"failed|budget_exceeded"}[15m]))
+            /
+            sum(rate(supportpilot_agent_runs_total[15m]))
+          ) > 0.05
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Elevated agent run failure/budget-exceeded rate"
+          description: >-
+            Platform-attributable agent terminal failures exceed 5% of
+            terminal runs over 15 minutes. See
+            docs/observability/runbook.md#agent-orchestration-failures-agentorchestrationfailurespike.
+
+  - name: supportpilot-delivery
+    rules:
+      - alert: DeliveryRetrySpike
+        expr: |
+          sum(rate(supportpilot_delivery_retries_total[10m])) by (channel) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Elevated delivery retry rate for {{ $labels.channel }}"
+          description: >-
+            Retry scheduling rate for channel={{ $labels.channel }} has
+            been elevated for 10+ minutes. See
+            docs/observability/runbook.md#delivery-retry-spike-deliveryretryspike.
+
+      - alert: OldestDueDeliveryTooOld
+        expr: |
+          max(supportpilot_delivery_oldest_due_age_seconds) by (channel) > 120
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Recovery lag exceeds target for {{ $labels.channel }}"
+          description: >-
+            The oldest due delivery for channel={{ $labels.channel }} has
+            been overdue by more than 120s (4 sweep intervals) for 5+
+            minutes. See
+            docs/observability/runbook.md#oldest-due-delivery-age-high-oldestduedeliverytooold.
+
+      - alert: ExpiredClaimSpike
+        expr: |
+          sum(rate(supportpilot_delivery_claim_recoveries_total[15m])) by (channel) > 0.2
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Elevated expired-claim recovery rate for {{ $labels.channel }}"
+          description: >-
+            Claim recoveries (worker crash / slow attempt / lease too
+            short) for channel={{ $labels.channel }} are elevated. See
+            docs/observability/runbook.md#expired-claim-spike-expiredclaimspike.
+
+      - alert: BrokerPublicationFailures
+        expr: |
+          sum(rate(supportpilot_delivery_broker_publication_failures_total[5m])) by (channel, source) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Broker publication failing for {{ $labels.channel }}/{{ $labels.source }}"
+          description: >-
+            Best-effort Celery publication is failing (source={{ $labels.source }}),
+            most likely a Redis/broker outage. Deliveries remain durable
+            and recoverable — see
+            docs/observability/runbook.md#broker-publication-failures-brokerpublicationfailures.
+
+  - name: supportpilot-webhooks
+    rules:
+      - alert: WebhookReceiver5xxSpike
+        expr: |
+          sum(rate(supportpilot_webhook_responses_total{status_class="5xx"}[10m]))
+          /
+          sum(rate(supportpilot_webhook_responses_total[10m])) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Elevated webhook receiver 5xx rate"
+          description: >-
+            Receiver-side signal, not necessarily a SupportPilot incident
+            — see docs/observability/slos.md#7-webhook-receiverplatform-health
+            and docs/observability/runbook.md#webhook-receiver-5xx-spike-webhookreceiver5xxspike.
+
+      - alert: WebhookTerminalFailureSpike
+        expr: |
+          sum(rate(supportpilot_delivery_terminal_total{channel="webhook", outcome="dead"}[15m])) > 0.5
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Elevated webhook DEAD terminal rate"
+          description: >-
+            Non-retryable webhook terminal failures are elevated. See
+            docs/observability/runbook.md#webhook-terminal-failure-spike-webhookterminalfailurespike.
+
+      - alert: WebhookDestinationRejectionSpike
+        expr: |
+          sum(rate(supportpilot_webhook_destination_rejections_total[10m])) by (reason) > 0.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Elevated webhook destination rejections ({{ $labels.reason }})"
+          description: >-
+            SSRF/destination-validation rejections are elevated
+            (reason={{ $labels.reason }}) — a security control operating
+            as designed, but worth investigating for a sudden spike. See
+            docs/observability/runbook.md#webhook-destination-rejection-spike-webhookdestinationrejectionspike.

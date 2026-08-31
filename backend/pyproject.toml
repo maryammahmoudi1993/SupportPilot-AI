@@ -51,6 +51,27 @@ dependencies = [
     "django-filter==25.1",
     "djangorestframework-simplejwt==5.5.1",
     "pypdf==6.15.0",
+    # Phase 11: vendor-neutral Prometheus exposition for bounded-cardinality
+    # production metrics (observability/metrics.py). A pure client library —
+    # no server component, no vendor SDK/agent, no hard external network
+    # dependency at request time.
+    "prometheus-client==0.26.0",
+    # Phase 11 Block 2 remediation (Part B): vendor-neutral distributed
+    # tracing (observability/tracing.py) — API + SDK only, no vendor
+    # exporter (Datadog/New Relic/Honeycomb/Jaeger/Sentry) and no OTLP
+    # exporter package, since this block ships no exporter (see ADR 0009's
+    # update). W3C Trace Context propagation used via
+    # ``opentelemetry.trace.propagation.tracecontext`` and
+    # ``opentelemetry.propagate``, both included in ``opentelemetry-api``.
+    "opentelemetry-api==1.44.0",
+    "opentelemetry-sdk==1.44.0",
+    # Phase 11 Block 3: the vendor-neutral production export path for the
+    # spans Block 2 already creates. HTTP/protobuf transport specifically
+    # (not gRPC) - reuses the already-pinned ``requests`` as its transport
+    # rather than adding a grpc dependency, and needs no extra system
+    # packages to deploy. No exporter is attached unless
+    # OBSERVABILITY_OTLP_ENDPOINT is actually configured (observability/tracing.py).
+    "opentelemetry-exporter-otlp-proto-http==1.44.0",
 ]
 
 [project.optional-dependencies]
@@ -71,7 +92,12 @@ dev = [
 ]
 
 [tool.setuptools]
-packages = ["common", "accounts", "workspaces", "customers", "conversations", "tickets", "knowledge", "agents", "tools", "integrations", "policies", "approvals", "notifications", "observability", "evaluations", "audit", "health"]
+# "webhooks" was omitted here when the app was added in Phase 10 — a latent
+# packaging gap (harmless for this repository's own Docker/dev layout, where
+# BASE_DIR is always importable directly off sys.path, but incorrect for any
+# consumer that installs this distribution without the source tree present).
+# Fixed while touching this file for Phase 11's new dependency.
+packages = ["common", "accounts", "workspaces", "customers", "conversations", "tickets", "knowledge", "agents", "tools", "integrations", "policies", "approvals", "notifications", "webhooks", "observability", "evaluations", "audit", "health"]
 
 [tool.black]
 line-length = 100

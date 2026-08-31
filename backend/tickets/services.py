@@ -440,6 +440,21 @@ def create_or_reuse_handoff(
             "summary": safe_summary,
         },
     )
+
+    def _record_created() -> None:
+        from observability.metrics import observe_handoff_created
+
+        try:
+            observe_handoff_created(reason_code=reason_code)
+        except Exception:  # noqa: BLE001 - telemetry must fail open
+            import logging
+
+            logging.getLogger("supportpilot").warning(
+                "handoff_metrics_recording_failed",
+                extra={"event": "metrics_error", "handoff_id": str(handoff.id)},
+            )
+
+    transaction.on_commit(_record_created)
     return handoff, True
 
 
@@ -493,8 +508,9 @@ def resolve_handoff(
     locked = HumanHandoff.objects.select_for_update().get(pk=handoff.pk)
     if locked.status not in HUMAN_HANDOFF_ACTIVE_STATUSES:
         raise ValidationError({"status": "Only an active handoff can be resolved."})
+    resolved_at = timezone.now()
     locked.status = HumanHandoffStatus.RESOLVED
-    locked.resolved_at = timezone.now()
+    locked.resolved_at = resolved_at
     locked.save(update_fields=["status", "resolved_at", "updated_at"])
 
     record_event(
@@ -506,6 +522,29 @@ def resolve_handoff(
         metadata={},
         request_id=request_id,
     )
+
+    def _record_resolved() -> None:
+        from observability.metrics import observe_handoff_terminal
+
+        try:
+            # Phase 11 Block 5 (section 34/49): clamped defensively, same as
+            # every other wall-clock-derived duration in this codebase
+            # (``notifications/services.py``) — ``resolved_at`` and
+            # ``created_at`` both come from ``timezone.now()``/``auto_now_add``
+            # on this same app server, so this should never actually go
+            # negative, but a Prometheus histogram must never receive a
+            # negative observation regardless of how unlikely the cause.
+            duration_seconds = max((resolved_at - locked.created_at).total_seconds(), 0.0)
+            observe_handoff_terminal(duration_seconds=duration_seconds)
+        except Exception:  # noqa: BLE001 - telemetry must fail open
+            import logging
+
+            logging.getLogger("supportpilot").warning(
+                "handoff_metrics_recording_failed",
+                extra={"event": "metrics_error", "handoff_id": str(locked.id)},
+            )
+
+    transaction.on_commit(_record_resolved)
     return locked
 
 
