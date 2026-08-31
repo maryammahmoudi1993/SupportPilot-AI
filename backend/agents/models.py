@@ -66,6 +66,9 @@ class AgentRunTrigger(models.TextChoices):
     CONVERSATION = "conversation", "Conversation"
     TICKET = "ticket", "Ticket"
     API = "api", "API"
+    # Phase 12: a run started by the evaluation harness against a seeded,
+    # deterministic case rather than a real conversation/ticket/API caller.
+    EVALUATION = "evaluation", "Evaluation"
 
 
 class AgentStepType(models.TextChoices):

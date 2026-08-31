@@ -236,8 +236,8 @@ def observe_celery_task(*, task_name: str, outcome: str, duration_seconds: float
 
 # --- Agent runs --------------------------------------------------------
 
-#: Labels: ``trigger`` (``AgentRunTrigger`` — manual/conversation/ticket/api,
-#: 4 values, code-owned), ``outcome`` (one of ``AGENT_RUN_TERMINAL_STATUSES``
+#: Labels: ``trigger`` (``AgentRunTrigger`` — manual/conversation/ticket/api/
+#: evaluation, 5 values, code-owned), ``outcome`` (one of ``AGENT_RUN_TERMINAL_STATUSES``
 #: — succeeded/failed/cancelled/budget_exceeded/handed_off, 5 values).
 #: ``WAITING_FOR_APPROVAL`` is deliberately never observed here — it is not
 #: terminal (section 13); ``HANDED_OFF`` is a successful escalation outcome,
@@ -263,7 +263,7 @@ AGENT_RUN_DURATION_SECONDS = Histogram(
     buckets=(0.5, 1, 2, 5, 10, 20, 30, 60, 120, 300, 600),
 )
 
-_AGENT_RUN_TRIGGERS = frozenset({"manual", "conversation", "ticket", "api"})
+_AGENT_RUN_TRIGGERS = frozenset({"manual", "conversation", "ticket", "api", "evaluation"})
 _AGENT_RUN_OUTCOMES = frozenset(
     {"succeeded", "failed", "cancelled", "budget_exceeded", "handed_off"}
 )
