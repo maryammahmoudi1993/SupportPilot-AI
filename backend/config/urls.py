@@ -29,8 +29,7 @@ urlpatterns = [
                     name="api-docs",
                 ),
                 # Apps implemented so far. Domain apps without routes yet
-                # (notifications, evaluations, observability) are wired in
-                # their own phases.
+                # (notifications) are wired in their own phases.
                 path("auth/", include("accounts.urls")),
                 path("workspaces/", include("workspaces.urls")),
                 path(
@@ -84,6 +83,10 @@ urlpatterns = [
                 path(
                     "workspaces/<uuid:workspace_id>/webhooks/",
                     include("webhooks.urls"),
+                ),
+                path(
+                    "workspaces/<uuid:workspace_id>/evaluations/",
+                    include("evaluations.urls"),
                 ),
             ]
         ),

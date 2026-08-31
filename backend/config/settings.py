@@ -360,6 +360,16 @@ SPECTACULAR_SETTINGS = {
         "ApprovalDecisionValueEnum": "approvals.models.ApprovalDecisionValue.choices",
         "WebhookEndpointStatusEnum": "webhooks.models.WebhookEndpointStatus.choices",
         "WebhookEventTypeEnum": "webhooks.models.WebhookEventType.choices",
+        "EvaluationDatasetStatusEnum": "evaluations.models.EvaluationDatasetStatus.choices",
+        # EvaluationCaseStatus intentionally has no override entry — its
+        # choice set (active/disabled) is byte-identical to
+        # WebhookEndpointStatus's, and drf-spectacular rejects two override
+        # names for the same underlying choice tuple. It shares that
+        # auto-resolved enum instead.
+        "EvaluationRunStatusEnum": "evaluations.models.EvaluationRunStatus.choices",
+        "EvaluationResultStatusEnum": "evaluations.models.EvaluationResultStatus.choices",
+        "EvaluationProviderModeEnum": "evaluations.models.EvaluationProviderMode.choices",
+        "EvaluationFailureCodeEnum": "evaluations.models.EvaluationFailureCode.choices",
     },
 }
 
