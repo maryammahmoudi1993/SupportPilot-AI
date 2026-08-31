@@ -140,7 +140,13 @@ def create_evaluation_case(
         expectations=expectations,
         created_by=actor,
     )
-    case.full_clean()
+    # ``clean()`` (not ``full_clean()``) — only the seeded_context/
+    # expectations schema validation this app defines, matching how the
+    # rest of the codebase does business validation explicitly rather than
+    # via Django's blanket field-level full_clean() (which would also
+    # reject e.g. created_by=None on fields declared null=True but not
+    # blank=True).
+    case.clean()
     with transaction.atomic():
         case.save()
         record_event(
@@ -166,7 +172,13 @@ def update_evaluation_case(
     for field in ("name", "status", "input_message", "seeded_context", "expectations"):
         if field in data:
             setattr(case, field, data[field])
-    case.full_clean()
+    # ``clean()`` (not ``full_clean()``) — only the seeded_context/
+    # expectations schema validation this app defines, matching how the
+    # rest of the codebase does business validation explicitly rather than
+    # via Django's blanket field-level full_clean() (which would also
+    # reject e.g. created_by=None on fields declared null=True but not
+    # blank=True).
+    case.clean()
     with transaction.atomic():
         case.save()
         record_event(

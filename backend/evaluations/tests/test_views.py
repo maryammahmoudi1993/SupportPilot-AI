@@ -61,6 +61,28 @@ class TestDatasetApi:
         )
         assert response.status_code == 404
 
+    def test_manager_patches_a_dataset(self):
+        membership = WorkspaceMembershipFactory(role=WorkspaceRole.OWNER)
+        dataset = EvaluationDatasetFactory(workspace=membership.workspace, name="Old")
+        response = _client(membership.user).patch(
+            f"{_base(membership.workspace)}/datasets/{dataset.id}/",
+            {"name": "New", "status": "active"},
+            format="json",
+        )
+        assert response.status_code == 200
+        assert response.data["name"] == "New"
+        assert response.data["status"] == "active"
+
+    def test_support_agent_cannot_patch_a_dataset(self):
+        membership = WorkspaceMembershipFactory(role=WorkspaceRole.SUPPORT_AGENT)
+        dataset = EvaluationDatasetFactory(workspace=membership.workspace)
+        response = _client(membership.user).patch(
+            f"{_base(membership.workspace)}/datasets/{dataset.id}/",
+            {"name": "New"},
+            format="json",
+        )
+        assert response.status_code == 403
+
 
 @pytest.mark.django_db
 class TestCaseApi:
@@ -97,6 +119,22 @@ class TestCaseApi:
         )
         assert listing.status_code == 200
         assert listing.data["count"] == 1
+
+    def test_case_patch_and_detail(self):
+        membership = WorkspaceMembershipFactory(role=WorkspaceRole.OWNER)
+        dataset = EvaluationDatasetFactory(workspace=membership.workspace)
+        case = EvaluationCaseFactory(dataset=dataset)
+        detail = _client(membership.user).get(
+            f"{_base(membership.workspace)}/datasets/{dataset.id}/cases/{case.id}/"
+        )
+        assert detail.status_code == 200
+        response = _client(membership.user).patch(
+            f"{_base(membership.workspace)}/datasets/{dataset.id}/cases/{case.id}/",
+            {"status": "disabled"},
+            format="json",
+        )
+        assert response.status_code == 200
+        assert response.data["status"] == "disabled"
 
     def test_case_in_foreign_dataset_is_404_even_for_own_workspace_member(self):
         membership = WorkspaceMembershipFactory(role=WorkspaceRole.OWNER)
