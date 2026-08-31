@@ -601,9 +601,7 @@ def observe_evaluation_case_terminal(*, outcome: str, duration_seconds: float | 
 
 
 def observe_evaluation_regression(*, category: str) -> None:
-    category_label = (
-        category if category in _EVALUATION_REGRESSION_CATEGORIES else "pass_rate"
-    )
+    category_label = category if category in _EVALUATION_REGRESSION_CATEGORIES else "pass_rate"
     EVALUATION_REGRESSIONS_TOTAL.labels(category=category_label).inc()
 
 

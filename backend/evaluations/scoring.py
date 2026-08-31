@@ -21,7 +21,7 @@ from approvals.models import ApprovalRequest, ApprovalStatus
 from tools.models import ToolExecution, ToolExecutionStatus
 
 from .models import EvaluationFailureCode
-from .schemas import EvaluationCaseExpectations, EvaluationScorerOutput
+from .schemas import EvaluationCaseExpectations, EvaluationScorerOutput, OutcomeAssertion
 
 #: Tool executions in this set actually ran a handler — as opposed to being
 #: gated/terminated by policy before the handler was ever invoked (section
@@ -178,7 +178,7 @@ def _score_approval_behavior(
 
 
 def _evaluate_outcome_assertion(
-    assertion,
+    assertion: OutcomeAssertion,
     *,
     agent_run: AgentRun,
     tool_executions: list[ToolExecution],

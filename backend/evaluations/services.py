@@ -368,7 +368,16 @@ def execute_evaluation_case(result_id: uuid.UUID | str) -> EvaluationResult:
             )
 
         agent_run = _create_evaluation_agent_run(run=run, snapshot=snapshot)
-        agent_run = agent_services.claim_agent_run(agent_run.id)
+        claimed_agent_run = agent_services.claim_agent_run(agent_run.id)
+        if claimed_agent_run is None:  # pragma: no cover - defensive: a fresh run is never
+            # already claimed by anything else.
+            finalize_domain_span(span, outcome="agent_execution_failed", is_error=True)
+            return _terminate_result(
+                claimed,
+                failure_code=EvaluationFailureCode.AGENT_EXECUTION_FAILED,
+                failure_message_safe="The agent run could not be claimed for execution.",
+            )
+        agent_run = claimed_agent_run
         try:
             agent_run = agent_services.execute_claimed_agent_run(agent_run, provider=fake_provider)
         except Exception:  # noqa: BLE001 - a harness/provider failure, not a case assertion failure
