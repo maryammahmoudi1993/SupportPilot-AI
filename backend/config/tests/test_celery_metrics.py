@@ -89,9 +89,140 @@ class TestOnWorkerInit:
         settings.OBSERVABILITY_CELERY_PROMETHEUS_MULTIPROC_DIR = str(tmp_path / "multiproc")
 
         with patch.object(
-            celery_metrics, "_setup_multiproc_dir", side_effect=RuntimeError("disk full")
+            celery_metrics, "_start_exposition_server", side_effect=RuntimeError("port taken")
         ):
             celery_metrics.on_worker_init()  # must not raise
+
+    def test_no_longer_sets_up_the_multiproc_dir_itself(self, settings, tmp_path):
+        """Regression (Block 6 production smoke): the directory/env-var
+        setup must happen at ``config/celery.py`` import time via
+        :func:`celery_metrics.setup_multiproc_dir_if_worker_process`, not
+        here — see that function's docstring for why waiting for
+        ``worker_init`` is always too late in a real worker process."""
+        settings.OBSERVABILITY_CELERY_METRICS_ENABLED = True
+        settings.OBSERVABILITY_CELERY_PROMETHEUS_MULTIPROC_DIR = str(tmp_path / "multiproc")
+
+        with patch.object(celery_metrics, "_setup_multiproc_dir") as mock_setup:
+            with patch.object(celery_metrics, "_start_exposition_server"):
+                celery_metrics.on_worker_init()
+
+        mock_setup.assert_not_called()
+
+
+class TestLooksLikeWorkerInvocation:
+    def test_true_for_a_real_celery_worker_argv(self, monkeypatch):
+        monkeypatch.setattr(
+            sys, "argv", ["/usr/local/bin/celery", "-A", "config", "worker", "--loglevel=info"]
+        )
+        assert celery_metrics._looks_like_worker_invocation() is True
+
+    def test_false_for_beat(self, monkeypatch):
+        monkeypatch.setattr(sys, "argv", ["/usr/local/bin/celery", "-A", "config", "beat"])
+        assert celery_metrics._looks_like_worker_invocation() is False
+
+    def test_false_for_gunicorn(self, monkeypatch):
+        monkeypatch.setattr(sys, "argv", ["/usr/local/bin/gunicorn", "config.wsgi:application"])
+        assert celery_metrics._looks_like_worker_invocation() is False
+
+    def test_false_for_a_management_command(self, monkeypatch):
+        monkeypatch.setattr(sys, "argv", ["manage.py", "migrate"])
+        assert celery_metrics._looks_like_worker_invocation() is False
+
+
+class TestSetupMultiprocDirIfWorkerProcess:
+    """Regression for the Block 6 production-smoke defect: Celery's own
+    ``WorkController.setup_instance`` accesses ``app.tasks`` (triggering
+    task-module autodiscovery, which transitively imports
+    ``observability.metrics``) *before* it fires ``worker_init`` — so a real
+    worker process must have ``PROMETHEUS_MULTIPROC_DIR`` set before that
+    autodiscovery happens, not from the ``worker_init`` handler."""
+
+    def test_noop_when_not_a_worker_invocation(self, settings, tmp_path, monkeypatch):
+        monkeypatch.setattr(sys, "argv", ["/usr/local/bin/gunicorn", "config.wsgi:application"])
+        settings.OBSERVABILITY_CELERY_METRICS_ENABLED = True
+        settings.OBSERVABILITY_CELERY_PROMETHEUS_MULTIPROC_DIR = str(tmp_path / "unused")
+
+        with patch.object(celery_metrics, "_setup_multiproc_dir") as mock_setup:
+            celery_metrics.setup_multiproc_dir_if_worker_process()
+
+        mock_setup.assert_not_called()
+
+    def test_noop_when_metrics_disabled(self, settings, tmp_path, monkeypatch):
+        monkeypatch.setattr(sys, "argv", ["/usr/local/bin/celery", "-A", "config", "worker"])
+        settings.OBSERVABILITY_CELERY_METRICS_ENABLED = False
+        settings.OBSERVABILITY_CELERY_PROMETHEUS_MULTIPROC_DIR = str(tmp_path / "unused")
+
+        with patch.object(celery_metrics, "_setup_multiproc_dir") as mock_setup:
+            celery_metrics.setup_multiproc_dir_if_worker_process()
+
+        mock_setup.assert_not_called()
+
+    def test_sets_up_the_directory_for_a_real_worker_invocation(
+        self, settings, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(sys, "argv", ["/usr/local/bin/celery", "-A", "config", "worker"])
+        settings.OBSERVABILITY_CELERY_METRICS_ENABLED = True
+        target_dir = tmp_path / "multiproc"
+        settings.OBSERVABILITY_CELERY_PROMETHEUS_MULTIPROC_DIR = str(target_dir)
+
+        try:
+            celery_metrics.setup_multiproc_dir_if_worker_process()
+
+            assert os.environ["PROMETHEUS_MULTIPROC_DIR"] == str(target_dir)
+            assert target_dir.is_dir()
+        finally:
+            os.environ.pop("PROMETHEUS_MULTIPROC_DIR", None)
+
+    def test_setup_failure_is_caught_worker_still_starts(self, settings, tmp_path, monkeypatch):
+        monkeypatch.setattr(sys, "argv", ["/usr/local/bin/celery", "-A", "config", "worker"])
+        settings.OBSERVABILITY_CELERY_METRICS_ENABLED = True
+        settings.OBSERVABILITY_CELERY_PROMETHEUS_MULTIPROC_DIR = str(tmp_path / "multiproc")
+
+        with patch.object(
+            celery_metrics, "_setup_multiproc_dir", side_effect=RuntimeError("disk full")
+        ):
+            celery_metrics.setup_multiproc_dir_if_worker_process()  # must not raise
+
+    def test_real_worker_bootstrap_order_now_binds_the_multiprocess_value_class(self):
+        """The actual end-to-end proof: reproduce Celery's own bootstrap
+        order (``config.celery`` import, then simulate ``setup_includes``'s
+        ``app.tasks`` access — the exact sequence ``WorkController`` uses)
+        in a fresh subprocess with ``sys.argv`` set as a real worker
+        invocation, and confirm ``prometheus_client.values.ValueClass`` ends
+        up bound to the multiprocess-aware class, not ``MutexValue``. Before
+        the fix, this assertion failed because task-module autodiscovery
+        (via ``app.tasks``) imported ``observability.metrics`` — and
+        therefore ``prometheus_client.values`` — before any code had a
+        chance to set ``PROMETHEUS_MULTIPROC_DIR``."""
+        backend_root = str(__import__("pathlib").Path(__file__).parent.parent.parent)
+        child_script = textwrap.dedent(f"""
+            import os
+            import sys
+            sys.argv = ["/usr/local/bin/celery", "-A", "config", "worker", "--loglevel=info"]
+            os.environ["OBSERVABILITY_CELERY_METRICS_ENABLED"] = "True"
+            os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
+            sys.path.insert(0, {backend_root!r})
+
+            import config.celery  # noqa: F401 - runs the real module-level bootstrap
+
+            # Mirror WorkController.setup_instance: setup_includes() accesses
+            # app.tasks before worker_init ever fires.
+            _ = config.celery.app.tasks
+
+            import prometheus_client.values as v
+            assert v.ValueClass._multiprocess is True, (
+                f"expected multiprocess ValueClass, got {{v.ValueClass}}"
+            )
+            print("OK")
+            """)
+        result = subprocess.run(
+            [sys.executable, "-c", child_script],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert result.returncode == 0, result.stderr
+        assert "OK" in result.stdout
 
 
 class TestChildProcessesNeverBindThePort:

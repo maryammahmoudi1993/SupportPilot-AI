@@ -10,7 +10,11 @@ problem, using Celery's own process-lifecycle signals in place of
 Gunicorn's server hooks::
 
     Celery worker main process (parent, pre-fork)
-        |  worker_init: fresh PROMETHEUS_MULTIPROC_DIR, one HTTP listener
+        |  config/celery.py import time (before app.autodiscover_tasks()):
+        |  fresh PROMETHEUS_MULTIPROC_DIR — see
+        |  ``setup_multiproc_dir_if_worker_process`` below for why this
+        |  cannot wait for the worker_init signal
+        |  worker_init: one HTTP listener
         v
     prefork children (inherit the env var via fork; never bind a port)
         |  each writes its own per-PID mmap files under that directory
@@ -54,6 +58,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -127,6 +132,57 @@ def _setup_multiproc_dir() -> None:
     os.environ["PROMETHEUS_MULTIPROC_DIR"] = multiproc_dir
 
 
+def _looks_like_worker_invocation() -> bool:
+    """True only for a process actually launched as ``celery ... worker
+    ...`` — the one case that needs ``PROMETHEUS_MULTIPROC_DIR`` set before
+    any task-module import happens (see :func:`setup_multiproc_dir_if_worker_process`).
+    Deliberately conservative: Beat (``celery ... beat ...``), a Django
+    management command, and Gunicorn all leave ``sys.argv`` without
+    ``"worker"`` as its own token, so this stays a no-op for them — this
+    module must never touch the filesystem or an env var for a process that
+    isn't actually about to become a Celery worker."""
+    if "worker" not in sys.argv:
+        return False
+    return os.path.basename(sys.argv[0]).startswith("celery")
+
+
+def setup_multiproc_dir_if_worker_process() -> None:
+    """Call once, at ``config/celery.py`` import time, *before*
+    ``app.autodiscover_tasks()``/anything else that touches ``app.tasks``.
+
+    This used to be part of :func:`on_worker_init` below, on the assumption
+    that ``worker_init`` fires before any task module (and therefore
+    ``observability.metrics``) is imported. That assumption is false:
+    Celery's own ``WorkController.setup_instance`` calls ``setup_includes``,
+    which accesses ``app.tasks`` (finalizing the app and running task-module
+    autodiscovery) *before* it sends ``worker_init`` — so by the time
+    ``on_worker_init`` used to run ``_setup_multiproc_dir()``,
+    ``prometheus_client.values.ValueClass`` had already bound itself to
+    single-process ``MutexValue`` (it decides this exactly once, at first
+    import of that module, and never re-checks the environment again).
+    Every Celery-recorded metric was silently kept in that worker's own
+    memory forever and never reached a scrape — Block 6 production smoke
+    testing caught this because it exercises a real ``celery worker``
+    process end-to-end; the existing unit tests did not, because they
+    control import order directly rather than going through Celery's own
+    bootstrap.
+
+    Fails open and touches nothing (no directory, no env var) unless this
+    process both looks like a genuine worker invocation
+    (:func:`_looks_like_worker_invocation`) and has metrics enabled — every
+    other process that imports ``config.celery`` (Gunicorn, Beat, a
+    management command) must never have its own ``PROMETHEUS_MULTIPROC_DIR``
+    disturbed by this module."""
+    if not _looks_like_worker_invocation():
+        return
+    if not settings.OBSERVABILITY_CELERY_METRICS_ENABLED:
+        return
+    try:
+        _setup_multiproc_dir()
+    except Exception:  # noqa: BLE001 - telemetry must fail open
+        logger.warning("celery_metrics_init_failed", extra={"event": "celery_metrics_error"})
+
+
 def _start_exposition_server() -> None:
     """Bind exactly once, in the parent, before any prefork child exists.
     Idempotent (module-level guard) so a redundant ``worker_init`` dispatch
@@ -175,13 +231,16 @@ def reset_for_tests() -> None:
 @worker_init.connect
 def on_worker_init(**kwargs) -> None:  # noqa: ARG001 - required Celery signal signature
     """Runs once, in the worker *master* process, before the prefork pool
-    forks any child (mirrors ``config/gunicorn_conf.py::on_starting``).
-    Fails open: a broken exposition setup must never prevent the worker
-    from starting and processing tasks."""
+    forks any child. Starts the parent-owned exposition HTTP listener only
+    — the multiprocess directory itself is already set by
+    :func:`setup_multiproc_dir_if_worker_process` at ``config/celery.py``
+    import time, well before this signal fires (see that function's
+    docstring for why doing it here, as this used to, is too late). Fails
+    open: a broken exposition setup must never prevent the worker from
+    starting and processing tasks."""
     if not settings.OBSERVABILITY_CELERY_METRICS_ENABLED:
         return
     try:
-        _setup_multiproc_dir()
         _start_exposition_server()
     except Exception:  # noqa: BLE001 - telemetry must fail open
         logger.warning("celery_metrics_init_failed", extra={"event": "celery_metrics_error"})
