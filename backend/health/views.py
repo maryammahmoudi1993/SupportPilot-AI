@@ -28,6 +28,12 @@ class HealthCheckView(APIView):
     """Liveness endpoint: process is up. Does not touch any dependency."""
 
     permission_classes = [AllowAny]
+    # No credential is ever checked here — declared explicitly (matching the
+    # established pattern for every other unauthenticated endpoint, e.g.
+    # accounts.CsrfTokenView, channel_ingress's public views) so the OpenAPI
+    # schema doesn't advertise jwtAuth/cookieAuth as accepted on an endpoint
+    # that never inspects them (Section 11/66).
+    authentication_classes = []
 
     @extend_schema(responses=HealthStatusSerializer)
     def get(self, request):
@@ -45,6 +51,7 @@ class ReadinessView(APIView):
     """
 
     permission_classes = [AllowAny]
+    authentication_classes = []  # see HealthCheckView — same rationale
 
     @extend_schema(responses=HealthStatusSerializer)
     def get(self, request):
