@@ -51,6 +51,11 @@ env = environ.Env(
     KNOWLEDGE_INGESTION_MAX_ATTEMPTS=(int, 3),
     AUTH_LOGIN_THROTTLE_RATE=(str, "10/min"),
     AUTH_REFRESH_THROTTLE_RATE=(str, "30/min"),
+    # Phase 14 (Section 19-20): execution-triggering endpoints get their own
+    # bounded categories distinct from ordinary reads/writes — these run
+    # real agent/evaluation work, not a cheap CRUD operation.
+    AGENT_EXECUTION_THROTTLE_RATE=(str, "30/min"),
+    EVALUATION_EXECUTION_THROTTLE_RATE=(str, "20/min"),
     # AI provider layer (Phase 5). The default is the deterministic offline
     # provider so the application boots and every normal test/CI path runs
     # without paid credentials. The real provider is strictly opt-in.
@@ -346,6 +351,8 @@ REST_FRAMEWORK = {
         "channel_webchat_session": env("CHANNEL_WEBCHAT_SESSION_THROTTLE_RATE"),
         "channel_webchat_message": env("CHANNEL_WEBCHAT_MESSAGE_THROTTLE_RATE"),
         "channel_inbound_webhook": env("CHANNEL_INBOUND_WEBHOOK_THROTTLE_RATE"),
+        "agent_execution": env("AGENT_EXECUTION_THROTTLE_RATE"),
+        "evaluation_execution": env("EVALUATION_EXECUTION_THROTTLE_RATE"),
     },
 }
 

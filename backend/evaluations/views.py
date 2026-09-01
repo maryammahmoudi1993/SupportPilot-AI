@@ -7,6 +7,7 @@ from django.http import Http404
 from drf_spectacular.utils import OpenApiResponse, extend_schema
 from rest_framework import generics, status
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from agents.models import AgentVersion
@@ -190,6 +191,14 @@ class EvaluationRunListCreateView(WorkspaceScopedMixin, generics.ListCreateAPIVi
             return [CanViewEvaluations(), CanRunEvaluations()]
         return [CanViewEvaluations()]
 
+    def get_throttles(self):
+        # Only the execution-triggering POST is rate-limited (Section 19-20:
+        # EVALUATION_EXECUTION scope) — listing existing runs is unthrottled.
+        if self.request.method == "POST":
+            self.throttle_scope = "evaluation_execution"
+            return [ScopedRateThrottle()]
+        return super().get_throttles()
+
     def get_serializer_class(self):
         return (
             EvaluationRunCreateSerializer
@@ -311,6 +320,9 @@ class EvaluationResultDetailView(WorkspaceScopedMixin, APIView):
 
 
 class EvaluationResultReplayView(WorkspaceScopedMixin, APIView):
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "evaluation_execution"
+
     def get_permissions(self):
         return [CanViewEvaluations(), CanRunEvaluations()]
 

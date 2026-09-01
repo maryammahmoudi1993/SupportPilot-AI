@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+from unittest import mock
+
 import pytest
+from django.core.cache import cache
 from rest_framework.test import APIClient
+from rest_framework.throttling import ScopedRateThrottle
 
 from agents.tests.factories import PublishedAgentVersionFactory
 from workspaces.models import WorkspaceRole
@@ -205,6 +209,34 @@ class TestRunApi:
         )
         assert cancel_again.status_code == 409
 
+    def test_run_creation_is_rate_limited_but_listing_is_not(self):
+        # Regression (Phase 14, Section 19-20/24): EVALUATION_EXECUTION
+        # throttling must apply only to the run-triggering POST.
+        cache.clear()
+        membership = WorkspaceMembershipFactory(role=WorkspaceRole.OWNER)
+        dataset, version = self._dataset_and_version(membership.workspace)
+        client = _client(membership.user)
+
+        with mock.patch.dict(ScopedRateThrottle.THROTTLE_RATES, {"evaluation_execution": "1/min"}):
+            first = client.post(
+                f"{_base(membership.workspace)}/runs/",
+                {"dataset_id": str(dataset.id), "agent_version_id": str(version.id)},
+                format="json",
+            )
+            assert first.status_code == 201
+
+            second = client.post(
+                f"{_base(membership.workspace)}/runs/",
+                {"dataset_id": str(dataset.id), "agent_version_id": str(version.id)},
+                format="json",
+            )
+            assert second.status_code == 429
+            assert second.data["error"]["code"] == "rate_limited"
+
+            listing = client.get(f"{_base(membership.workspace)}/runs/")
+            assert listing.status_code == 200
+        cache.clear()
+
     def test_run_detail_is_tenant_scoped(self):
         membership = WorkspaceMembershipFactory(role=WorkspaceRole.VIEWER)
         dataset, version = self._dataset_and_version(WorkspaceFactory())
@@ -240,6 +272,34 @@ class TestReplayAndCompareApi:
         )
         assert response.status_code == 201
         assert response.data["replay_of_id"] == str(result.id)
+
+    def test_replay_is_rate_limited(self):
+        cache.clear()
+        membership = WorkspaceMembershipFactory(role=WorkspaceRole.OWNER)
+        dataset = EvaluationDatasetFactory(workspace=membership.workspace)
+        EvaluationCaseFactory(dataset=dataset)
+        version = PublishedAgentVersionFactory(agent_definition__workspace=membership.workspace)
+        run = services.start_evaluation_run(
+            workspace=membership.workspace,
+            actor=membership.user,
+            dataset=dataset,
+            agent_version=version,
+        )
+        result = services.execute_evaluation_case(run.results.get().id)
+        client = _client(membership.user)
+
+        with mock.patch.dict(ScopedRateThrottle.THROTTLE_RATES, {"evaluation_execution": "1/min"}):
+            first = client.post(
+                f"{_base(membership.workspace)}/runs/{run.id}/results/{result.id}/replay/"
+            )
+            assert first.status_code == 201
+
+            second = client.post(
+                f"{_base(membership.workspace)}/runs/{run.id}/results/{result.id}/replay/"
+            )
+            assert second.status_code == 429
+            assert second.data["error"]["code"] == "rate_limited"
+        cache.clear()
 
     def test_compare_rejects_incompatible_runs(self):
         membership = WorkspaceMembershipFactory(role=WorkspaceRole.OWNER)

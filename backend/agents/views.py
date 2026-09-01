@@ -6,6 +6,7 @@ from django.http import Http404
 from drf_spectacular.utils import OpenApiResponse, extend_schema
 from rest_framework import generics, status
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from common.exceptions import ConflictError, SafeAPIError
@@ -173,6 +174,15 @@ class AgentRunListCreateView(WorkspaceScopedMixin, generics.ListCreateAPIView):
         if self.request.method == "POST":
             return [IsWorkspaceMember(), CanRunAgents()]
         return [IsWorkspaceMember()]
+
+    def get_throttles(self):
+        # Only the execution-triggering POST is rate-limited (Section 19-20:
+        # AGENT_EXECUTION scope) — listing existing runs stays unthrottled
+        # like every other read endpoint.
+        if self.request.method == "POST":
+            self.throttle_scope = "agent_execution"
+            return [ScopedRateThrottle()]
+        return super().get_throttles()
 
     def get_serializer_class(self):
         return AgentRunCreateSerializer if self.request.method == "POST" else AgentRunSerializer
