@@ -16,8 +16,8 @@ Two distinct trust boundaries, kept conceptually and structurally separate
 from __future__ import annotations
 
 from django.http import Http404
-from drf_spectacular.utils import extend_schema
-from rest_framework import generics, status
+from drf_spectacular.utils import OpenApiExample, extend_schema, inline_serializer
+from rest_framework import generics, serializers, status
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
@@ -305,7 +305,29 @@ class ChatMessageListCreateView(APIView):
     throttle_scope = "channel_webchat_message"
 
     @extend_schema(
-        request=ChatMessageSubmitSerializer, responses=ChatMessageSubmitResponseSerializer
+        request=ChatMessageSubmitSerializer,
+        responses={202: ChatMessageSubmitResponseSerializer},
+        examples=[
+            OpenApiExample(
+                "Submit message",
+                value={
+                    "client_message_id": "web-client-0f3a9c",
+                    "body": "My order hasn't arrived.",
+                },
+                request_only=True,
+            ),
+            OpenApiExample(
+                "Accepted",
+                summary="Accepted (first submission or an idempotent replay of the same "
+                "client_message_id — both return 202 with the same message_id)",
+                value={
+                    "accepted": True,
+                    "message_id": "6f9e2d3a-6b1a-4e9a-9c3a-7b1e2d3a4f5c",
+                },
+                response_only=True,
+                status_codes=["202"],
+            ),
+        ],
     )
     def post(self, request, session_token):
         try:
@@ -346,7 +368,29 @@ class InboundWebhookView(APIView):
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "channel_inbound_webhook"
 
-    @extend_schema(request=None, responses=None)
+    @extend_schema(
+        request=None,
+        responses={
+            202: inline_serializer(
+                "InboundWebhookAccepted",
+                fields={
+                    "accepted": serializers.BooleanField(),
+                    "event_id": serializers.UUIDField(),
+                },
+            )
+        },
+        examples=[
+            OpenApiExample(
+                "Accepted",
+                summary="Accepted — both a first delivery and an authenticated, byte-identical "
+                "redelivery of the same provider event return 202 with the same event_id "
+                "(Section 53: duplicate delivery is an idempotent accept, not a failure).",
+                value={"accepted": True, "event_id": "9c1e2d3a-4b5c-4d6e-8f7a-1b2c3d4e5f6a"},
+                response_only=True,
+                status_codes=["202"],
+            ),
+        ],
+    )
     def post(self, request, endpoint_id):
         endpoint = ChannelEndpoint.objects.filter(pk=endpoint_id).first()
         if endpoint is None:

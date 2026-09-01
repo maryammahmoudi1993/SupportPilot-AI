@@ -12,6 +12,7 @@ from rest_framework.views import APIView
 
 from agents.models import AgentVersion
 from common.exceptions import ConflictError, SafeAPIError
+from common.schema import RATE_LIMITED_EXAMPLE, error_response
 from workspaces.views import WorkspaceScopedMixin
 
 from . import selectors, services
@@ -215,6 +216,12 @@ class EvaluationRunListCreateView(WorkspaceScopedMixin, generics.ListCreateAPIVi
             dataset_id=self.request.query_params.get("dataset_id"),
         )
 
+    @extend_schema(
+        responses={
+            201: EvaluationRunSerializer,
+            429: error_response("Too many run requests.", examples=[RATE_LIMITED_EXAMPLE]),
+        },
+    )
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)

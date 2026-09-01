@@ -10,6 +10,7 @@ from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from common.exceptions import ConflictError, SafeAPIError
+from common.schema import RATE_LIMITED_EXAMPLE, error_response
 from conversations.selectors import (
     conversation_get_for_workspace_or_404,
     message_get_for_workspace_or_404,
@@ -196,6 +197,12 @@ class AgentRunListCreateView(WorkspaceScopedMixin, generics.ListCreateAPIView):
             agent_definition_id=self.request.query_params.get("agent_id"),
         )
 
+    @extend_schema(
+        responses={
+            201: AgentRunSerializer,
+            429: error_response("Too many run requests.", examples=[RATE_LIMITED_EXAMPLE]),
+        },
+    )
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
