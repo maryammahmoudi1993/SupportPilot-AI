@@ -1,6 +1,14 @@
 """Tests for the standardized `{"error": {...}}` API error envelope."""
 
-from rest_framework.exceptions import APIException, NotFound, ValidationError
+from rest_framework.exceptions import (
+    APIException,
+    AuthenticationFailed,
+    NotAuthenticated,
+    NotFound,
+    PermissionDenied,
+    Throttled,
+    ValidationError,
+)
 from rest_framework.views import APIView
 
 from common.exceptions import ConflictError, custom_exception_handler
@@ -32,7 +40,39 @@ class TestCustomExceptionHandler:
         assert response is not None
         assert response.status_code == 404
         assert "error" in response.data
-        assert response.data["error"]["code"] == "validation_error"
+        assert response.data["error"]["code"] == "not_found"
+
+    def test_not_authenticated_maps_to_stable_authentication_failed_code(self):
+        response = custom_exception_handler(NotAuthenticated(), _context())
+
+        assert response.status_code == 401
+        assert response.data["error"]["code"] == "authentication_failed"
+
+    def test_authentication_failed_maps_to_stable_authentication_failed_code(self):
+        response = custom_exception_handler(AuthenticationFailed(), _context())
+
+        assert response.status_code == 401
+        assert response.data["error"]["code"] == "authentication_failed"
+
+    def test_permission_denied_maps_to_stable_permission_denied_code(self):
+        response = custom_exception_handler(PermissionDenied(), _context())
+
+        assert response.status_code == 403
+        assert response.data["error"]["code"] == "permission_denied"
+
+    def test_throttled_maps_to_stable_rate_limited_code_with_retry_after(self):
+        response = custom_exception_handler(Throttled(wait=12), _context())
+
+        assert response.status_code == 429
+        assert response.data["error"]["code"] == "rate_limited"
+        assert response.data["error"]["details"]["retry_after"] == 12
+
+    def test_throttled_without_wait_omits_retry_after_details(self):
+        response = custom_exception_handler(Throttled(), _context())
+
+        assert response.status_code == 429
+        assert response.data["error"]["code"] == "rate_limited"
+        assert "details" not in response.data["error"]
 
     def test_leaves_an_already_enveloped_response_untouched(self):
         exc = APIException()
