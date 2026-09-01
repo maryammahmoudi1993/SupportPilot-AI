@@ -26,6 +26,11 @@ from common.models import BaseModel
 class DeliveryChannel(models.TextChoices):
     NOTIFICATION = "notification", "Notification"
     WEBHOOK = "webhook", "Webhook"
+    # Phase 13: an agent's customer-visible reply routed back out to the
+    # channel (e.g. email) its triggering message arrived on. Registered by
+    # ``channel_ingress.apps.ChannelIngressConfig.ready`` exactly like the
+    # two channels above register themselves.
+    CHANNEL_RESPONSE = "channel_response", "Channel response"
 
 
 class DeliveryStatus(models.TextChoices):

@@ -199,7 +199,7 @@ def create_agent_run(
     *,
     workspace: Workspace,
     agent_version: AgentVersion,
-    actor: User,
+    actor: User | None,
     input_message: str,
     trigger: str,
     conversation=None,
@@ -940,6 +940,36 @@ def _schedule_agent_run_terminal_observation(
     transaction.on_commit(_record)
 
 
+def _schedule_channel_response_routing(run: AgentRun) -> None:
+    """Phase 13 (section 32, 39, 54): if this run's customer-visible reply
+    originated from a channel that needs an external outbound delivery
+    (currently: email), create the durable ``Delivery`` for it once the
+    enclosing transaction commits — never inside the ``atomic()`` block
+    itself, so a later rollback never creates a phantom delivery.
+
+    Deliberately fail-open (mirrors ``_schedule_agent_run_terminal_observation``):
+    a channel-routing failure must never surface as an agent-run failure —
+    the run already succeeded/handed-off; only the *delivery* of its
+    response is at stake here, and that has its own durable retry engine.
+    Lazily imported to avoid a module-load-time dependency from ``agents``
+    (a Phase 9 app) onto ``channel_ingress`` (Phase 13).
+    """
+    run_id = str(run.id)
+
+    def _route() -> None:
+        from channel_ingress.response_delivery import route_channel_response
+
+        try:
+            route_channel_response(run=run)
+        except Exception:  # noqa: BLE001 - fail-open, see docstring
+            logger.warning(
+                "channel_response_routing_failed",
+                extra={"event": "channel_response_routing_failed", "agent_run_id": run_id},
+            )
+
+    transaction.on_commit(_route)
+
+
 def _schedule_cancelled_tool_execution_observations(
     observations: list[tuple[str, float | None]],
 ) -> None:
@@ -1112,6 +1142,7 @@ def _complete_run_as_handoff(run: AgentRun, result: Mapping[str, Any]) -> AgentR
             request_id=locked.correlation_id or None,
         )
         _schedule_agent_run_terminal_observation(locked, outcome="handed_off")
+        _schedule_channel_response_routing(locked)
     return locked
 
 
@@ -1158,6 +1189,7 @@ def _complete_run(
             request_id=locked.correlation_id or None,
         )
         _schedule_agent_run_terminal_observation(locked, outcome="succeeded")
+        _schedule_channel_response_routing(locked)
     return locked
 
 

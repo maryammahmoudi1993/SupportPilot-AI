@@ -619,7 +619,7 @@ def observe_evaluation_regression(*, category: str) -> None:
 # text (section 5 of the Block 4 brief — a hard gate, no exceptions).
 # ---------------------------------------------------------------------------
 
-_DELIVERY_CHANNELS = frozenset({"notification", "webhook"})
+_DELIVERY_CHANNELS = frozenset({"notification", "webhook", "channel_response"})
 
 
 def _delivery_channel_label(channel: str) -> str:
@@ -1093,6 +1093,89 @@ def refresh_delivery_backlog_gauges(*, now=None) -> None:
             )
     except Exception:  # noqa: BLE001 - telemetry must fail open
         logger.warning("delivery_backlog_gauge_refresh_failed", extra={"event": "metrics_error"})
+
+
+# ---------------------------------------------------------------------------
+# Multi-channel ingress (Phase 13) — every label is a small, bounded,
+# code-owned enum value (``ChannelType``/a fixed outcome/failure-taxonomy
+# set); never a workspace/customer/conversation/message/provider-event id,
+# email address, phone number, session token, or raw provider name (section
+# 47).
+# ---------------------------------------------------------------------------
+
+_CHANNEL_TYPES = frozenset({"web_chat", "email", "generic_webhook"})
+
+
+def _channel_label(channel: str) -> str:
+    return channel if channel in _CHANNEL_TYPES else "generic_webhook"
+
+
+CHANNEL_INGRESS_TOTAL = Counter(
+    f"{METRIC_NAMESPACE}_channel_ingress_total",
+    "Total inbound channel events received, by channel.",
+    ["channel"],
+)
+
+
+def observe_channel_ingress_received(*, channel: str) -> None:
+    """The single call site for a newly-committed ``InboundChannelEvent``
+    row (``channel_ingress/services.py``'s ``ingest_channel_event``,
+    scheduled via ``transaction.on_commit`` so a rolled-back creation is
+    never counted — a duplicate delivery that resolves to the existing row
+    never calls this a second time, by construction)."""
+    CHANNEL_INGRESS_TOTAL.labels(channel=_channel_label(channel)).inc()
+
+
+_CHANNEL_INGRESS_OUTCOMES = frozenset({"processed", "failed"})
+
+CHANNEL_INGRESS_PROCESSING_SECONDS = Histogram(
+    f"{METRIC_NAMESPACE}_channel_ingress_processing_seconds",
+    "Inbound channel event processing duration in seconds, by channel and outcome.",
+    ["channel", "outcome"],
+    buckets=(0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60),
+)
+
+
+def observe_channel_ingress_terminal(
+    *, channel: str, outcome: str, duration_seconds: float | None
+) -> None:
+    """The single call site for a terminal (``processed``/``failed``)
+    inbound channel event, observed from
+    ``channel_ingress.services.process_inbound_channel_event``."""
+    if duration_seconds is None:
+        return
+    outcome_label = outcome if outcome in _CHANNEL_INGRESS_OUTCOMES else "failed"
+    CHANNEL_INGRESS_PROCESSING_SECONDS.labels(
+        channel=_channel_label(channel), outcome=outcome_label
+    ).observe(duration_seconds)
+
+
+CHANNEL_INGRESS_DUPLICATES_TOTAL = Counter(
+    f"{METRIC_NAMESPACE}_channel_ingress_duplicates_total",
+    "Total inbound channel events recognized as a duplicate of an existing event, by channel.",
+    ["channel"],
+)
+
+
+def observe_channel_ingress_duplicate(*, channel: str) -> None:
+    """The single call site for a request that resolved to an *existing*
+    ``InboundChannelEvent`` row rather than creating a new one (section 11)."""
+    CHANNEL_INGRESS_DUPLICATES_TOTAL.labels(channel=_channel_label(channel)).inc()
+
+
+CHANNEL_SIGNATURE_FAILURES_TOTAL = Counter(
+    f"{METRIC_NAMESPACE}_channel_signature_failures_total",
+    "Total inbound webhook signature verification failures, by channel.",
+    ["channel"],
+)
+
+
+def observe_channel_signature_failure(*, channel: str) -> None:
+    """The single call site for a rejected inbound signature (section 21) —
+    never distinguishes *why* it failed in the metric itself (that
+    distinction belongs to the safe failure-code taxonomy, not a
+    Prometheus label — section 47's bounded-cardinality rule)."""
+    CHANNEL_SIGNATURE_FAILURES_TOTAL.labels(channel=_channel_label(channel)).inc()
 
 
 # ---------------------------------------------------------------------------

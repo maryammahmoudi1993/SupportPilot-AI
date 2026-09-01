@@ -39,6 +39,7 @@ services:
       ALLOWED_HOSTS: localhost,127.0.0.1,backend
       DATABASE_URL: postgres://postgres:postgres@db:5432/supportpilot
       REDIS_URL: redis://redis:6379/0
+      CACHE_URL: redis://redis:6379/1
     depends_on:
       db:
         condition: service_healthy
@@ -57,6 +58,7 @@ services:
       ALLOWED_HOSTS: localhost,127.0.0.1
       DATABASE_URL: postgres://postgres:postgres@db:5432/supportpilot
       REDIS_URL: redis://redis:6379/0
+      CACHE_URL: redis://redis:6379/1
     depends_on:
       db:
         condition: service_healthy

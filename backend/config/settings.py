@@ -124,6 +124,27 @@ env = environ.Env(
     # raising ``max_attempts`` — never resets ``attempt_count`` or erases
     # attempt history. Server-owned only; never client-supplied.
     WEBHOOKS_REDRIVE_ATTEMPT_ALLOWANCE=(int, 3),
+    # Multi-channel ingress (Phase 13). Public/edge-facing endpoints get
+    # their own bounded limits (section 22) — never the workspace-API
+    # pagination/body defaults, since these requests are never authenticated
+    # as a workspace member.
+    CHANNELS_MAX_INBOUND_BODY_BYTES=(int, 256 * 1024),
+    CHANNELS_MAX_MESSAGE_BODY_LENGTH=(int, 20_000),
+    # HMAC signature freshness tolerance (section 19-20) — independent of,
+    # and in addition to, provider-event deduplication (section 20).
+    CHANNELS_SIGNATURE_MAX_PAST_SKEW_SECONDS=(int, 300),
+    CHANNELS_SIGNATURE_MAX_FUTURE_SKEW_SECONDS=(int, 60),
+    # A web-chat session capability's lifetime (section 17) — server-owned,
+    # never client-extendable.
+    CHANNELS_CHAT_SESSION_TTL_SECONDS=(int, 60 * 60 * 24),
+    # Bounded batch size for the stuck-inbound-event recovery sweeper
+    # (section 35, mirrors ``DELIVERY_SWEEP_BATCH_SIZE``).
+    CHANNELS_INBOUND_SWEEP_BATCH_SIZE=(int, 100),
+    CHANNELS_INBOUND_SWEEP_STALE_SECONDS=(int, 120),
+    CHANNELS_INBOUND_SWEEP_INTERVAL_SECONDS=(float, 30.0),
+    CHANNEL_WEBCHAT_SESSION_THROTTLE_RATE=(str, "30/min"),
+    CHANNEL_WEBCHAT_MESSAGE_THROTTLE_RATE=(str, "60/min"),
+    CHANNEL_INBOUND_WEBHOOK_THROTTLE_RATE=(str, "120/min"),
     # Production observability (Phase 11 Block 1). Metrics are bounded,
     # low-cardinality, vendor-neutral Prometheus exposition — never a
     # business/tenant data API (section 26-27). Enabled by default so the
@@ -200,6 +221,7 @@ INSTALLED_APPS = [
     "approvals.apps.ApprovalsConfig",
     "notifications.apps.NotificationsConfig",
     "webhooks.apps.WebhooksConfig",
+    "channel_ingress.apps.ChannelIngressConfig",
     "observability.apps.ObservabilityConfig",
     "evaluations.apps.EvaluationsConfig",
     "audit.apps.AuditConfig",
@@ -321,6 +343,9 @@ REST_FRAMEWORK = {
     "DEFAULT_THROTTLE_RATES": {
         "login": env("AUTH_LOGIN_THROTTLE_RATE"),
         "refresh": env("AUTH_REFRESH_THROTTLE_RATE"),
+        "channel_webchat_session": env("CHANNEL_WEBCHAT_SESSION_THROTTLE_RATE"),
+        "channel_webchat_message": env("CHANNEL_WEBCHAT_MESSAGE_THROTTLE_RATE"),
+        "channel_inbound_webhook": env("CHANNEL_INBOUND_WEBHOOK_THROTTLE_RATE"),
     },
 }
 
@@ -335,6 +360,7 @@ SPECTACULAR_SETTINGS = {
         "WorkspaceRoleEnum": "workspaces.models.WorkspaceRole.choices",
         "PriorityEnum": "tickets.models.TicketPriority.choices",
         "ConversationStatusEnum": "conversations.models.ConversationStatus.choices",
+        "ConversationChannelEnum": "conversations.models.ConversationChannel.choices",
         "TicketStatusEnum": "tickets.models.TicketStatus.choices",
         "KnowledgeSourceTypeEnum": "knowledge.models.KnowledgeSourceType.choices",
         "KnowledgeDocumentStatusEnum": "knowledge.models.KnowledgeDocumentStatus.choices",
@@ -370,6 +396,15 @@ SPECTACULAR_SETTINGS = {
         "EvaluationResultStatusEnum": "evaluations.models.EvaluationResultStatus.choices",
         "EvaluationProviderModeEnum": "evaluations.models.EvaluationProviderMode.choices",
         "EvaluationFailureCodeEnum": "evaluations.models.EvaluationFailureCode.choices",
+        "ChannelTypeEnum": "channel_ingress.models.ChannelType.choices",
+        # ChannelEndpointStatus intentionally has no override entry — its
+        # choice set (active/disabled) is byte-identical to
+        # WebhookEndpointStatus's; it shares that auto-resolved enum
+        # instead (see the EvaluationCaseStatus comment above).
+        "UnknownCustomerPolicyEnum": "channel_ingress.models.UnknownCustomerPolicy.choices",
+        "InboundChannelEventStatusEnum": (
+            "channel_ingress.models.InboundChannelEventStatus.choices"
+        ),
     },
 }
 
@@ -517,6 +552,16 @@ WEBHOOKS_MAX_URL_LENGTH = env("WEBHOOKS_MAX_URL_LENGTH")
 
 # Manual redrive (Phase 10 Block 4) — see ``webhooks/services.py``.
 WEBHOOKS_REDRIVE_ATTEMPT_ALLOWANCE = env("WEBHOOKS_REDRIVE_ATTEMPT_ALLOWANCE")
+
+# Multi-channel ingress (Phase 13) — see ``channel_ingress/``.
+CHANNELS_MAX_INBOUND_BODY_BYTES = env("CHANNELS_MAX_INBOUND_BODY_BYTES")
+CHANNELS_MAX_MESSAGE_BODY_LENGTH = env("CHANNELS_MAX_MESSAGE_BODY_LENGTH")
+CHANNELS_SIGNATURE_MAX_PAST_SKEW_SECONDS = env("CHANNELS_SIGNATURE_MAX_PAST_SKEW_SECONDS")
+CHANNELS_SIGNATURE_MAX_FUTURE_SKEW_SECONDS = env("CHANNELS_SIGNATURE_MAX_FUTURE_SKEW_SECONDS")
+CHANNELS_CHAT_SESSION_TTL_SECONDS = env("CHANNELS_CHAT_SESSION_TTL_SECONDS")
+CHANNELS_INBOUND_SWEEP_BATCH_SIZE = env("CHANNELS_INBOUND_SWEEP_BATCH_SIZE")
+CHANNELS_INBOUND_SWEEP_STALE_SECONDS = env("CHANNELS_INBOUND_SWEEP_STALE_SECONDS")
+CHANNELS_INBOUND_SWEEP_INTERVAL_SECONDS = env("CHANNELS_INBOUND_SWEEP_INTERVAL_SECONDS")
 
 # Production observability (Phase 11 Block 1) — see ``observability/metrics.py``
 # and ``observability/views.py``. The metrics endpoint is deployment

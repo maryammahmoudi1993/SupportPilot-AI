@@ -60,7 +60,7 @@ class TriggerMessageMismatchError(AgentError):
 def start_support_agent_run(
     *,
     workspace: Workspace,
-    actor: User,
+    actor: User | None,
     conversation: Conversation,
     trigger_message: Message,
     agent_version: AgentVersion,
@@ -73,6 +73,12 @@ def start_support_agent_run(
     version status/tenancy — is validated here or in ``create_agent_run``;
     none of it is ever taken from client-suppliable fields on the message
     itself.
+
+    ``actor`` is ``None`` for a channel-triggered run (Phase 13,
+    ``channel_ingress.services.process_inbound_channel_event``): an inbound
+    customer message has no authenticated staff user behind it, exactly like
+    ``AgentRun.created_by`` already tolerates for every other non-staff
+    trigger (``on_delete=SET_NULL``).
     """
     if trigger_message.conversation_id != conversation.id:
         raise TriggerMessageMismatchError()
