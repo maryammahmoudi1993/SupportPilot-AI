@@ -48,6 +48,7 @@ from .serializers import (
     ChannelEndpointUpdateSerializer,
     ChannelRotateSecretResponseSerializer,
     ChatMessageSerializer,
+    ChatMessageSubmitResponseSerializer,
     ChatMessageSubmitSerializer,
     ChatSessionBootstrapResponseSerializer,
     InboundChannelEventSerializer,
@@ -303,7 +304,9 @@ class ChatMessageListCreateView(APIView):
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "channel_webchat_message"
 
-    @extend_schema(request=ChatMessageSubmitSerializer)
+    @extend_schema(
+        request=ChatMessageSubmitSerializer, responses=ChatMessageSubmitResponseSerializer
+    )
     def post(self, request, session_token):
         try:
             session = require_session(token=session_token)

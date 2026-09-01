@@ -6,8 +6,10 @@ Celery task wrappers, staff detail/update views, and small webchat edges."""
 from __future__ import annotations
 
 import uuid
+from datetime import timedelta
 
 import pytest
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from agents.tests.factories import PublishedAgentVersionFactory
@@ -290,6 +292,15 @@ def test_list_messages_after_cursor_only_returns_newer_messages():
     session.save(update_fields=["conversation"])
     first = MessageFactory(conversation=conversation, body="first")
     second = MessageFactory(conversation=conversation, body="second")
+    # ``created_at`` is ``auto_now_add`` — force a deterministic ordering
+    # rather than relying on real-clock resolution between two factory
+    # calls, which can tie under load.
+    from conversations.models import Message
+
+    Message.objects.filter(pk=first.pk).update(created_at=timezone.now() - timedelta(seconds=5))
+    Message.objects.filter(pk=second.pk).update(created_at=timezone.now())
+    first.refresh_from_db()
+    second.refresh_from_db()
 
     all_messages = list_chat_messages(session=session)
     assert [m.id for m in all_messages] == [first.id, second.id]

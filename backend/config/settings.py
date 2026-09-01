@@ -360,6 +360,7 @@ SPECTACULAR_SETTINGS = {
         "WorkspaceRoleEnum": "workspaces.models.WorkspaceRole.choices",
         "PriorityEnum": "tickets.models.TicketPriority.choices",
         "ConversationStatusEnum": "conversations.models.ConversationStatus.choices",
+        "ConversationChannelEnum": "conversations.models.ConversationChannel.choices",
         "TicketStatusEnum": "tickets.models.TicketStatus.choices",
         "KnowledgeSourceTypeEnum": "knowledge.models.KnowledgeSourceType.choices",
         "KnowledgeDocumentStatusEnum": "knowledge.models.KnowledgeDocumentStatus.choices",
@@ -395,6 +396,15 @@ SPECTACULAR_SETTINGS = {
         "EvaluationResultStatusEnum": "evaluations.models.EvaluationResultStatus.choices",
         "EvaluationProviderModeEnum": "evaluations.models.EvaluationProviderMode.choices",
         "EvaluationFailureCodeEnum": "evaluations.models.EvaluationFailureCode.choices",
+        "ChannelTypeEnum": "channel_ingress.models.ChannelType.choices",
+        # ChannelEndpointStatus intentionally has no override entry — its
+        # choice set (active/disabled) is byte-identical to
+        # WebhookEndpointStatus's; it shares that auto-resolved enum
+        # instead (see the EvaluationCaseStatus comment above).
+        "UnknownCustomerPolicyEnum": "channel_ingress.models.UnknownCustomerPolicy.choices",
+        "InboundChannelEventStatusEnum": (
+            "channel_ingress.models.InboundChannelEventStatus.choices"
+        ),
     },
 }
 
