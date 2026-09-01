@@ -6,6 +6,8 @@ proving both call sites actually invoke the guard before ``rmtree``."""
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from observability.prometheus_paths import (
@@ -14,18 +16,21 @@ from observability.prometheus_paths import (
     is_safe_multiprocess_dir,
 )
 
+#: Dangerous paths that are shallow/root on every platform this codebase
+#: runs on. Windows drive-root cases ("C:\\", "C:\\Temp") are meaningless
+#: path strings on POSIX — backslash isn't a path separator there, so they
+#: resolve to an arbitrary relative segment under cwd rather than any real
+#: filesystem root, and asserting they're "unsafe" on Linux would test a
+#: string a Linux deployment could never actually be configured with. Each
+#: platform's dangerous-path cases are therefore evaluated only under that
+#: platform's own path semantics.
+_POSIX_DANGEROUS_PATHS = ["/", "/tmp", ""]
+_WINDOWS_DANGEROUS_PATHS = ["C:\\", "C:\\Temp", ""]
+_DANGEROUS_PATHS = _WINDOWS_DANGEROUS_PATHS if sys.platform == "win32" else _POSIX_DANGEROUS_PATHS
+
 
 class TestIsSafeMultiprocessDir:
-    @pytest.mark.parametrize(
-        "dangerous_path",
-        [
-            "/",
-            "/tmp",
-            "C:\\",
-            "C:\\Temp",
-            "",
-        ],
-    )
+    @pytest.mark.parametrize("dangerous_path", _DANGEROUS_PATHS)
     def test_rejects_shallow_or_root_paths(self, dangerous_path):
         assert is_safe_multiprocess_dir(dangerous_path) is False
 

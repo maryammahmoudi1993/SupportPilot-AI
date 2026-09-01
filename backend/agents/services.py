@@ -561,8 +561,17 @@ def execute_claimed_agent_run(
     initial_messages: tuple[LLMMessage, ...] | None = None,
     output_metadata: dict[str, Any] | None = None,
     tool_descriptors: tuple[ToolDescriptor, ...] | None = None,
+    provider: Any | None = None,
 ) -> AgentRun:
-    """Execute a run already claimed by the orchestration boundary."""
+    """Execute a run already claimed by the orchestration boundary.
+
+    ``provider`` lets a caller substitute the LLM provider instance outright
+    — used by the evaluation harness (``evaluations.services``) to inject a
+    per-case ``DeterministicFakeLLMProvider`` scenario sequence without
+    forking this orchestration path (section 13 of the Phase 12 brief).
+    Every other caller omits it and gets the normal
+    ``agent_version.provider``-driven resolution unchanged.
+    """
 
     agent_version = run.agent_version
     if tool_descriptors is None:
@@ -572,12 +581,15 @@ def execute_claimed_agent_run(
             )
         except ToolCatalogConfigurationError as exc:
             return _fail_run(run, code=exc.code, message=exc.safe_message)
-    try:
-        provider = (
-            get_llm_provider() if agent_version.provider == "fake" else _provider_for(agent_version)
-        )
-    except ProviderConfigurationError as exc:
-        return _fail_run(run, code=exc.code, message=exc.safe_message)
+    if provider is None:
+        try:
+            provider = (
+                get_llm_provider()
+                if agent_version.provider == "fake"
+                else _provider_for(agent_version)
+            )
+        except ProviderConfigurationError as exc:
+            return _fail_run(run, code=exc.code, message=exc.safe_message)
 
     budgets = _version_budgets(agent_version)
     ctx = new_run_context(

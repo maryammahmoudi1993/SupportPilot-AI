@@ -236,8 +236,8 @@ def observe_celery_task(*, task_name: str, outcome: str, duration_seconds: float
 
 # --- Agent runs --------------------------------------------------------
 
-#: Labels: ``trigger`` (``AgentRunTrigger`` — manual/conversation/ticket/api,
-#: 4 values, code-owned), ``outcome`` (one of ``AGENT_RUN_TERMINAL_STATUSES``
+#: Labels: ``trigger`` (``AgentRunTrigger`` — manual/conversation/ticket/api/
+#: evaluation, 5 values, code-owned), ``outcome`` (one of ``AGENT_RUN_TERMINAL_STATUSES``
 #: — succeeded/failed/cancelled/budget_exceeded/handed_off, 5 values).
 #: ``WAITING_FOR_APPROVAL`` is deliberately never observed here — it is not
 #: terminal (section 13); ``HANDED_OFF`` is a successful escalation outcome,
@@ -263,7 +263,7 @@ AGENT_RUN_DURATION_SECONDS = Histogram(
     buckets=(0.5, 1, 2, 5, 10, 20, 30, 60, 120, 300, 600),
 )
 
-_AGENT_RUN_TRIGGERS = frozenset({"manual", "conversation", "ticket", "api"})
+_AGENT_RUN_TRIGGERS = frozenset({"manual", "conversation", "ticket", "api", "evaluation"})
 _AGENT_RUN_OUTCOMES = frozenset(
     {"succeeded", "failed", "cancelled", "budget_exceeded", "handed_off"}
 )
@@ -543,6 +543,66 @@ def observe_handoff_terminal(*, duration_seconds: float | None) -> None:
     docstring)."""
     if duration_seconds is not None:
         HANDOFF_DURATION_SECONDS.observe(duration_seconds)
+
+
+# ---------------------------------------------------------------------------
+# Evaluations (Phase 12) — every label is a small, bounded, code-owned enum
+# value; never a dataset/case/run/agent-version/request/trace id, raw intent,
+# or unbounded tool name (section 42 of the Phase 12 brief).
+# ---------------------------------------------------------------------------
+
+_EVALUATION_RUN_OUTCOMES = frozenset({"succeeded", "partial", "failed", "cancelled"})
+_EVALUATION_CASE_OUTCOMES = frozenset({"passed", "failed", "execution_failed", "cancelled"})
+_EVALUATION_REGRESSION_CATEGORIES = frozenset(
+    {"pass_rate", "forbidden_tool", "approval_compliance", "policy_compliance", "handoff_rate"}
+)
+
+EVALUATION_RUNS_TOTAL = Counter(
+    f"{METRIC_NAMESPACE}_evaluation_runs_total",
+    "Total EvaluationRun terminal transitions, by outcome.",
+    ["outcome"],
+)
+
+EVALUATION_CASES_TOTAL = Counter(
+    f"{METRIC_NAMESPACE}_evaluation_cases_total",
+    "Total EvaluationResult terminal transitions, by outcome.",
+    ["outcome"],
+)
+
+EVALUATION_CASE_DURATION_SECONDS = Histogram(
+    f"{METRIC_NAMESPACE}_evaluation_case_duration_seconds",
+    "EvaluationResult execution duration in seconds, by outcome.",
+    ["outcome"],
+    buckets=(0.5, 1, 2, 5, 10, 20, 30, 60, 120, 300),
+)
+
+EVALUATION_REGRESSIONS_TOTAL = Counter(
+    f"{METRIC_NAMESPACE}_evaluation_regressions_total",
+    "Total regression-threshold failures detected during a run comparison, by category.",
+    ["category"],
+)
+
+
+def observe_evaluation_run_terminal(*, outcome: str) -> None:
+    """The single call site every EvaluationRun terminal-transition
+    recorder must go through (``evaluations/services.py::finalize_evaluation_run``
+    and ``cancel_evaluation_run``)."""
+    outcome_label = outcome if outcome in _EVALUATION_RUN_OUTCOMES else "failed"
+    EVALUATION_RUNS_TOTAL.labels(outcome=outcome_label).inc()
+
+
+def observe_evaluation_case_terminal(*, outcome: str, duration_seconds: float | None) -> None:
+    """The single call site every EvaluationResult terminal-transition
+    recorder must go through (``evaluations/services.py::execute_evaluation_case``)."""
+    outcome_label = outcome if outcome in _EVALUATION_CASE_OUTCOMES else "execution_failed"
+    EVALUATION_CASES_TOTAL.labels(outcome=outcome_label).inc()
+    if duration_seconds is not None:
+        EVALUATION_CASE_DURATION_SECONDS.labels(outcome=outcome_label).observe(duration_seconds)
+
+
+def observe_evaluation_regression(*, category: str) -> None:
+    category_label = category if category in _EVALUATION_REGRESSION_CATEGORIES else "pass_rate"
+    EVALUATION_REGRESSIONS_TOTAL.labels(category=category_label).inc()
 
 
 # ---------------------------------------------------------------------------
