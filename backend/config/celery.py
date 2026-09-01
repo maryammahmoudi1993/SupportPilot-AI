@@ -53,6 +53,12 @@ def _delivery_sweep_interval_seconds() -> float:
     return float(settings.DELIVERY_SWEEP_INTERVAL_SECONDS)
 
 
+def _channel_ingress_sweep_interval_seconds() -> float:
+    from django.conf import settings
+
+    return float(settings.CHANNELS_INBOUND_SWEEP_INTERVAL_SECONDS)
+
+
 # Phase 8 (section 45): a periodic sweep for approval requests whose
 # expires_at has passed while nobody decided them. Deliberately coarse —
 # expiry is also enforced synchronously on read/decide/resume (section 44),
@@ -80,5 +86,11 @@ app.conf.beat_schedule = {
     "recover-expired-delivery-claims": {
         "task": "notifications.tasks.recover_expired_delivery_claims_task",
         "schedule": _delivery_sweep_interval_seconds(),
+    },
+    # Phase 13 (section 35, 62): the broker-publish-gap recovery sweep for
+    # ``InboundChannelEvent`` — mirrors the delivery sweepers above exactly.
+    "recover-stuck-inbound-channel-events": {
+        "task": "channel_ingress.tasks.recover_stuck_inbound_events_task",
+        "schedule": _channel_ingress_sweep_interval_seconds(),
     },
 }

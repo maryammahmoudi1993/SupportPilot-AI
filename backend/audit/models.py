@@ -114,6 +114,11 @@ class AuditAction(models.TextChoices):
     EVALUATION_RUN_COMPLETED = "evaluation_run.completed", "Evaluation run completed"
     EVALUATION_RESULT_REPLAYED = "evaluation_result.replayed", "Evaluation result replayed"
     EVALUATION_RUNS_COMPARED = "evaluation_runs.compared", "Evaluation runs compared"
+    CHANNEL_ENDPOINT_CREATED = "channel_endpoint.created", "Channel endpoint created"
+    CHANNEL_ENDPOINT_UPDATED = "channel_endpoint.updated", "Channel endpoint updated"
+    CHANNEL_ENDPOINT_ENABLED = "channel_endpoint.enabled", "Channel endpoint enabled"
+    CHANNEL_ENDPOINT_DISABLED = "channel_endpoint.disabled", "Channel endpoint disabled"
+    CHANNEL_SECRET_ROTATED = "channel_endpoint.secret_rotated", "Channel signing secret rotated"
 
 
 class AuditEvent(BaseModel):

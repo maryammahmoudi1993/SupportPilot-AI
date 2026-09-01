@@ -88,6 +88,16 @@ urlpatterns = [
                     "workspaces/<uuid:workspace_id>/evaluations/",
                     include("evaluations.urls"),
                 ),
+                path(
+                    "workspaces/<uuid:workspace_id>/channels/",
+                    include("channel_ingress.urls"),
+                ),
+                # Public, unauthenticated multi-channel ingress (Phase 13,
+                # section 15, 17, 45) — deliberately NOT nested under
+                # workspaces/<uuid:workspace_id>/: every path parameter here
+                # is a public routing identifier or session capability, never
+                # a client-suppliable workspace id.
+                path("channels/public/", include("channel_ingress.public_urls")),
             ]
         ),
     ),
