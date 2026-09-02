@@ -175,8 +175,9 @@ shortly", distinct from `429`'s "you are over quota".
 
 **Network-identity caveat (read before deploying behind a proxy)**: see
 [Reverse proxy / client identity](#reverse-proxy--client-identity-read-this-before-production) —
-this is a known, currently-open configuration gap, not a documented
-guarantee.
+identity trust is explicit, environment-configured (`DRF_NUM_PROXIES`),
+and defaults to trusting no forwarded header; it is not automatically safe
+for every future deployment topology.
 
 ## Request / correlation IDs
 
@@ -318,14 +319,39 @@ Minimal v1 policy, current as of this document:
 
 ## Reverse proxy / client identity (read this before production)
 
-**This is an open configuration gap, not a guarantee** — see the Phase 14
-Milestone 4 report for the full writeup. Summary: `PUBLIC_CHAT` and
-`PUBLIC_SIGNED_INGRESS` rate-limit identity is "network address as DRF's
-`ScopedRateThrottle` determines it", and DRF's default `NUM_PROXIES=None`
-(unmodified in this repository) makes it **trust a client-supplied
-`X-Forwarded-For` header whenever one is present** — with no reverse proxy
-in the current deployment topology to strip or overwrite it. A caller can
-today set their own `X-Forwarded-For` value per request to obtain a fresh
-rate-limit identity on demand. Do not build frontend logic that assumes
-this rate limiting is currently spoof-resistant; systematic testing and a
-fix are explicitly Phase 15 scope, not resolved here.
+`PUBLIC_CHAT` and `PUBLIC_SIGNED_INGRESS` (and unauthenticated `AUTH`)
+rate-limit identity is "network address as DRF's `ScopedRateThrottle`
+determines it" — `rest_framework.throttling.BaseThrottle.get_ident`. DRF's
+own default is `NUM_PROXIES=None`, which **trusts a client-supplied
+`X-Forwarded-For` header whenever one is present**, proxy or not.
+
+This repository sets DRF's `NUM_PROXIES` explicitly via the
+`DRF_NUM_PROXIES` environment variable (Phase 14 trusted-proxy
+remediation, after Milestone 4):
+
+- **default `0`** — matches the current deployment topology, which has no
+  reverse proxy in front of the application. With `NUM_PROXIES=0`, DRF
+  ignores `X-Forwarded-For` entirely and always uses the direct TCP peer
+  address (`REMOTE_ADDR`). A direct, unauthenticated caller cannot obtain a
+  fresh rate-limit identity by varying `X-Forwarded-For` — verified by a
+  regression test that rotates it against a real `PUBLIC_CHAT` endpoint and
+  a real `AUTH` endpoint and confirms both stay in the same throttle
+  bucket.
+- **`DRF_NUM_PROXIES=N` (N > 0)** — only correct when the deployment
+  actually sits behind exactly `N` trusted reverse proxies that
+  sanitize/overwrite the forwarded-address chain (i.e. they always
+  overwrite or strip any `X-Forwarded-For` a client supplied, then append
+  the real peer address). Setting this value does **not**, by itself, make
+  an untrusted or misconfigured proxy's forwarding safe — the reverse
+  proxy must be the one establishing that trust boundary. A malformed
+  value (negative, non-integer) fails Django startup with a clear error
+  rather than silently falling back to DRF's permissive `None` default.
+
+This closes the specific gap Milestone 4 flagged: direct `X-Forwarded-For`
+spoofing against the current no-proxy deployment is no longer possible.
+**Phase 15 will still perform systematic adversarial spoofing/bypass
+testing** — this remediation is the correct default configuration, not a
+claim that every future reverse-proxy deployment is automatically safe;
+operators introducing a real reverse proxy must set `DRF_NUM_PROXIES` to
+match its depth and confirm the proxy itself strips client-supplied
+forwarding headers before trusting this setting.

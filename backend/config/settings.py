@@ -59,6 +59,11 @@ env = environ.Env(
     # Section 17: credential/secret rotation only — see
     # integrations.views.IntegrationConnectionCredentialsView.
     SENSITIVE_MUTATION_THROTTLE_RATE=(str, "10/min"),
+    # Trusted-proxy depth for DRF throttle identity (get_ident). 0 = no
+    # trusted reverse proxy in front of this deployment — a caller-supplied
+    # X-Forwarded-For is never trusted. See config/settings.py's
+    # DRF_NUM_PROXIES validation below and docs/api/frontend-integration.md.
+    DRF_NUM_PROXIES=(int, 0),
     # AI provider layer (Phase 5). The default is the deterministic offline
     # provider so the application boots and every normal test/CI path runs
     # without paid credentials. The real provider is strictly opt-in.
@@ -331,8 +336,24 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 # Custom user model
 AUTH_USER_MODEL = "accounts.User"
 
+# Trusted-proxy depth for DRF throttle identity (ScopedRateThrottle /
+# SimpleRateThrottle.get_ident). DRF's own default is `NUM_PROXIES = None`,
+# which trusts an X-Forwarded-For header supplied by *any* direct caller —
+# not just a real upstream proxy — undermining IP-based rate limiting
+# whenever no reverse proxy sits in front of the application. This
+# deployment has no reverse proxy today, so the safe default is `0`: DRF
+# then ignores X-Forwarded-For entirely and always uses REMOTE_ADDR (see
+# rest_framework.throttling.BaseThrottle.get_ident). A future deployment
+# that does run behind exactly N trusted proxies which sanitize/overwrite
+# the forwarded-address chain may set DRF_NUM_PROXIES=N explicitly; setting
+# it does not, by itself, make an untrusted proxy's forwarding safe.
+DRF_NUM_PROXIES = env("DRF_NUM_PROXIES")
+if DRF_NUM_PROXIES < 0:
+    raise ValueError("DRF_NUM_PROXIES must be >= 0")
+
 # REST Framework
 REST_FRAMEWORK = {
+    "NUM_PROXIES": DRF_NUM_PROXIES,
     "DEFAULT_PAGINATION_CLASS": "common.pagination.StandardResultsSetPagination",
     "PAGE_SIZE": 50,
     "DEFAULT_FILTER_BACKENDS": [

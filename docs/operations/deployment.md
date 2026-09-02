@@ -70,6 +70,7 @@ not real secrets.
 | `CORS_ALLOWED_ORIGINS`, `CSRF_TRUSTED_ORIGINS` | Explicit origin allowlists — no wildcard supported or safe. |
 | `AUTH_REFRESH_COOKIE_SECURE`, `AUTH_REFRESH_COOKIE_SAMESITE` | Refresh-cookie attributes; `Secure` is forced true automatically outside `DEBUG` regardless of this value. |
 | `INTEGRATIONS_CREDENTIAL_ENCRYPTION_KEYS` | Symmetric key(s) encrypting stored integration/channel credentials at rest. |
+| `DRF_NUM_PROXIES` | Trusted reverse-proxy depth for DRF throttle client identity (`rest_framework.throttling`). Default `0` — matches this deployment's current no-reverse-proxy topology; forwarded-address headers are never trusted, identity is always the direct peer address. Set to the exact number of trusted, header-sanitizing reverse proxies in front of the application if that topology changes — never a permissive/unset value. A negative or non-integer value fails startup rather than silently degrading trust. See `docs/api/frontend-integration.md`'s "Reverse proxy / client identity" section. |
 
 ### Required infrastructure
 

@@ -75,10 +75,18 @@ guarantee.
   category) is an explicit, documented decision — this ADR is the record
   future changes are measured against, not a wish list to expand
   informally.
-- The one currently-open gap this contract does **not** paper over: public
-  rate-limit identity (`PUBLIC_CHAT`, `PUBLIC_SIGNED_INGRESS`) is
-  network-address-based, and this deployment's DRF configuration
-  (`NUM_PROXIES` unset) trusts a client-supplied `X-Forwarded-For` header
-  with no reverse proxy in front to strip it. This is documented plainly
-  in `docs/api/frontend-integration.md` and left for Phase 15's systematic
-  spoofing/bypass campaign rather than patched ad hoc here.
+- Public rate-limit identity (`PUBLIC_CHAT`, `PUBLIC_SIGNED_INGRESS`, and
+  unauthenticated `AUTH`) is network-address-based. Milestone 4 flagged
+  that this deployment's DRF configuration (`NUM_PROXIES` unset) trusted a
+  client-supplied `X-Forwarded-For` header with no reverse proxy in front
+  to strip it — a genuine, direct spoofing path. That gap was closed in a
+  narrow follow-up remediation: DRF's `NUM_PROXIES` is now set explicitly
+  via the `DRF_NUM_PROXIES` environment variable, defaulting to `0`
+  (matches the current no-proxy topology — forwarded headers are never
+  trusted, identity is always the direct peer address), with a positive
+  value reserved for a deployment that genuinely sits behind that many
+  trusted, header-sanitizing proxies. See
+  `docs/api/frontend-integration.md`'s "Reverse proxy / client identity"
+  section for the full contract. This is a correct default configuration,
+  not a completed security audit — Phase 15's systematic spoofing/bypass
+  campaign against the full API surface is still expected to run.
