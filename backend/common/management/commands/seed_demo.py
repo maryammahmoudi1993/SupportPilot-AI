@@ -883,6 +883,18 @@ class Command(BaseCommand):
             run1.save(update_fields=["status", "started_at", "updated_at"])
             _run_refund(run=run1, payment_reference="pi_demo_1")
             existing_pending = ApprovalRequest.objects.get(tool_execution__agent_run=run1)
+            # execute_tool() only transitions the ToolExecution row to
+            # WAITING_FOR_APPROVAL (tools/execution.py) — the AgentRun-level
+            # pause is normally applied by orchestration's
+            # _pause_run_for_approval() after catching this same
+            # approval-required signal. Called directly here (no
+            # orchestration in the loop), so mirror that one transition
+            # explicitly: a run genuinely sitting on a pending approval must
+            # report AgentRunStatus.WAITING_FOR_APPROVAL, not the RUNNING
+            # value it was given only to satisfy execute_tool()'s
+            # precondition.
+            run1.status = AgentRunStatus.WAITING_FOR_APPROVAL
+            run1.save(update_fields=["status", "updated_at"])
 
         if existing_decided is None:
             run2 = agent_services.create_agent_run(
@@ -896,6 +908,8 @@ class Command(BaseCommand):
             run2.started_at = timezone.now()
             run2.save(update_fields=["status", "started_at", "updated_at"])
             _run_refund(run=run2, payment_reference="pi_demo_2")
+            run2.status = AgentRunStatus.WAITING_FOR_APPROVAL
+            run2.save(update_fields=["status", "updated_at"])
             to_decide = ApprovalRequest.objects.get(tool_execution__agent_run=run2)
             existing_decided = approval_services.decide_approval(
                 workspace=workspace,

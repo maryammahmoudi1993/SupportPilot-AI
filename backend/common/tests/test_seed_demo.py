@@ -134,6 +134,21 @@ class TestSeedDemoIdempotency:
         assert decided is not None
         assert decided.decision.decision == "approve"
 
+        # Regression: a run genuinely paused on a pending approval must
+        # report AgentRunStatus.WAITING_FOR_APPROVAL — the real state a
+        # client/operator would see for this scenario in production — not
+        # RUNNING, which execute_tool() was only given to satisfy its own
+        # precondition when called directly (no orchestration in the loop).
+        pending_run = AgentRun.objects.get(pk=pending.tool_execution.agent_run_id)
+        assert pending_run.status == "waiting_for_approval"
+
+        # AgentRunStatus coverage required by the demo story: succeeded,
+        # failed, waiting_for_approval, handed_off must all be real,
+        # distinct rows — never simulated or asserted via a different enum
+        # value.
+        statuses = set(AgentRun.objects.filter(workspace=acme).values_list("status", flat=True))
+        assert {"succeeded", "failed", "waiting_for_approval", "handed_off"} <= statuses
+
     def test_cross_workspace_data_is_isolated(self, monkeypatch):
         _run_seed(monkeypatch)
 
