@@ -137,15 +137,27 @@ Audit metadata is restricted to IDs and structured facts (old/new status,
 assignee membership ID) — never message bodies, customer PII, or other
 sensitive payload content.
 
-## Known limitations / deferred items
+## Known limitations / deferred items (as of Phase 3)
+
+The items below describe this domain's scope *at the end of Phase 3*, kept
+for historical accuracy. Most have since been built in later phases — see
+the pointer after each one rather than assuming any are still open.
 
 - No external channel ingestion (email/SMS/chat webhooks) — the `channel`,
   `external_id`, and `metadata` fields exist to make that possible later
-  without a schema redesign.
+  without a schema redesign. **Resolved in Phase 13** —
+  [`multichannel-ingress.md`](multichannel-ingress.md).
 - No AI agent behavior, tool calling, retrieval, or policy evaluation — those
   are later phases; the `ai_agent` sender type and `agents`/`tools`/`policies`
-  apps exist only as placeholders.
+  apps exist only as placeholders. **Resolved across Phases 5-8** —
+  [`agent-runtime-foundation.md`](agent-runtime-foundation.md),
+  [`typed-tool-execution.md`](typed-tool-execution.md),
+  [`policy-approval-engine.md`](policy-approval-engine.md).
 - No customer-facing authentication portal; all Phase 3 APIs are
   workspace/support-side, authenticated through the existing staff user system.
+  **Still accurate** — there is no customer-facing portal; customer-originated
+  messages arrive only through channel ingress (Phase 13) or staff-entered
+  inbound messages.
 - Ticket SLA/due-date automation is limited to storing `due_at`; no reminder
-  or escalation behavior exists yet.
+  or escalation behavior exists yet. **Still accurate** — `due_at` remains a
+  stored field only; no reminder/escalation automation has been added.
