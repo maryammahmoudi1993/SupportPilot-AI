@@ -19,9 +19,21 @@ env:
   DJANGO_SETTINGS_MODULE: config.settings
   SECRET_KEY: ci-test-secret-key
   DEBUG: "False"
+  # CI has no TLS listener — redirecting every plain-HTTP test-client
+  # request to https would mask real pass/fail behind a false 301 on
+  # nearly every view test. Explicit override, not a change to the
+  # production default (config/settings.py keeps SECURE_SSL_REDIRECT=True
+  # outside DEBUG unless this is set).
+  SECURE_SSL_REDIRECT: "False"
   ALLOWED_HOSTS: localhost,127.0.0.1
   DATABASE_URL: postgres://postgres:postgres@localhost:5432/supportpilot
   REDIS_URL: redis://localhost:6379/0
+  # Distinct logical Redis DB from REDIS_URL, matching docker-compose.yml's
+  # backend service and every other real deployment topology in this repo.
+  CACHE_URL: redis://localhost:6379/1
+  # OBSERVABILITY_METRICS_ENABLED defaults True; outside DEBUG a token is
+  # required (config/settings.py) so /metrics/ never boots unauthenticated.
+  OBSERVABILITY_METRICS_TOKEN: ci-test-metrics-token
 
 jobs:
   test:

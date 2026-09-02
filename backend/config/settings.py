@@ -695,8 +695,28 @@ LOGGING = {
 }
 
 # Security settings for production
+#
+# SECURE_SSL_REDIRECT defaults to True outside DEBUG (the safe production
+# posture: this process terminates plain HTTP and always redirects to
+# HTTPS) but is explicitly overridable via the SECURE_SSL_REDIRECT env var
+# — never implicitly, only by a caller that deliberately sets it. Two real
+# needs this serves: (1) a CI/test environment that legitimately runs with
+# DEBUG=False (to exercise other production-only settings/behavior) but has
+# no TLS listener, where redirecting a request client never sent as HTTPS
+# would make every plain-HTTP test request come back 301 instead of its
+# real response — masking every other check behind a false failure; (2) a
+# real deployment that terminates TLS at a reverse proxy/load balancer in
+# front of this process and forwards plain HTTP internally, where this
+# process redirecting again would be wrong. Explicitly setting it to False
+# does not itself make either topology safe — that's the CI runner having
+# no public exposure, or the proxy actually terminating TLS — same
+# discipline as DRF_NUM_PROXIES above.
+_SECURE_SSL_REDIRECT_OVERRIDE = env.bool("SECURE_SSL_REDIRECT", default=None)
+
 if not DEBUG:
-    SECURE_SSL_REDIRECT = True
+    SECURE_SSL_REDIRECT = (
+        _SECURE_SSL_REDIRECT_OVERRIDE if _SECURE_SSL_REDIRECT_OVERRIDE is not None else True
+    )
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
     SECURE_HSTS_SECONDS = 31536000

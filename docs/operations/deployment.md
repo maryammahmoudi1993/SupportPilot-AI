@@ -81,6 +81,7 @@ not real secrets.
 | `AUTH_REFRESH_COOKIE_SECURE`, `AUTH_REFRESH_COOKIE_SAMESITE` | Refresh-cookie attributes; `Secure` is forced true automatically outside `DEBUG` regardless of this value. |
 | `INTEGRATIONS_CREDENTIAL_ENCRYPTION_KEYS` | Symmetric key(s) encrypting stored integration/channel credentials at rest. |
 | `DRF_NUM_PROXIES` | Trusted reverse-proxy depth for DRF throttle client identity (`rest_framework.throttling`). Default `0` — matches this deployment's current no-reverse-proxy topology; forwarded-address headers are never trusted, identity is always the direct peer address. Set to the exact number of trusted, header-sanitizing reverse proxies in front of the application if that topology changes — never a permissive/unset value. A negative or non-integer value fails startup rather than silently degrading trust. See `docs/api/frontend-integration.md`'s "Reverse proxy / client identity" section. |
+| `SECURE_SSL_REDIRECT` | Explicit override for Django's HTTP→HTTPS redirect. Default (unset): `True` outside `DEBUG` — this process terminates plain HTTP and always redirects, the safe posture with no reverse proxy in front of it. Set to `False` only where that redirect would be wrong: CI (no TLS listener — see `.github/workflows/backend-ci.yml`) or a real deployment that terminates TLS at a reverse proxy/load balancer and forwards plain HTTP internally. Setting it does not itself make either topology safe. |
 
 ### Required infrastructure
 
