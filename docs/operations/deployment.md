@@ -22,14 +22,24 @@ Optional, not required to boot:
 | Prometheus scraper | Scraping `/metrics/` (always available; scraping it is optional) |
 | A live LLM/payment/calendar/email provider | Only when the corresponding `*_LIVE_PROVIDERS_ENABLED`-style flag is explicitly on — every normal/CI/demo path uses the deterministic offline providers |
 
-**No Celery beat process is currently configured** (`docker-compose.yml`
-does not run one, and `CELERY_BEAT_SCHEDULE` is unset). Delivery/channel
-sweeper and recovery tasks exist as ordinary Celery tasks but are **not
-self-scheduling** in this repository today — periodic invocation (e.g. via
-an external cron or platform scheduler) is a deployment-time
-responsibility, not automatic. Treat this as a known gap to close before
-relying on background recovery in a real deployment, not as documented
-behavior to build around.
+**A Celery Beat schedule is fully defined in code** (`config/celery.py`'s
+`app.conf.beat_schedule` — a hardcoded dict, not an env-configurable
+setting despite the similarly-named `CELERY_BEAT_SCHEDULE` Django setting
+namespace): stale-approval expiry, due-delivery dispatch, expired-claim
+recovery, and stuck-inbound-event recovery, each on its own cadence.
+**No process currently executes that schedule**, though — `docker-compose.yml`
+runs `web` and `celery_worker` only, with no `celery -A config beat`
+service, verified directly against the compose file (Phase 14 Milestone 5).
+So in this repository's current topology, delivery/channel sweeper and
+recovery tasks exist as ordinary Celery tasks with a real schedule already
+written for them, but are **not self-triggering** — periodic invocation
+requires actually running a Beat process (or an external
+cron/platform-scheduler calling the same tasks), which is a deployment-time
+responsibility, not automatic here. Treat the missing Beat process as a
+known operational packaging gap to close before relying on background
+recovery in a real deployment (Phase 17 scope), not as documented behavior
+to build around — recovery tasks can still be invoked manually/explicitly
+in the meantime.
 
 Runtime container: non-root user (`app`), migrations are a deliberate,
 separate release step (`python manage.py migrate`) — never run
