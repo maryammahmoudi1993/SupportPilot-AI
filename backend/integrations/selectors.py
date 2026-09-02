@@ -17,7 +17,7 @@ from .models import IntegrationConnection
 
 
 def connection_list_for_workspace(*, workspace: Workspace) -> QuerySet[IntegrationConnection]:
-    return IntegrationConnection.objects.filter(workspace=workspace).order_by("provider")
+    return IntegrationConnection.objects.filter(workspace=workspace).order_by("provider", "id")
 
 
 def connection_get_for_workspace_or_404(

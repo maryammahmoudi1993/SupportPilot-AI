@@ -16,6 +16,7 @@ from datetime import timedelta
 
 from django.conf import settings
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from conversations.models import Message
@@ -120,7 +121,13 @@ def list_chat_messages(*, session: ChatSession, after: str | None = None) -> lis
     """Bounded, session-scoped retrieval of the conversation's messages
     (section 41) — never any other session's conversation, regardless of
     workspace/endpoint. ``after`` is an opaque message id cursor: only
-    messages created strictly after it are returned."""
+    messages created strictly after it are returned.
+
+    Always capped at ``CHANNEL_WEBCHAT_MESSAGE_HISTORY_LIMIT`` (Phase 14,
+    Section 3): a widget re-opening a very old session polls the rest with
+    further ``after``-cursor calls rather than pulling an unbounded
+    transcript in one response.
+    """
     conversation = session.conversation
     if conversation is None:
         return []
@@ -128,8 +135,15 @@ def list_chat_messages(*, session: ChatSession, after: str | None = None) -> lis
     if after:
         anchor = queryset.filter(pk=after).first()
         if anchor is not None:
-            queryset = queryset.filter(created_at__gt=anchor.created_at)
-    return list(queryset)
+            # Tie-broken on id, matching the queryset's own (created_at, id)
+            # ordering, so two messages sharing a timestamp are never
+            # skipped or duplicated across successive polls.
+            queryset = queryset.filter(
+                Q(created_at__gt=anchor.created_at)
+                | Q(created_at=anchor.created_at, id__gt=anchor.id)
+            )
+    limit = settings.CHANNEL_WEBCHAT_MESSAGE_HISTORY_LIMIT
+    return list(queryset[:limit])
 
 
 def require_session(*, token: str) -> ChatSession:

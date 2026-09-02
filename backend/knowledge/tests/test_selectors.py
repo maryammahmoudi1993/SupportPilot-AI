@@ -1,5 +1,6 @@
 import pytest
 from django.http import Http404
+from rest_framework.exceptions import ValidationError
 
 from knowledge import selectors
 from knowledge.models import KnowledgeDocumentStatus, RetrievalEvent
@@ -45,9 +46,10 @@ class TestKnowledgeSelectors:
                 workspace=workspace, source_id=source.id, status=KnowledgeDocumentStatus.READY
             )
         ) == [ready]
-        assert not selectors.document_list_for_workspace(
-            workspace=workspace, source_id="invalid"
-        ).exists()
+        # Regression (Phase 14, Section 7): a malformed filter must fail
+        # predictably, not be silently treated as "no matches".
+        with pytest.raises(ValidationError):
+            selectors.document_list_for_workspace(workspace=workspace, source_id="invalid")
 
     def test_document_job_and_event_detail_are_tenant_scoped(self):
         document = KnowledgeDocumentFactory()

@@ -13,6 +13,7 @@ from uuid import UUID
 
 from django.db.models import QuerySet
 from django.http import Http404
+from rest_framework.exceptions import ValidationError
 
 from agents.models import AgentVersion
 from workspaces.models import Workspace
@@ -22,7 +23,7 @@ from .models import ToolBinding, ToolDefinition, ToolExecution
 
 def tool_definition_catalog() -> QuerySet[ToolDefinition]:
     """The full safe tool catalog. Global/code-owned — not workspace-scoped."""
-    return ToolDefinition.objects.order_by("key")
+    return ToolDefinition.objects.order_by("key", "id")
 
 
 def tool_binding_list_for_version(
@@ -33,7 +34,7 @@ def tool_binding_list_for_version(
             agent_version=agent_version, agent_version__agent_definition__workspace=workspace
         )
         .select_related("tool_definition")
-        .order_by("-created_at")
+        .order_by("-created_at", "-id")
     )
 
 
@@ -82,9 +83,11 @@ def tool_execution_list_for_workspace(
         try:
             resolved = UUID(str(agent_run_id))
         except ValueError:
-            return queryset.none()
+            # Malformed filter must fail predictably (Section 7), not
+            # silently look like an honestly-applied filter with no matches.
+            raise ValidationError({"agent_run_id": "Must be a valid UUID."}) from None
         queryset = queryset.filter(agent_run_id=resolved)
-    return queryset.order_by("-created_at")
+    return queryset.order_by("-created_at", "-id")
 
 
 def tool_execution_get_for_workspace_or_404(

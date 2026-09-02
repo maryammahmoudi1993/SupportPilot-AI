@@ -6,6 +6,7 @@ import uuid
 
 import pytest
 from django.http import Http404
+from rest_framework.exceptions import ValidationError
 
 from agents.tests.factories import AgentVersionFactory
 from workspaces.tests.factories import WorkspaceFactory
@@ -60,12 +61,14 @@ class TestToolExecutionSelectors:
                 workspace=WorkspaceFactory(), execution_id=execution.id
             )
 
-    def test_list_filters_by_invalid_agent_run_id_returns_empty(self):
+    def test_list_filters_by_invalid_agent_run_id_fails_predictably(self):
+        # Regression (Phase 14, Section 7): a malformed filter must fail
+        # predictably, not be silently treated as "no matches".
         execution = ToolExecutionFactory()
-        results = selectors.tool_execution_list_for_workspace(
-            workspace=execution.workspace, agent_run_id="not-a-uuid"
-        )
-        assert list(results) == []
+        with pytest.raises(ValidationError):
+            selectors.tool_execution_list_for_workspace(
+                workspace=execution.workspace, agent_run_id="not-a-uuid"
+            )
 
     def test_list_filters_by_valid_agent_run_id(self):
         execution = ToolExecutionFactory()

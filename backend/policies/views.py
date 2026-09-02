@@ -49,7 +49,7 @@ class PolicyListCreateView(WorkspaceScopedMixin, generics.ListCreateAPIView):
     def get_queryset(self):
         if getattr(self, "swagger_fake_view", False):
             return Policy.objects.none()
-        return Policy.objects.filter(workspace=self.workspace).order_by("-created_at")
+        return Policy.objects.filter(workspace=self.workspace).order_by("-created_at", "-id")
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)

@@ -48,7 +48,9 @@ def ticket_list_for_workspace(
         qs = qs.filter(
             assigned_to=assigned_to if isinstance(assigned_to, UUID) else UUID(assigned_to)
         )
-    return qs.annotate(_priority_order=_PRIORITY_ORDER).order_by("_priority_order", "-created_at")
+    return qs.annotate(_priority_order=_PRIORITY_ORDER).order_by(
+        "_priority_order", "-created_at", "-id"
+    )
 
 
 def ticket_get_for_workspace_or_404(*, workspace: Workspace, ticket_id: UUID | str) -> Ticket:
@@ -92,7 +94,9 @@ def handoff_list_for_workspace(
         qs = qs.filter(status=status)
     if conversation_id is not None:
         qs = qs.filter(conversation_id=conversation_id)
-    return qs
+    # Explicit ordering rather than relying on BaseModel's Meta.ordering
+    # default, which has no tie-breaker (Phase 14, Section 4).
+    return qs.order_by("-created_at", "-id")
 
 
 def active_handoff_for_conversation(*, conversation) -> HumanHandoff | None:

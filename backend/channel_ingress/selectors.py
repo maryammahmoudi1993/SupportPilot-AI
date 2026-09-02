@@ -13,7 +13,7 @@ from .models import ChannelEndpoint, InboundChannelEvent
 
 
 def endpoint_list_for_workspace(*, workspace: Workspace) -> QuerySet[ChannelEndpoint]:
-    return ChannelEndpoint.objects.filter(workspace=workspace).order_by("-created_at")
+    return ChannelEndpoint.objects.filter(workspace=workspace).order_by("-created_at", "-id")
 
 
 def endpoint_get_for_workspace(
@@ -35,7 +35,7 @@ def inbound_event_list_for_workspace(*, workspace: Workspace) -> QuerySet[Inboun
     return (
         InboundChannelEvent.objects.filter(workspace=workspace)
         .select_related("endpoint")
-        .order_by("-created_at")
+        .order_by("-created_at", "-id")
     )
 
 

@@ -6,6 +6,7 @@ from uuid import UUID
 
 from django.db.models import Q, QuerySet
 from django.http import Http404
+from rest_framework.exceptions import ValidationError
 
 from workspaces.models import Workspace
 
@@ -20,7 +21,7 @@ def source_list_for_workspace(
         queryset = queryset.filter(is_active=is_active)
     if search:
         queryset = queryset.filter(Q(name__icontains=search) | Q(description__icontains=search))
-    return queryset.order_by("-created_at")
+    return queryset.order_by("-created_at", "-id")
 
 
 def source_get_for_workspace_or_404(
@@ -43,11 +44,13 @@ def document_list_for_workspace(
         try:
             resolved_source_id = UUID(str(source_id))
         except ValueError:
-            return queryset.none()
+            # Malformed filter must fail predictably (Section 7), not
+            # silently look like an honestly-applied filter with no matches.
+            raise ValidationError({"source_id": "Must be a valid UUID."}) from None
         queryset = queryset.filter(source_id=resolved_source_id)
     if status:
         queryset = queryset.filter(status=status)
-    return queryset.order_by("-created_at")
+    return queryset.order_by("-created_at", "-id")
 
 
 def document_get_for_workspace_or_404(

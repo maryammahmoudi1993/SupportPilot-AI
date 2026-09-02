@@ -12,6 +12,7 @@ from uuid import UUID
 
 from django.db.models import QuerySet
 from django.http import Http404
+from rest_framework.exceptions import ValidationError
 
 from workspaces.models import Workspace
 
@@ -30,7 +31,7 @@ def dataset_list_for_workspace(
     queryset = EvaluationDataset.objects.filter(workspace=workspace)
     if status:
         queryset = queryset.filter(status=status)
-    return queryset.order_by("-created_at")
+    return queryset.order_by("-created_at", "-id")
 
 
 def dataset_get_for_workspace_or_404(
@@ -48,7 +49,7 @@ def case_list_for_dataset(
     queryset = EvaluationCase.objects.filter(dataset=dataset, dataset__workspace=workspace)
     if status:
         queryset = queryset.filter(status=status)
-    return queryset.order_by("key")
+    return queryset.order_by("key", "id")
 
 
 def case_get_for_workspace_or_404(
@@ -77,9 +78,11 @@ def run_list_for_workspace(
         try:
             resolved_id = UUID(str(dataset_id))
         except ValueError:
-            return queryset.none()
+            # Malformed filter must fail predictably (Section 7), not
+            # silently look like an honestly-applied filter with no matches.
+            raise ValidationError({"dataset_id": "Must be a valid UUID."}) from None
         queryset = queryset.filter(dataset_id=resolved_id)
-    return queryset.order_by("-created_at")
+    return queryset.order_by("-created_at", "-id")
 
 
 def run_get_for_workspace_or_404(*, workspace: Workspace, run_id: UUID | str) -> EvaluationRun:
@@ -107,7 +110,7 @@ def result_list_for_run(
         queryset = queryset.filter(status=status)
     if passed is not None:
         queryset = queryset.filter(passed=passed)
-    return queryset.order_by("case_snapshot__sequence")
+    return queryset.order_by("case_snapshot__sequence", "id")
 
 
 def result_get_for_workspace_or_404(

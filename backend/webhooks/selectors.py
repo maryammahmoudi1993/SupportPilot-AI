@@ -14,7 +14,7 @@ from .models import WebhookDelivery, WebhookEndpoint, WebhookEventType
 
 
 def endpoint_list_for_workspace(*, workspace) -> QuerySet[WebhookEndpoint]:
-    return WebhookEndpoint.objects.filter(workspace=workspace).order_by("-created_at")
+    return WebhookEndpoint.objects.filter(workspace=workspace).order_by("-created_at", "-id")
 
 
 def endpoint_get_for_workspace(*, workspace, endpoint_id: UUID | str) -> WebhookEndpoint | None:
@@ -37,7 +37,7 @@ def delivery_list_for_workspace(*, workspace) -> QuerySet[WebhookDelivery]:
     return (
         WebhookDelivery.objects.filter(workspace=workspace)
         .select_related("delivery", "endpoint", "event")
-        .order_by("-created_at")
+        .order_by("-created_at", "-id")
     )
 
 

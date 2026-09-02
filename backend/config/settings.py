@@ -149,6 +149,11 @@ env = environ.Env(
     CHANNELS_INBOUND_SWEEP_INTERVAL_SECONDS=(float, 30.0),
     CHANNEL_WEBCHAT_SESSION_THROTTLE_RATE=(str, "30/min"),
     CHANNEL_WEBCHAT_MESSAGE_THROTTLE_RATE=(str, "60/min"),
+    # Phase 14 (Section 3): the public message-history poll has no page
+    # parameter of its own (the `after` cursor already bounds incremental
+    # polling) — this caps a single call so a widget re-opening a very long
+    # session can't pull the entire unbounded transcript in one response.
+    CHANNEL_WEBCHAT_MESSAGE_HISTORY_LIMIT=(int, 200),
     CHANNEL_INBOUND_WEBHOOK_THROTTLE_RATE=(str, "120/min"),
     # Production observability (Phase 11 Block 1). Metrics are bounded,
     # low-cardinality, vendor-neutral Prometheus exposition — never a
@@ -477,6 +482,8 @@ KNOWLEDGE_DEFAULT_TOP_K = env("KNOWLEDGE_DEFAULT_TOP_K")
 KNOWLEDGE_MAX_TOP_K = env("KNOWLEDGE_MAX_TOP_K")
 KNOWLEDGE_MAX_QUERY_LENGTH = env("KNOWLEDGE_MAX_QUERY_LENGTH")
 KNOWLEDGE_INGESTION_MAX_ATTEMPTS = env("KNOWLEDGE_INGESTION_MAX_ATTEMPTS")
+
+CHANNEL_WEBCHAT_MESSAGE_HISTORY_LIMIT = env("CHANNEL_WEBCHAT_MESSAGE_HISTORY_LIMIT")
 
 if not 0 <= KNOWLEDGE_CHUNK_OVERLAP < KNOWLEDGE_CHUNK_SIZE:
     raise ValueError("KNOWLEDGE_CHUNK_OVERLAP must be >= 0 and smaller than chunk size")
