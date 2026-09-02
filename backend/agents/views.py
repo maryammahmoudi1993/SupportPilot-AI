@@ -6,11 +6,11 @@ from django.http import Http404
 from drf_spectacular.utils import OpenApiResponse, extend_schema
 from rest_framework import generics, status
 from rest_framework.response import Response
-from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from common.exceptions import ConflictError, SafeAPIError
 from common.schema import RATE_LIMITED_EXAMPLE, error_response
+from common.throttling import SafeScopedRateThrottle
 from conversations.selectors import (
     conversation_get_for_workspace_or_404,
     message_get_for_workspace_or_404,
@@ -182,7 +182,7 @@ class AgentRunListCreateView(WorkspaceScopedMixin, generics.ListCreateAPIView):
         # like every other read endpoint.
         if self.request.method == "POST":
             self.throttle_scope = "agent_execution"
-            return [ScopedRateThrottle()]
+            return [SafeScopedRateThrottle()]
         return super().get_throttles()
 
     def get_serializer_class(self):
@@ -203,6 +203,13 @@ class AgentRunListCreateView(WorkspaceScopedMixin, generics.ListCreateAPIView):
             429: error_response("Too many run requests.", examples=[RATE_LIMITED_EXAMPLE]),
         },
     )
+    def post(self, request, *args, **kwargs):
+        # drf-spectacular introspects the actual verb handler (`post`, as
+        # defined by generics.ListCreateAPIView) to resolve a view's
+        # schema — decorating `create()` alone is silently ignored, since
+        # nothing statically ties it to the POST operation.
+        return self.create(request, *args, **kwargs)
+
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)

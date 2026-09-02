@@ -20,12 +20,12 @@ from drf_spectacular.utils import OpenApiExample, extend_schema, inline_serializ
 from rest_framework import generics, serializers, status
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
-from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from agents.models import AgentVersion
 from common.exceptions import SafeAPIError
 from common.pagination import StandardResultsSetPagination
+from common.throttling import SafeScopedRateThrottle
 from integrations.models import IntegrationConnection
 from workspaces.permissions import IsWorkspaceMember
 from workspaces.views import WorkspaceScopedMixin
@@ -211,6 +211,12 @@ class ChannelEndpointStatusView(WorkspaceScopedMixin, APIView):
 
 
 class ChannelEndpointRotateSecretView(WorkspaceScopedMixin, APIView):
+    # See integrations.views.IntegrationConnectionCredentialsView — same
+    # rationale (Section 17): rotation instantly invalidates the previous
+    # signing secret.
+    throttle_classes = [SafeScopedRateThrottle]
+    throttle_scope = "sensitive_mutation"
+
     def get_permissions(self):
         return [IsWorkspaceMember(), CanManageChannels()]
 
@@ -274,7 +280,7 @@ class ChatSessionBootstrapView(APIView):
 
     permission_classes = [AllowAny]
     authentication_classes = []
-    throttle_classes = [ScopedRateThrottle]
+    throttle_classes = [SafeScopedRateThrottle]
     throttle_scope = "channel_webchat_session"
 
     @extend_schema(request=None, responses=ChatSessionBootstrapResponseSerializer)
@@ -301,7 +307,7 @@ class ChatMessageListCreateView(APIView):
 
     permission_classes = [AllowAny]
     authentication_classes = []
-    throttle_classes = [ScopedRateThrottle]
+    throttle_classes = [SafeScopedRateThrottle]
     throttle_scope = "channel_webchat_message"
 
     @extend_schema(
@@ -365,7 +371,7 @@ class InboundWebhookView(APIView):
 
     permission_classes = [AllowAny]
     authentication_classes = []
-    throttle_classes = [ScopedRateThrottle]
+    throttle_classes = [SafeScopedRateThrottle]
     throttle_scope = "channel_inbound_webhook"
 
     @extend_schema(

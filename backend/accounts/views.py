@@ -15,7 +15,6 @@ from drf_spectacular.utils import OpenApiExample, OpenApiResponse, extend_schema
 from rest_framework.exceptions import AuthenticationFailed
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
-from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.serializers import TokenRefreshSerializer
@@ -23,6 +22,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 
 from common.csrf import enforce_csrf
 from common.schema import AUTHENTICATION_FAILED_EXAMPLE, error_response
+from common.throttling import SafeScopedRateThrottle
 
 from .serializers import LoginRequestSerializer, LoginSuccessSerializer, MeSerializer
 from .services import (
@@ -43,7 +43,7 @@ class LoginView(APIView):
     # `authenticate_by_email` raising AuthenticationFailed on bad credentials
     # must surface as 401, per the generic invalid-credentials contract.
     permission_classes = [AllowAny]
-    throttle_classes = [ScopedRateThrottle]
+    throttle_classes = [SafeScopedRateThrottle]
     throttle_scope = "login"
 
     @extend_schema(
@@ -105,7 +105,7 @@ class TokenRefreshCookieView(APIView):
     # See LoginView for why the default authenticators are kept: it is what
     # lets an invalid/missing refresh token surface as 401, not 403.
     permission_classes = [AllowAny]
-    throttle_classes = [ScopedRateThrottle]
+    throttle_classes = [SafeScopedRateThrottle]
     throttle_scope = "refresh"
 
     @extend_schema(

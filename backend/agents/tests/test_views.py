@@ -236,7 +236,9 @@ class TestAgentRunApi:
                 {"agent_version_id": str(version.id), "input_message": "hi"},
                 format="json",
             )
-            assert first.status_code == 400  # draft version, rejected before throttle exhausted twice
+            assert (
+                first.status_code == 400
+            )  # draft version, rejected before throttle exhausted twice
 
             second = client.post(
                 f"{_runs_base(membership.workspace)}/",

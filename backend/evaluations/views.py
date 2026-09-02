@@ -7,12 +7,12 @@ from django.http import Http404
 from drf_spectacular.utils import OpenApiResponse, extend_schema
 from rest_framework import generics, status
 from rest_framework.response import Response
-from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from agents.models import AgentVersion
 from common.exceptions import ConflictError, SafeAPIError
 from common.schema import RATE_LIMITED_EXAMPLE, error_response
+from common.throttling import SafeScopedRateThrottle
 from workspaces.views import WorkspaceScopedMixin
 
 from . import selectors, services
@@ -197,7 +197,7 @@ class EvaluationRunListCreateView(WorkspaceScopedMixin, generics.ListCreateAPIVi
         # EVALUATION_EXECUTION scope) — listing existing runs is unthrottled.
         if self.request.method == "POST":
             self.throttle_scope = "evaluation_execution"
-            return [ScopedRateThrottle()]
+            return [SafeScopedRateThrottle()]
         return super().get_throttles()
 
     def get_serializer_class(self):
@@ -222,6 +222,11 @@ class EvaluationRunListCreateView(WorkspaceScopedMixin, generics.ListCreateAPIVi
             429: error_response("Too many run requests.", examples=[RATE_LIMITED_EXAMPLE]),
         },
     )
+    def post(self, request, *args, **kwargs):
+        # See agents.views.AgentRunListCreateView.post — drf-spectacular
+        # introspects the actual verb handler, not `create()` alone.
+        return self.create(request, *args, **kwargs)
+
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -327,7 +332,7 @@ class EvaluationResultDetailView(WorkspaceScopedMixin, APIView):
 
 
 class EvaluationResultReplayView(WorkspaceScopedMixin, APIView):
-    throttle_classes = [ScopedRateThrottle]
+    throttle_classes = [SafeScopedRateThrottle]
     throttle_scope = "evaluation_execution"
 
     def get_permissions(self):

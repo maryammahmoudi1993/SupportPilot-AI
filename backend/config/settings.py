@@ -56,6 +56,9 @@ env = environ.Env(
     # real agent/evaluation work, not a cheap CRUD operation.
     AGENT_EXECUTION_THROTTLE_RATE=(str, "30/min"),
     EVALUATION_EXECUTION_THROTTLE_RATE=(str, "20/min"),
+    # Section 17: credential/secret rotation only — see
+    # integrations.views.IntegrationConnectionCredentialsView.
+    SENSITIVE_MUTATION_THROTTLE_RATE=(str, "10/min"),
     # AI provider layer (Phase 5). The default is the deterministic offline
     # provider so the application boots and every normal test/CI path runs
     # without paid credentials. The real provider is strictly opt-in.
@@ -358,6 +361,7 @@ REST_FRAMEWORK = {
         "channel_inbound_webhook": env("CHANNEL_INBOUND_WEBHOOK_THROTTLE_RATE"),
         "agent_execution": env("AGENT_EXECUTION_THROTTLE_RATE"),
         "evaluation_execution": env("EVALUATION_EXECUTION_THROTTLE_RATE"),
+        "sensitive_mutation": env("SENSITIVE_MUTATION_THROTTLE_RATE"),
     },
 }
 
