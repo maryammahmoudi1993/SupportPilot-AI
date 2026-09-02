@@ -23,6 +23,13 @@ class TestProductionSecurityHardening:
         # about the unrelated security-header hardening block, so it must
         # supply a token to keep reaching that code.
         monkeypatch.setenv("OBSERVABILITY_METRICS_TOKEN", "reload-test-metrics-token")
+        # This test verifies the *unset* SECURE_SSL_REDIRECT default (True
+        # outside DEBUG) — Phase 14 Milestone 5 made it an explicit,
+        # overridable env var (e.g. CI legitimately sets it to False, since
+        # a CI runner has no TLS listener); clear any inherited value from
+        # the calling environment so this test always exercises the real
+        # default, not whatever happens to be set around it.
+        monkeypatch.delenv("SECURE_SSL_REDIRECT", raising=False)
 
         try:
             reloaded = importlib.reload(settings_module)
