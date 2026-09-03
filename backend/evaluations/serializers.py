@@ -16,6 +16,14 @@ from .models import (
 
 MAX_NAME_CHARS = 200
 MAX_INPUT_MESSAGE_CHARS = 8000
+MAX_JSON_METADATA_BYTES = 8000
+
+
+def _validate_json_size(value: dict) -> None:
+    import json
+
+    if len(json.dumps(value)) > MAX_JSON_METADATA_BYTES:
+        raise serializers.ValidationError("Payload is too large.")
 
 
 class EvaluationDatasetSerializer(serializers.ModelSerializer):
@@ -53,8 +61,8 @@ class EvaluationCaseWriteSerializer(serializers.Serializer):
     name = serializers.CharField(max_length=MAX_NAME_CHARS)
     status = serializers.ChoiceField(choices=EvaluationCaseStatus.choices, required=False)
     input_message = serializers.CharField(max_length=MAX_INPUT_MESSAGE_CHARS)
-    seeded_context = serializers.JSONField(required=False)
-    expectations = serializers.JSONField(required=False)
+    seeded_context = serializers.JSONField(required=False, validators=[_validate_json_size])
+    expectations = serializers.JSONField(required=False, validators=[_validate_json_size])
 
 
 class EvaluationRunSerializer(serializers.ModelSerializer):
@@ -86,7 +94,7 @@ class EvaluationRunSerializer(serializers.ModelSerializer):
 class EvaluationRunCreateSerializer(serializers.Serializer):
     dataset_id = serializers.UUIDField()
     agent_version_id = serializers.UUIDField()
-    threshold_config = serializers.JSONField(required=False)
+    threshold_config = serializers.JSONField(required=False, validators=[_validate_json_size])
 
 
 class EvaluationResultSerializer(serializers.ModelSerializer):

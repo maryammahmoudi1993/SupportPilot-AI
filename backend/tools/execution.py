@@ -163,7 +163,19 @@ def execute_tool(
 
     # 4. Input size + schema validation. The handler is never invoked on
     # invalid input (section 17, 74).
-    if len(json.dumps(arguments, default=str)) > MAX_ARGUMENTS_BYTES:
+    #
+    # ``arguments`` is still a raw, untyped dict here (schema validation
+    # happens below) — a pathologically deep-but-small nesting (e.g. ~1000
+    # levels of a single-key dict fits well under MAX_ARGUMENTS_BYTES)
+    # makes ``json.dumps`` itself raise ``RecursionError`` before this
+    # size guard can reject it on length. That must fail the same safe,
+    # closed way as an oversized payload — never as an unhandled
+    # exception escaping the tool boundary (Phase 15 checkpoint 5, Part G).
+    try:
+        arguments_json_length = len(json.dumps(arguments, default=str))
+    except RecursionError as exc:
+        raise ToolInvalidInputError("Tool arguments payload is too large.") from exc
+    if arguments_json_length > MAX_ARGUMENTS_BYTES:
         raise ToolInvalidInputError("Tool arguments payload is too large.")
     if idempotency_key and len(idempotency_key) > MAX_IDEMPOTENCY_KEY_LENGTH:
         raise ToolInvalidInputError("Idempotency key is too long.")

@@ -124,6 +124,31 @@ class TestInputValidation:
         with pytest.raises(ToolInvalidInputError):
             execute_tool(agent_run=run, tool_key="demo.echo", arguments={"message": "x" * 5000})
 
+    def test_pathologically_deep_but_small_argument_is_rejected_not_a_recursion_error(self):
+        """Phase 15 checkpoint 5, Part G: a single-key dict nested ~1000
+        levels deep serializes to only a few KB (well under the size cap)
+        but makes ``json.dumps`` itself raise ``RecursionError`` before the
+        size guard can measure it. That must fail closed as the same
+        ``ToolInvalidInputError`` the size guard raises for an oversized
+        payload — never escape as an unhandled ``RecursionError``."""
+        run = _running_run()
+        _bind_demo_echo(run)
+        from tools.models import ToolExecution
+
+        deeply_nested: dict = {}
+        cursor = deeply_nested
+        for _ in range(2000):
+            cursor["a"] = {}
+            cursor = cursor["a"]
+
+        with pytest.raises(ToolInvalidInputError):
+            execute_tool(
+                agent_run=run,
+                tool_key="demo.echo",
+                arguments={"message": "hi", "extra": deeply_nested},
+            )
+        assert not ToolExecution.objects.filter(agent_run=run).exists()
+
 
 @pytest.mark.django_db
 class TestSecurityContextVsArguments:
