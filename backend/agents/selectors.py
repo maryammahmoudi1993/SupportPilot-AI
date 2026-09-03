@@ -11,6 +11,7 @@ from uuid import UUID
 
 from django.db.models import QuerySet
 from django.http import Http404
+from rest_framework.exceptions import ValidationError
 
 from workspaces.models import Workspace
 
@@ -23,7 +24,9 @@ def agent_definition_list_for_workspace(
     queryset = AgentDefinition.objects.filter(workspace=workspace)
     if status:
         queryset = queryset.filter(status=status)
-    return queryset.order_by("-created_at")
+    # `-id` breaks ties within the same created_at timestamp so paginated
+    # listing stays deterministic (Phase 14 Section 4).
+    return queryset.order_by("-created_at", "-id")
 
 
 def agent_definition_get_for_workspace_or_404(
@@ -69,9 +72,12 @@ def agent_run_list_for_workspace(
         try:
             resolved_id = UUID(str(agent_definition_id))
         except ValueError:
-            return queryset.none()
+            # A malformed filter must fail predictably (Section 7) — never
+            # silently returned as "no matches", which would look like an
+            # honestly-applied filter that simply found nothing.
+            raise ValidationError({"agent_id": "Must be a valid UUID."}) from None
         queryset = queryset.filter(agent_version__agent_definition_id=resolved_id)
-    return queryset.order_by("-created_at")
+    return queryset.order_by("-created_at", "-id")
 
 
 def agent_run_get_for_workspace_or_404(*, workspace: Workspace, run_id: UUID | str) -> AgentRun:

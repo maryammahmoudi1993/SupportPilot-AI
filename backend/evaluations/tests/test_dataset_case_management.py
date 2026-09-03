@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 from django.core.exceptions import ValidationError
+from rest_framework.exceptions import ValidationError as DRFValidationError
 
 from accounts.tests.factories import UserFactory
 from workspaces.tests.factories import WorkspaceFactory
@@ -97,10 +98,10 @@ class TestSelectors:
         filtered = selectors.run_list_for_workspace(workspace=workspace, dataset_id=str(dataset.id))
         assert list(filtered) == [run]
 
-        assert (
-            selectors.run_list_for_workspace(workspace=workspace, dataset_id="not-a-uuid").count()
-            == 0
-        )
+        # Regression (Phase 14, Section 7): a malformed filter must fail
+        # predictably, not be silently treated as "no matches".
+        with pytest.raises(DRFValidationError):
+            selectors.run_list_for_workspace(workspace=workspace, dataset_id="not-a-uuid")
 
     def test_result_list_filters_by_passed(self):
         from agents.tests.factories import PublishedAgentVersionFactory

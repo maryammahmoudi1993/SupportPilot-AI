@@ -36,7 +36,7 @@ def conversation_list_for_workspace(
         qs = qs.filter(
             assigned_to=assigned_to if isinstance(assigned_to, UUID) else UUID(assigned_to)
         )
-    return qs.order_by("-last_message_at", "-created_at")
+    return qs.order_by("-last_message_at", "-created_at", "-id")
 
 
 def conversation_get_for_workspace_or_404(
@@ -56,7 +56,7 @@ def message_list_for_conversation(*, conversation: Conversation) -> QuerySet[Mes
     return (
         Message.objects.filter(conversation=conversation)
         .select_related("sender_membership", "sender_membership__user")
-        .order_by("created_at")
+        .order_by("created_at", "id")
     )
 
 

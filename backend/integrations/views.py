@@ -11,6 +11,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from common.exceptions import SafeAPIError
+from common.throttling import SafeScopedRateThrottle
 from workspaces.permissions import IsWorkspaceMember
 from workspaces.views import WorkspaceScopedMixin
 
@@ -111,6 +112,14 @@ class IntegrationConnectionDetailView(WorkspaceScopedMixin, APIView):
 
 
 class IntegrationConnectionCredentialsView(WorkspaceScopedMixin, APIView):
+    # Section 17: credential rotation is a genuinely sensitive mutation —
+    # each rotation instantly invalidates the previous credentials, so an
+    # accidental or malicious rapid-rotation loop is a real, self-inflicted
+    # availability risk unique to this action (unlike an ordinary CRUD
+    # write, which idempotency/RBAC already cover).
+    throttle_classes = [SafeScopedRateThrottle]
+    throttle_scope = "sensitive_mutation"
+
     def get_permissions(self):
         return [IsWorkspaceMember(), CanManageIntegrations()]
 

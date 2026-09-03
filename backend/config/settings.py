@@ -51,6 +51,19 @@ env = environ.Env(
     KNOWLEDGE_INGESTION_MAX_ATTEMPTS=(int, 3),
     AUTH_LOGIN_THROTTLE_RATE=(str, "10/min"),
     AUTH_REFRESH_THROTTLE_RATE=(str, "30/min"),
+    # Phase 14 (Section 19-20): execution-triggering endpoints get their own
+    # bounded categories distinct from ordinary reads/writes — these run
+    # real agent/evaluation work, not a cheap CRUD operation.
+    AGENT_EXECUTION_THROTTLE_RATE=(str, "30/min"),
+    EVALUATION_EXECUTION_THROTTLE_RATE=(str, "20/min"),
+    # Section 17: credential/secret rotation only — see
+    # integrations.views.IntegrationConnectionCredentialsView.
+    SENSITIVE_MUTATION_THROTTLE_RATE=(str, "10/min"),
+    # Trusted-proxy depth for DRF throttle identity (get_ident). 0 = no
+    # trusted reverse proxy in front of this deployment — a caller-supplied
+    # X-Forwarded-For is never trusted. See config/settings.py's
+    # DRF_NUM_PROXIES validation below and docs/api/frontend-integration.md.
+    DRF_NUM_PROXIES=(int, 0),
     # AI provider layer (Phase 5). The default is the deterministic offline
     # provider so the application boots and every normal test/CI path runs
     # without paid credentials. The real provider is strictly opt-in.
@@ -144,6 +157,11 @@ env = environ.Env(
     CHANNELS_INBOUND_SWEEP_INTERVAL_SECONDS=(float, 30.0),
     CHANNEL_WEBCHAT_SESSION_THROTTLE_RATE=(str, "30/min"),
     CHANNEL_WEBCHAT_MESSAGE_THROTTLE_RATE=(str, "60/min"),
+    # Phase 14 (Section 3): the public message-history poll has no page
+    # parameter of its own (the `after` cursor already bounds incremental
+    # polling) — this caps a single call so a widget re-opening a very long
+    # session can't pull the entire unbounded transcript in one response.
+    CHANNEL_WEBCHAT_MESSAGE_HISTORY_LIMIT=(int, 200),
     CHANNEL_INBOUND_WEBHOOK_THROTTLE_RATE=(str, "120/min"),
     # Production observability (Phase 11 Block 1). Metrics are bounded,
     # low-cardinality, vendor-neutral Prometheus exposition — never a
@@ -318,8 +336,24 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 # Custom user model
 AUTH_USER_MODEL = "accounts.User"
 
+# Trusted-proxy depth for DRF throttle identity (ScopedRateThrottle /
+# SimpleRateThrottle.get_ident). DRF's own default is `NUM_PROXIES = None`,
+# which trusts an X-Forwarded-For header supplied by *any* direct caller —
+# not just a real upstream proxy — undermining IP-based rate limiting
+# whenever no reverse proxy sits in front of the application. This
+# deployment has no reverse proxy today, so the safe default is `0`: DRF
+# then ignores X-Forwarded-For entirely and always uses REMOTE_ADDR (see
+# rest_framework.throttling.BaseThrottle.get_ident). A future deployment
+# that does run behind exactly N trusted proxies which sanitize/overwrite
+# the forwarded-address chain may set DRF_NUM_PROXIES=N explicitly; setting
+# it does not, by itself, make an untrusted proxy's forwarding safe.
+DRF_NUM_PROXIES = env("DRF_NUM_PROXIES")
+if DRF_NUM_PROXIES < 0:
+    raise ValueError("DRF_NUM_PROXIES must be >= 0")
+
 # REST Framework
 REST_FRAMEWORK = {
+    "NUM_PROXIES": DRF_NUM_PROXIES,
     "DEFAULT_PAGINATION_CLASS": "common.pagination.StandardResultsSetPagination",
     "PAGE_SIZE": 50,
     "DEFAULT_FILTER_BACKENDS": [
@@ -346,6 +380,9 @@ REST_FRAMEWORK = {
         "channel_webchat_session": env("CHANNEL_WEBCHAT_SESSION_THROTTLE_RATE"),
         "channel_webchat_message": env("CHANNEL_WEBCHAT_MESSAGE_THROTTLE_RATE"),
         "channel_inbound_webhook": env("CHANNEL_INBOUND_WEBHOOK_THROTTLE_RATE"),
+        "agent_execution": env("AGENT_EXECUTION_THROTTLE_RATE"),
+        "evaluation_execution": env("EVALUATION_EXECUTION_THROTTLE_RATE"),
+        "sensitive_mutation": env("SENSITIVE_MUTATION_THROTTLE_RATE"),
     },
 }
 
@@ -470,6 +507,8 @@ KNOWLEDGE_DEFAULT_TOP_K = env("KNOWLEDGE_DEFAULT_TOP_K")
 KNOWLEDGE_MAX_TOP_K = env("KNOWLEDGE_MAX_TOP_K")
 KNOWLEDGE_MAX_QUERY_LENGTH = env("KNOWLEDGE_MAX_QUERY_LENGTH")
 KNOWLEDGE_INGESTION_MAX_ATTEMPTS = env("KNOWLEDGE_INGESTION_MAX_ATTEMPTS")
+
+CHANNEL_WEBCHAT_MESSAGE_HISTORY_LIMIT = env("CHANNEL_WEBCHAT_MESSAGE_HISTORY_LIMIT")
 
 if not 0 <= KNOWLEDGE_CHUNK_OVERLAP < KNOWLEDGE_CHUNK_SIZE:
     raise ValueError("KNOWLEDGE_CHUNK_OVERLAP must be >= 0 and smaller than chunk size")
@@ -656,8 +695,28 @@ LOGGING = {
 }
 
 # Security settings for production
+#
+# SECURE_SSL_REDIRECT defaults to True outside DEBUG (the safe production
+# posture: this process terminates plain HTTP and always redirects to
+# HTTPS) but is explicitly overridable via the SECURE_SSL_REDIRECT env var
+# — never implicitly, only by a caller that deliberately sets it. Two real
+# needs this serves: (1) a CI/test environment that legitimately runs with
+# DEBUG=False (to exercise other production-only settings/behavior) but has
+# no TLS listener, where redirecting a request client never sent as HTTPS
+# would make every plain-HTTP test request come back 301 instead of its
+# real response — masking every other check behind a false failure; (2) a
+# real deployment that terminates TLS at a reverse proxy/load balancer in
+# front of this process and forwards plain HTTP internally, where this
+# process redirecting again would be wrong. Explicitly setting it to False
+# does not itself make either topology safe — that's the CI runner having
+# no public exposure, or the proxy actually terminating TLS — same
+# discipline as DRF_NUM_PROXIES above.
+_SECURE_SSL_REDIRECT_OVERRIDE = env.bool("SECURE_SSL_REDIRECT", default=None)
+
 if not DEBUG:
-    SECURE_SSL_REDIRECT = True
+    SECURE_SSL_REDIRECT = (
+        _SECURE_SSL_REDIRECT_OVERRIDE if _SECURE_SSL_REDIRECT_OVERRIDE is not None else True
+    )
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
     SECURE_HSTS_SECONDS = 31536000

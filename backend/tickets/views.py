@@ -12,6 +12,7 @@ from rest_framework import generics, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from common.query_params import parse_uuid_filter
 from conversations.selectors import conversation_get_for_workspace_or_404
 from customers.selectors import customer_get_for_workspace_or_404
 from workspaces.permissions import IsWorkspaceMember
@@ -65,10 +66,10 @@ class TicketListCreateView(WorkspaceScopedMixin, generics.ListCreateAPIView):
             workspace=self.workspace,
             status=params.get("status"),
             priority=params.get("priority"),
-            customer_id=params.get("customer"),
-            assigned_to=params.get("assigned_to"),
+            customer_id=parse_uuid_filter(params.get("customer"), param="customer"),
+            assigned_to=parse_uuid_filter(params.get("assigned_to"), param="assigned_to"),
             unassigned=_as_bool(params.get("unassigned")),
-            conversation_id=params.get("conversation"),
+            conversation_id=parse_uuid_filter(params.get("conversation"), param="conversation"),
         )
 
     def create(self, request, *args, **kwargs):

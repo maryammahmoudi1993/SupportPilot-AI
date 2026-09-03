@@ -3,11 +3,37 @@
 import logging
 
 from rest_framework import status
-from rest_framework.exceptions import APIException
+from rest_framework.exceptions import (
+    APIException,
+    AuthenticationFailed,
+    NotAuthenticated,
+    NotFound,
+    PermissionDenied,
+    Throttled,
+)
 from rest_framework.response import Response
 from rest_framework.views import exception_handler
 
 logger = logging.getLogger("supportpilot")
+
+# Stable, client-facing error codes for common DRF exception families that
+# otherwise all collapse into the generic "validation_error" fallback below.
+# Order matters: the first matching class (via isinstance) wins, so more
+# specific exceptions must precede their base classes.
+_STABLE_CODE_BY_EXCEPTION = (
+    (Throttled, "rate_limited"),
+    (NotAuthenticated, "authentication_failed"),
+    (AuthenticationFailed, "authentication_failed"),
+    (PermissionDenied, "permission_denied"),
+    (NotFound, "not_found"),
+)
+
+
+def _stable_code_for(exc) -> str | None:
+    for exc_class, code in _STABLE_CODE_BY_EXCEPTION:
+        if isinstance(exc, exc_class):
+            return code
+    return None
 
 
 class ConflictError(APIException):
@@ -71,12 +97,16 @@ def custom_exception_handler(exc, context):
         return response
 
     if isinstance(data, dict) and "detail" in data:
-        response.data = {
-            "error": {
-                "code": "validation_error",
-                "message": str(data.get("detail", "Invalid request.")),
-            }
+        code = _stable_code_for(exc) or "validation_error"
+        error = {
+            "code": code,
+            "message": str(data.get("detail", "Invalid request.")),
         }
+        if isinstance(exc, Throttled) and exc.wait is not None:
+            # Bounded, non-sensitive retry hint (Section 23) — never expose
+            # the underlying Redis/cache implementation.
+            error["details"] = {"retry_after": int(exc.wait)}
+        response.data = {"error": error}
         return response
 
     # Anything else DRF can produce for a handled exception — a dict of

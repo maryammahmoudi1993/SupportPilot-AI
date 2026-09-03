@@ -50,7 +50,7 @@ dependencies = [
     "drf-spectacular==0.30.0",
     "django-filter==25.1",
     "djangorestframework-simplejwt==5.5.1",
-    "pypdf==6.15.0",
+    "pypdf==6.16.1",
     # Phase 11: vendor-neutral Prometheus exposition for bounded-cardinality
     # production metrics (observability/metrics.py). A pure client library —
     # no server component, no vendor SDK/agent, no hard external network

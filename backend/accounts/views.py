@@ -11,17 +11,18 @@ from __future__ import annotations
 
 from django.conf import settings
 from django.middleware.csrf import get_token
-from drf_spectacular.utils import OpenApiResponse, extend_schema
+from drf_spectacular.utils import OpenApiExample, OpenApiResponse, extend_schema
 from rest_framework.exceptions import AuthenticationFailed
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
-from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.serializers import TokenRefreshSerializer
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from common.csrf import enforce_csrf
+from common.schema import AUTHENTICATION_FAILED_EXAMPLE, error_response
+from common.throttling import SafeScopedRateThrottle
 
 from .serializers import LoginRequestSerializer, LoginSuccessSerializer, MeSerializer
 from .services import (
@@ -42,15 +43,43 @@ class LoginView(APIView):
     # `authenticate_by_email` raising AuthenticationFailed on bad credentials
     # must surface as 401, per the generic invalid-credentials contract.
     permission_classes = [AllowAny]
-    throttle_classes = [ScopedRateThrottle]
+    throttle_classes = [SafeScopedRateThrottle]
     throttle_scope = "login"
 
     @extend_schema(
         request=LoginRequestSerializer,
         responses={
             200: LoginSuccessSerializer,
-            401: OpenApiResponse(description="Invalid credentials."),
+            401: error_response("Invalid credentials.", examples=[AUTHENTICATION_FAILED_EXAMPLE]),
         },
+        examples=[
+            OpenApiExample(
+                "Login request",
+                value={"email": "jane@example.com", "password": "correct-horse-battery-staple"},
+                request_only=True,
+            ),
+            OpenApiExample(
+                "Login success",
+                value={
+                    "access": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.example-access-token",
+                    "user": {
+                        "id": 42,
+                        "email": "jane@example.com",
+                        "display_name": "Jane Doe",
+                        "workspaces": [
+                            {
+                                "id": "5c4d0c9e-6c0a-4b0a-9f0e-1234567890ab",
+                                "name": "Acme Support",
+                                "slug": "acme-support",
+                                "role": "support_agent",
+                            }
+                        ],
+                    },
+                },
+                response_only=True,
+                status_codes=["200"],
+            ),
+        ],
     )
     def post(self, request):
         enforce_csrf(request)
@@ -76,7 +105,7 @@ class TokenRefreshCookieView(APIView):
     # See LoginView for why the default authenticators are kept: it is what
     # lets an invalid/missing refresh token surface as 401, not 403.
     permission_classes = [AllowAny]
-    throttle_classes = [ScopedRateThrottle]
+    throttle_classes = [SafeScopedRateThrottle]
     throttle_scope = "refresh"
 
     @extend_schema(

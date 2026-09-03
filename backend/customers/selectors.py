@@ -36,7 +36,7 @@ def customer_list_for_workspace(
             | Q(phone__icontains=search)
             | Q(external_id__icontains=search)
         )
-    return qs.order_by("-created_at")
+    return qs.order_by("-created_at", "-id")
 
 
 def customer_get_for_workspace_or_404(*, workspace: Workspace, customer_id: UUID | str) -> Customer:

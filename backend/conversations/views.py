@@ -12,6 +12,7 @@ from rest_framework import generics, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from common.query_params import parse_uuid_filter
 from customers.selectors import customer_get_for_workspace_or_404
 from workspaces.permissions import IsWorkspaceMember
 from workspaces.selectors import get_workspace_member_or_404
@@ -61,10 +62,10 @@ class ConversationListCreateView(WorkspaceScopedMixin, generics.ListCreateAPIVie
         params = self.request.query_params
         return selectors.conversation_list_for_workspace(
             workspace=self.workspace,
-            customer_id=params.get("customer"),
+            customer_id=parse_uuid_filter(params.get("customer"), param="customer"),
             status=params.get("status"),
             channel=params.get("channel"),
-            assigned_to=params.get("assigned_to"),
+            assigned_to=parse_uuid_filter(params.get("assigned_to"), param="assigned_to"),
             unassigned=_as_bool(params.get("unassigned")),
         )
 

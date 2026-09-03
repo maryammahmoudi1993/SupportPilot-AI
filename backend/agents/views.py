@@ -9,6 +9,8 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from common.exceptions import ConflictError, SafeAPIError
+from common.schema import RATE_LIMITED_EXAMPLE, error_response
+from common.throttling import SafeScopedRateThrottle
 from conversations.selectors import (
     conversation_get_for_workspace_or_404,
     message_get_for_workspace_or_404,
@@ -174,6 +176,15 @@ class AgentRunListCreateView(WorkspaceScopedMixin, generics.ListCreateAPIView):
             return [IsWorkspaceMember(), CanRunAgents()]
         return [IsWorkspaceMember()]
 
+    def get_throttles(self):
+        # Only the execution-triggering POST is rate-limited (Section 19-20:
+        # AGENT_EXECUTION scope) — listing existing runs stays unthrottled
+        # like every other read endpoint.
+        if self.request.method == "POST":
+            self.throttle_scope = "agent_execution"
+            return [SafeScopedRateThrottle()]
+        return super().get_throttles()
+
     def get_serializer_class(self):
         return AgentRunCreateSerializer if self.request.method == "POST" else AgentRunSerializer
 
@@ -185,6 +196,19 @@ class AgentRunListCreateView(WorkspaceScopedMixin, generics.ListCreateAPIView):
             status=self.request.query_params.get("status"),
             agent_definition_id=self.request.query_params.get("agent_id"),
         )
+
+    @extend_schema(
+        responses={
+            201: AgentRunSerializer,
+            429: error_response("Too many run requests.", examples=[RATE_LIMITED_EXAMPLE]),
+        },
+    )
+    def post(self, request, *args, **kwargs):
+        # drf-spectacular introspects the actual verb handler (`post`, as
+        # defined by generics.ListCreateAPIView) to resolve a view's
+        # schema — decorating `create()` alone is silently ignored, since
+        # nothing statically ties it to the POST operation.
+        return self.create(request, *args, **kwargs)
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)

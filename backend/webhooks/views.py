@@ -13,6 +13,7 @@ from rest_framework.views import APIView
 
 from common.exceptions import SafeAPIError
 from common.pagination import StandardResultsSetPagination
+from common.throttling import SafeScopedRateThrottle
 from workspaces.permissions import IsWorkspaceMember
 from workspaces.views import WorkspaceScopedMixin
 
@@ -167,6 +168,12 @@ class WebhookEndpointStatusView(WorkspaceScopedMixin, APIView):
 
 
 class WebhookEndpointRotateSecretView(WorkspaceScopedMixin, APIView):
+    # See integrations.views.IntegrationConnectionCredentialsView — same
+    # rationale (Section 17): rotation instantly invalidates the previous
+    # signing secret.
+    throttle_classes = [SafeScopedRateThrottle]
+    throttle_scope = "sensitive_mutation"
+
     def get_permissions(self):
         return [IsWorkspaceMember(), CanManageWebhooks()]
 

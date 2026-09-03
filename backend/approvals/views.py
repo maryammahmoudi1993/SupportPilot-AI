@@ -77,7 +77,7 @@ class ApprovalRequestListView(WorkspaceScopedMixin, generics.ListAPIView):
         qs = (
             ApprovalRequest.objects.filter(workspace=self.workspace)
             .select_related("decision")
-            .order_by("created_at")
+            .order_by("created_at", "id")
         )
         status_filter = self.request.query_params.get("status")
         if status_filter:

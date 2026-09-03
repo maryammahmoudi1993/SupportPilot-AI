@@ -1,5 +1,6 @@
 import pytest
 from django.http import Http404
+from rest_framework.exceptions import ValidationError
 
 from agents import selectors
 from workspaces.tests.factories import WorkspaceFactory
@@ -86,13 +87,16 @@ class TestAgentSelectorListing:
         )
         assert [v.version for v in versions] == [2, 1]
 
-    def test_run_list_with_malformed_agent_id_returns_empty(self):
+    def test_run_list_with_malformed_agent_id_fails_predictably(self):
+        # Regression (Phase 14, Section 7): a malformed filter must not be
+        # silently treated as "no matches" — that would look like an
+        # honestly-applied filter that simply found nothing.
         workspace = WorkspaceFactory()
         AgentRunFactory(workspace=workspace)
-        result = selectors.agent_run_list_for_workspace(
-            workspace=workspace, agent_definition_id="not-a-uuid"
-        )
-        assert result.count() == 0
+        with pytest.raises(ValidationError):
+            selectors.agent_run_list_for_workspace(
+                workspace=workspace, agent_definition_id="not-a-uuid"
+            )
 
     def test_run_list_filters_by_status_and_agent(self):
         version = PublishedAgentVersionFactory()

@@ -1,5 +1,9 @@
+from unittest import mock
+
 import pytest
+from django.core.cache import cache
 from rest_framework.test import APIClient
+from rest_framework.throttling import ScopedRateThrottle
 
 from agents.models import AgentRunStatus
 from agents.providers.fake import DeterministicFakeLLMProvider, FakeLLMScenario
@@ -217,6 +221,37 @@ class TestAgentRunApi:
         )
         assert response.status_code == 400
         assert response.data["error"]["code"] == "agent_version_not_published"
+
+    def test_run_creation_is_rate_limited_but_listing_is_not(self):
+        # Regression (Phase 14, Section 19-20/24): AGENT_EXECUTION throttling
+        # must apply only to the run-creating POST, never to GET listing.
+        cache.clear()
+        membership = WorkspaceMembershipFactory(role=WorkspaceRole.SUPPORT_AGENT)
+        version = AgentVersionFactory(agent_definition__workspace=membership.workspace)  # draft
+        client = _client(membership.user)
+
+        with mock.patch.dict(ScopedRateThrottle.THROTTLE_RATES, {"agent_execution": "1/min"}):
+            first = client.post(
+                f"{_runs_base(membership.workspace)}/",
+                {"agent_version_id": str(version.id), "input_message": "hi"},
+                format="json",
+            )
+            assert (
+                first.status_code == 400
+            )  # draft version, rejected before throttle exhausted twice
+
+            second = client.post(
+                f"{_runs_base(membership.workspace)}/",
+                {"agent_version_id": str(version.id), "input_message": "hi"},
+                format="json",
+            )
+            assert second.status_code == 429
+            assert second.data["error"]["code"] == "rate_limited"
+
+            # Listing runs is a separate throttle scope (none) — unaffected.
+            listing = client.get(f"{_runs_base(membership.workspace)}/")
+            assert listing.status_code == 200
+        cache.clear()
 
     def test_run_can_link_a_conversation_and_ticket_from_the_same_workspace(self):
         from conversations.tests.factories import ConversationFactory

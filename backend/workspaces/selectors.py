@@ -29,7 +29,7 @@ def list_workspaces_for_user(*, user: User) -> QuerySet[Workspace]:
             memberships__is_active=True,
         )
         .distinct()
-        .order_by("-created_at")
+        .order_by("-created_at", "-id")
     )
 
 
@@ -66,7 +66,7 @@ def get_workspace_members(*, workspace: Workspace) -> QuerySet[WorkspaceMembersh
     return (
         WorkspaceMembership.objects.filter(workspace=workspace, is_active=True)
         .select_related("user")
-        .order_by("-created_at")
+        .order_by("-created_at", "-id")
     )
 
 

@@ -11,6 +11,8 @@ from rest_framework.views import APIView
 
 from agents.models import AgentVersion
 from common.exceptions import ConflictError, SafeAPIError
+from common.schema import RATE_LIMITED_EXAMPLE, error_response
+from common.throttling import SafeScopedRateThrottle
 from workspaces.views import WorkspaceScopedMixin
 
 from . import selectors, services
@@ -190,6 +192,14 @@ class EvaluationRunListCreateView(WorkspaceScopedMixin, generics.ListCreateAPIVi
             return [CanViewEvaluations(), CanRunEvaluations()]
         return [CanViewEvaluations()]
 
+    def get_throttles(self):
+        # Only the execution-triggering POST is rate-limited (Section 19-20:
+        # EVALUATION_EXECUTION scope) — listing existing runs is unthrottled.
+        if self.request.method == "POST":
+            self.throttle_scope = "evaluation_execution"
+            return [SafeScopedRateThrottle()]
+        return super().get_throttles()
+
     def get_serializer_class(self):
         return (
             EvaluationRunCreateSerializer
@@ -205,6 +215,17 @@ class EvaluationRunListCreateView(WorkspaceScopedMixin, generics.ListCreateAPIVi
             status=self.request.query_params.get("status"),
             dataset_id=self.request.query_params.get("dataset_id"),
         )
+
+    @extend_schema(
+        responses={
+            201: EvaluationRunSerializer,
+            429: error_response("Too many run requests.", examples=[RATE_LIMITED_EXAMPLE]),
+        },
+    )
+    def post(self, request, *args, **kwargs):
+        # See agents.views.AgentRunListCreateView.post — drf-spectacular
+        # introspects the actual verb handler, not `create()` alone.
+        return self.create(request, *args, **kwargs)
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
@@ -311,6 +332,9 @@ class EvaluationResultDetailView(WorkspaceScopedMixin, APIView):
 
 
 class EvaluationResultReplayView(WorkspaceScopedMixin, APIView):
+    throttle_classes = [SafeScopedRateThrottle]
+    throttle_scope = "evaluation_execution"
+
     def get_permissions(self):
         return [CanViewEvaluations(), CanRunEvaluations()]
 
