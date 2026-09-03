@@ -225,6 +225,116 @@ class TestToolCallBudget:
         with pytest.raises(ToolBudgetExceededError):
             execute_tool(agent_run=stale_run, tool_key="demo.echo", arguments={"message": "hi"})
 
+    @pytest.mark.django_db(transaction=True)
+    def test_n_minus_1_boundary_grants_exactly_one_of_two_concurrent_slots(self):
+        """The strict hard-ceiling proof (Phase 15 checkpoint 2, Part A):
+        persisted count == max - 1, two REAL concurrent execution attempts.
+        Exactly one must obtain the final slot and actually run; the other
+        must be rejected with the established budget-exceeded behavior
+        having never invoked the handler. The persisted count must land on
+        exactly ``max``, never ``max + 1`` — the lost-update fix alone
+        (atomic increment) does not guarantee this; the fix under test here
+        is the single conditional ``UPDATE ... WHERE tool_call_count <
+        max_tool_calls`` reservation immediately before the handler runs."""
+        import django.db as django_db
+
+        from tools.models import ToolExecution
+
+        max_tool_calls = 3
+        run = _running_run(max_tool_calls=max_tool_calls)
+        _bind_demo_echo(run)
+        run.tool_call_count = max_tool_calls - 1
+        run.save()
+
+        results: list = []
+        errors: list = []
+        barrier = threading.Barrier(2)
+
+        def worker(key: str):
+            django_db.close_old_connections()
+            barrier.wait()
+            try:
+                results.append(
+                    execute_tool(
+                        agent_run=run,
+                        tool_key="demo.echo",
+                        arguments={"message": "boundary"},
+                        idempotency_key=key,
+                    )
+                )
+            except ToolBudgetExceededError as exc:
+                errors.append(exc)
+            finally:
+                django_db.close_old_connections()
+
+        threads = [threading.Thread(target=worker, args=(f"boundary-key-{i}",)) for i in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        # Exactly one caller got the final slot, exactly one was rejected.
+        assert len(results) == 1
+        assert len(errors) == 1
+
+        run.refresh_from_db()
+        assert run.tool_call_count == max_tool_calls  # never max + 1
+
+        # The winner's handler ran exactly once; the loser's row (if any
+        # was created before the reservation rejected it) never succeeded
+        # and never left a hidden second reservation.
+        succeeded = ToolExecution.objects.filter(
+            agent_run=run, status=ToolExecutionStatus.SUCCEEDED
+        )
+        assert succeeded.count() == 1
+        budget_rejected = ToolExecution.objects.filter(
+            agent_run=run, error_code=ToolBudgetExceededError.code
+        )
+        assert budget_rejected.count() == 1
+
+    @pytest.mark.django_db(transaction=True)
+    def test_count_already_at_max_two_concurrent_workers_yield_zero_executions(self):
+        """count == max, two concurrent callers: neither may execute."""
+        import django.db as django_db
+
+        max_tool_calls = 2
+        run = _running_run(max_tool_calls=max_tool_calls)
+        _bind_demo_echo(run)
+        run.tool_call_count = max_tool_calls
+        run.save()
+
+        results: list = []
+        errors: list = []
+        barrier = threading.Barrier(2)
+
+        def worker(key: str):
+            django_db.close_old_connections()
+            barrier.wait()
+            try:
+                results.append(
+                    execute_tool(
+                        agent_run=run,
+                        tool_key="demo.echo",
+                        arguments={"message": "at-max"},
+                        idempotency_key=key,
+                    )
+                )
+            except ToolBudgetExceededError as exc:
+                errors.append(exc)
+            finally:
+                django_db.close_old_connections()
+
+        threads = [threading.Thread(target=worker, args=(f"at-max-key-{i}",)) for i in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert len(results) == 0
+        assert len(errors) == 2
+        run.refresh_from_db()
+        assert run.tool_call_count == max_tool_calls
+
 
 @pytest.mark.django_db
 class TestIdempotency:
@@ -367,6 +477,13 @@ class TestIdempotency:
         executions = ToolExecution.objects.filter(agent_run=run, idempotency_key="race-key")
         assert executions.count() == 1
         assert len(results) + len(errors) == 2
+
+        # A duplicate/redelivered call for an idempotency key that already
+        # has (or is concurrently claiming) a logical execution must never
+        # create a hidden second budget reservation — only the one real
+        # attempt consumes a slot.
+        run.refresh_from_db()
+        assert run.tool_call_count == 1
 
 
 @pytest.mark.django_db
