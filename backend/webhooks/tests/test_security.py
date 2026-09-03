@@ -295,3 +295,47 @@ def test_empty_resolver_result_is_a_dns_resolution_error(monkeypatch):
 def test_zero_port_is_rejected():
     with pytest.raises(WebhookInvalidURLError):
         parse_webhook_url("https://example.com:0/")
+
+
+# ---------------------------------------------------------------------------
+# Alternate-notation IP bypass attempts (Phase 15 checkpoint 4, Part D,
+# section 15) — the block here is deliberately based on classifying
+# whatever the resolver actually returns, never on pattern-matching the
+# hostname string itself, so it is inherently robust to any notation the
+# resolver happens to accept. These use a deterministic fake resolver
+# rather than depending on the real OS resolver's willingness to parse a
+# given notation, which varies by platform/libc.
+# ---------------------------------------------------------------------------
+
+
+def test_trailing_dot_hostname_resolving_to_a_private_address_is_blocked(monkeypatch):
+    """A trailing-dot FQDN (``webhook.example.``) is a legal, distinct
+    hostname form some resolvers treat identically to the dot-less form —
+    if it resolves to a private address, it must be blocked exactly like
+    any other hostname would be."""
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo("192.168.1.10"))
+    with pytest.raises(WebhookDestinationBlockedError):
+        resolve_and_validate("webhook.example.", 443)
+
+
+def test_alternate_ip_notation_that_happens_to_resolve_to_loopback_is_blocked(monkeypatch):
+    """Simulates a resolver/libc that accepts an integer/hex-style host
+    literal (``2130706433`` / ``0x7f000001``, both ``127.0.0.1``) — this
+    project's classification runs on the resolved ``ipaddress`` object,
+    never on the original hostname string, so whatever alternate notation
+    a platform's resolver is willing to parse is caught here regardless."""
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo("127.0.0.1"))
+    with pytest.raises(WebhookDestinationBlockedError):
+        resolve_and_validate("2130706433", 443)
+    with pytest.raises(WebhookDestinationBlockedError):
+        resolve_and_validate("0x7f000001", 443)
+
+
+def test_literal_case_variants_never_bypass_the_localhost_check(monkeypatch):
+    def _fail_if_called(*args, **kwargs):  # pragma: no cover - assertion helper
+        raise AssertionError("literal localhost forms must be rejected before DNS resolution")
+
+    monkeypatch.setattr(socket, "getaddrinfo", _fail_if_called)
+    for form in ("LOCALHOST", "LocalHost", "localhost.", "LOCALHOST."):
+        with pytest.raises(WebhookDestinationBlockedError):
+            resolve_and_validate(form, 443)
