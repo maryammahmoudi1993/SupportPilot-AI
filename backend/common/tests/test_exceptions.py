@@ -97,3 +97,23 @@ class TestCustomExceptionHandler:
         assert response is not None
         assert response.status_code == 409
         assert "error" in response.data
+
+    def test_unhandled_exception_marker_in_message_never_reaches_the_client(self):
+        # Phase 15 Security Checkpoint 5 (Part D.2): a synthetic marker
+        # standing in for a secret-shaped value that ends up in a raw,
+        # unmapped exception's message must never appear in the JSON body
+        # returned to the client — only the fixed generic envelope may.
+        marker = "PHASE15_PASSWORD_MARKER_do-not-leak"
+        response = custom_exception_handler(
+            RuntimeError(f"provider call failed: password={marker}"), _context()
+        )
+
+        assert response is not None
+        assert response.status_code == 500
+        assert marker not in str(response.data)
+        assert response.data == {
+            "error": {
+                "code": "internal_server_error",
+                "message": "An internal server error occurred.",
+            }
+        }

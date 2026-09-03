@@ -37,3 +37,19 @@ def test_tool_result_is_redacted_bounded_and_keeps_untrusted_delimiters(settings
     assert rendered.endswith(TOOL_RESULT_END)
     assert len(rendered) <= 180
     assert "Bearer secret" not in rendered
+
+
+def test_tool_result_marker_under_sensitive_key_never_reaches_the_model_message():
+    # Phase 15 Security Checkpoint 5 (Part D.1, end-to-end): a synthetic
+    # marker under a sensitive-looking key must never survive
+    # ToolResultContext.as_model_message() — the only path a tool result
+    # takes into a subsequent model turn.
+    marker = "PHASE15_API_KEY_MARKER_do-not-leak"
+    rendered = ToolResultContext(
+        tool_key="integrations.rotate_credentials",
+        status="succeeded",
+        result={"api_key": marker, "provider": "stripe"},
+    ).as_model_message()
+
+    assert marker not in rendered
+    assert '"provider":"stripe"' in rendered.replace(" ", "")

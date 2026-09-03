@@ -63,3 +63,52 @@ class TestRedact:
         redact(payload)
 
         assert payload == {"password": "hunter2"}
+
+
+class TestRedactionMarkerLeakProof:
+    """Phase 15 Security Checkpoint 5 (Part D.1): prove a synthetic marker
+    string never survives ``redact()`` under any sensitive-looking key name.
+    Uses fake, unique markers — never real secrets."""
+
+    PASSWORD_MARKER = "PHASE15_PASSWORD_MARKER_do-not-leak"
+    TOKEN_MARKER = "PHASE15_TOKEN_MARKER_do-not-leak"
+    AUTH_MARKER = "PHASE15_AUTHORIZATION_MARKER_do-not-leak"
+
+    def test_marker_under_password_key_is_redacted(self):
+        result = redact({"password": self.PASSWORD_MARKER})
+
+        assert result["password"] == REDACTED
+        assert self.PASSWORD_MARKER not in str(result)
+
+    def test_marker_under_api_key_is_redacted(self):
+        result = redact({"api_key": self.TOKEN_MARKER})
+
+        assert result["api_key"] == REDACTED
+        assert self.TOKEN_MARKER not in str(result)
+
+    def test_marker_under_authorization_header_key_is_redacted(self):
+        result = redact({"Authorization": self.AUTH_MARKER})
+
+        assert result["Authorization"] == REDACTED
+        assert self.AUTH_MARKER not in str(result)
+
+    def test_marker_nested_under_sensitive_key_inside_a_list_is_redacted(self):
+        payload = {
+            "tool_calls": [
+                {"name": "rotate_credentials", "signing_key": self.TOKEN_MARKER},
+            ]
+        }
+
+        result = redact(payload)
+
+        assert result["tool_calls"][0]["signing_key"] == REDACTED
+        assert self.TOKEN_MARKER not in str(result)
+
+    def test_marker_under_a_non_sensitive_key_passes_through_unchanged(self):
+        # Sanity check on the proof above: redact() only touches values
+        # under keys that look sensitive, so this confirms the prior
+        # assertions are actually exercising the redaction path and not
+        # trivially passing because the marker was never present.
+        result = redact({"notes": self.PASSWORD_MARKER})
+
+        assert result["notes"] == self.PASSWORD_MARKER

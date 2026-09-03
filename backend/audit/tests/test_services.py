@@ -52,6 +52,28 @@ class TestRecordEvent:
         )
         assert event.metadata == {}
 
+    def test_metadata_is_persisted_verbatim_without_redaction(self):
+        # Phase 15 Security Checkpoint 5 (Part D.3): `record_event()` does
+        # NOT call `common.redaction.redact()` on `metadata` — this test
+        # documents that as the actual, current behavior (not a bug fix).
+        # Every existing call site passes only safe values (IDs, enums,
+        # booleans, provider names) by caller discipline, never raw
+        # secrets — see the audit/services.py source and call-site survey
+        # in this task's report. If a caller ever passed a secret-shaped
+        # value under a sensitive-looking key, it would be stored on the
+        # AuditEvent row exactly as given, unredacted.
+        marker = "PHASE15_WEBHOOK_SECRET_do-not-leak"
+
+        event = record_event(
+            action=AuditAction.INTEGRATION_CREDENTIALS_ROTATED,
+            target_type="integration_connection",
+            target_id="conn-1",
+            metadata={"provider": "stripe", "signing_key": marker},
+        )
+
+        stored = AuditEvent.objects.get(pk=event.pk)
+        assert stored.metadata["signing_key"] == marker
+
     def test_no_update_or_delete_service_is_exposed(self):
         # The audit app's public API is exactly `record_event` — there is no
         # update/delete function to accidentally call.
