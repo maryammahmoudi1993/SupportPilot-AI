@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import smtplib
+import socket
 
 import pytest
 
@@ -15,6 +16,27 @@ from integrations.errors import (
 from integrations.providers.email_provider import SmtpNotificationProvider
 
 CREDENTIALS = {"host": "smtp.example.com", "port": 587, "username": "user", "password": "pw"}
+
+
+def _fake_getaddrinfo_for(*ips: str):
+    """Deterministic ``socket.getaddrinfo`` fake — normal tests never
+    perform real DNS resolution (section 64)."""
+
+    def _fake(host, port, *args, **kwargs):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, port)) for ip in ips]
+
+    return _fake
+
+
+@pytest.fixture(autouse=True)
+def _resolve_smtp_host_to_public_ip(monkeypatch):
+    """By default every test resolves ``smtp.example.com`` to a public IP,
+    so existing SDK-boundary tests are unaffected by the SSRF destination
+    check added in Phase 15; individual tests override this to exercise the
+    check itself."""
+    monkeypatch.setattr(
+        "integrations.security.socket.getaddrinfo", _fake_getaddrinfo_for("8.8.8.8")
+    )
 
 
 class _FakeConnection:
@@ -139,6 +161,137 @@ class TestSend:
                 idempotency_key="k1",
                 timeout_seconds=5,
             )
+
+
+class TestSsrfDestinationValidation:
+    """Phase 15 finding: the SMTP provider took ``host``/``port`` directly
+    from workspace-supplied credentials with no destination validation,
+    unlike the Phase 10 webhook delivery path. These prove the fix without
+    ever making a real DNS/socket call (section 23, 64)."""
+
+    def test_send_rejects_private_ip_destination(self, monkeypatch, provider):
+        monkeypatch.setattr(
+            "integrations.security.socket.getaddrinfo", _fake_getaddrinfo_for("10.0.0.5")
+        )
+        connection = _FakeConnection()
+        _patch_connection(monkeypatch, connection)
+        with pytest.raises(IntegrationInvalidRequestError):
+            provider.send(
+                credentials={**CREDENTIALS, "host": "internal-smtp.attacker.example"},
+                configuration={"from_email": "support@example.com"},
+                recipient_email="a@example.com",
+                subject="Hi",
+                body="Body",
+                idempotency_key="k1",
+                timeout_seconds=5,
+            )
+        # The blocked destination must never be connected to.
+        assert connection.opened is False
+
+    def test_send_rejects_loopback_and_metadata_destination(self, monkeypatch, provider):
+        for ip in ("127.0.0.1", "169.254.169.254", "::1"):
+            monkeypatch.setattr(
+                "integrations.security.socket.getaddrinfo", _fake_getaddrinfo_for(ip)
+            )
+            connection = _FakeConnection()
+            _patch_connection(monkeypatch, connection)
+            with pytest.raises(IntegrationInvalidRequestError):
+                provider.send(
+                    credentials={**CREDENTIALS, "host": "attacker-controlled.example"},
+                    configuration={"from_email": "support@example.com"},
+                    recipient_email="a@example.com",
+                    subject="Hi",
+                    body="Body",
+                    idempotency_key="k1",
+                    timeout_seconds=5,
+                )
+            assert connection.opened is False
+
+    def test_send_rejects_literal_localhost_without_resolving(self, monkeypatch, provider):
+        def _fail_if_called(*args, **kwargs):  # pragma: no cover - assertion helper
+            raise AssertionError("literal localhost must be rejected before DNS resolution")
+
+        monkeypatch.setattr("integrations.security.socket.getaddrinfo", _fail_if_called)
+        connection = _FakeConnection()
+        _patch_connection(monkeypatch, connection)
+        with pytest.raises(IntegrationInvalidRequestError):
+            provider.send(
+                credentials={**CREDENTIALS, "host": "localhost"},
+                configuration={"from_email": "support@example.com"},
+                recipient_email="a@example.com",
+                subject="Hi",
+                body="Body",
+                idempotency_key="k1",
+                timeout_seconds=5,
+            )
+        assert connection.opened is False
+
+    def test_send_rejects_when_any_resolved_address_is_private(self, monkeypatch, provider):
+        # A hostname resolving to a mix of public and private addresses must
+        # fail closed on the private one, never "pick the public one".
+        monkeypatch.setattr(
+            "integrations.security.socket.getaddrinfo",
+            _fake_getaddrinfo_for("8.8.8.8", "10.0.0.5"),
+        )
+        connection = _FakeConnection()
+        _patch_connection(monkeypatch, connection)
+        with pytest.raises(IntegrationInvalidRequestError):
+            provider.send(
+                credentials={**CREDENTIALS, "host": "mixed.example"},
+                configuration={"from_email": "support@example.com"},
+                recipient_email="a@example.com",
+                subject="Hi",
+                body="Body",
+                idempotency_key="k1",
+                timeout_seconds=5,
+            )
+        assert connection.opened is False
+
+    def test_probe_rejects_private_ip_destination(self, monkeypatch, provider):
+        monkeypatch.setattr(
+            "integrations.security.socket.getaddrinfo", _fake_getaddrinfo_for("192.168.1.1")
+        )
+        connection = _FakeConnection()
+        _patch_connection(monkeypatch, connection)
+        with pytest.raises(IntegrationInvalidRequestError):
+            provider.probe(
+                credentials={**CREDENTIALS, "host": "internal.example"}, timeout_seconds=5
+            )
+        assert connection.opened is False
+
+    def test_send_rejects_missing_host(self, monkeypatch, provider):
+        connection = _FakeConnection()
+        _patch_connection(monkeypatch, connection)
+        with pytest.raises(IntegrationInvalidRequestError):
+            provider.send(
+                credentials={**CREDENTIALS, "host": ""},
+                configuration={"from_email": "support@example.com"},
+                recipient_email="a@example.com",
+                subject="Hi",
+                body="Body",
+                idempotency_key="k1",
+                timeout_seconds=5,
+            )
+        assert connection.opened is False
+
+    def test_send_allows_public_destination(self, monkeypatch, provider):
+        # Default fixture already resolves CREDENTIALS["host"] to 8.8.8.8.
+        connection = _FakeConnection()
+        _patch_connection(monkeypatch, connection)
+        monkeypatch.setattr(
+            "integrations.providers.email_provider.EmailMessage.send", lambda self, **kw: 1
+        )
+        result = provider.send(
+            credentials=CREDENTIALS,
+            configuration={"from_email": "support@example.com"},
+            recipient_email="a@example.com",
+            subject="Hi",
+            body="Body",
+            idempotency_key="k1",
+            timeout_seconds=5,
+        )
+        assert result.status == "sent"
+        assert connection.opened is True
 
 
 class TestProbe:

@@ -20,6 +20,7 @@ from ..errors import (
     IntegrationTemporarilyUnavailableError,
     IntegrationTimeoutError,
 )
+from ..security import validate_outbound_host
 from .base import NormalizedNotification
 
 
@@ -31,10 +32,14 @@ class SmtpNotificationProvider:
     def probe(self, *, credentials: dict, timeout_seconds: float) -> None:
         """Read-only connection-test probe: opens and closes the SMTP
         connection without sending anything."""
+        host = credentials.get("host")
+        port = int(credentials.get("port", 587))
+        validate_outbound_host(host, port)
+
         connection = get_connection(
             backend="django.core.mail.backends.smtp.EmailBackend",
-            host=credentials.get("host"),
-            port=int(credentials.get("port", 587)),
+            host=host,
+            port=port,
             username=credentials.get("username"),
             password=credentials.get("password"),
             use_tls=bool(credentials.get("use_tls", True)),
@@ -66,10 +71,14 @@ class SmtpNotificationProvider:
         if not from_email:
             raise IntegrationInvalidRequestError("No sender address is configured.")
 
+        host = credentials.get("host")
+        port = int(credentials.get("port", 587))
+        validate_outbound_host(host, port)
+
         connection = get_connection(
             backend="django.core.mail.backends.smtp.EmailBackend",
-            host=credentials.get("host"),
-            port=int(credentials.get("port", 587)),
+            host=host,
+            port=port,
             username=credentials.get("username"),
             password=credentials.get("password"),
             use_tls=bool(credentials.get("use_tls", True)),
