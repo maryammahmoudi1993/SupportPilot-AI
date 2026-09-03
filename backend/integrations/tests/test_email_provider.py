@@ -294,6 +294,67 @@ class TestSsrfDestinationValidation:
         assert connection.opened is True
 
 
+class TestHeaderInjection:
+    """Phase 15 checkpoint 3, Part E: ``subject``/``body`` come directly
+    from LLM tool-call arguments (untrusted, prompt-injectable text) and
+    ``recipient_email`` from a Customer record. These prove the actual
+    protection (Django refuses to construct a message containing a raw
+    CRLF in a header) and that the provider never lets that refusal
+    surface as an unclassified exception."""
+
+    def test_django_email_message_rejects_crlf_in_subject(self):
+        from django.core.mail import BadHeaderError, EmailMessage
+
+        message = EmailMessage(
+            subject="Hi\r\nX-Injected: evil",
+            body="b",
+            from_email="a@example.com",
+            to=["victim@example.com"],
+        )
+        with pytest.raises(BadHeaderError):
+            message.message()
+
+    def test_django_email_message_rejects_crlf_in_recipient(self):
+        """A recipient value containing a CRLF (an attempted
+        ``victim@example.com\\r\\nBcc: attacker@example.com`` expansion)
+        is refused the same way — no additional recipient is ever
+        injectable via the address field."""
+        from django.core.mail import BadHeaderError, EmailMessage
+
+        message = EmailMessage(
+            subject="Hi",
+            body="b",
+            from_email="a@example.com",
+            to=["victim@example.com\r\nBcc: attacker@example.com"],
+        )
+        with pytest.raises(BadHeaderError):
+            message.message()
+
+    def test_send_never_leaks_the_raw_bad_header_exception(self, monkeypatch, provider):
+        from django.core.mail import BadHeaderError
+
+        connection = _FakeConnection()
+        _patch_connection(monkeypatch, connection)
+        monkeypatch.setattr(
+            "integrations.providers.email_provider.EmailMessage.send",
+            lambda self, **kw: (_ for _ in ()).throw(
+                BadHeaderError("Header values can't contain newlines")
+            ),
+        )
+        with pytest.raises(IntegrationInvalidRequestError):
+            provider.send(
+                credentials=CREDENTIALS,
+                configuration={"from_email": "support@example.com"},
+                recipient_email="a@example.com",
+                subject="Hi\r\nX-Injected: evil",
+                body="Body",
+                idempotency_key="k1",
+                timeout_seconds=5,
+            )
+        # The connection is still cleanly closed, no side effect leaked.
+        assert connection.closed is True
+
+
 class TestProbe:
     def test_probe_opens_and_closes_without_sending(self, monkeypatch, provider):
         connection = _FakeConnection()

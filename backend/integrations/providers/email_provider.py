@@ -21,7 +21,7 @@ from __future__ import annotations
 import smtplib
 from email.utils import make_msgid
 
-from django.core.mail import EmailMessage, get_connection
+from django.core.mail import BadHeaderError, EmailMessage, get_connection
 
 from ..errors import (
     IntegrationAuthenticationFailedError,
@@ -118,6 +118,20 @@ class SmtpNotificationProvider:
             raise IntegrationAuthenticationFailedError() from exc
         except smtplib.SMTPRecipientsRefused as exc:
             raise IntegrationInvalidRequestError("The recipient address was refused.") from exc
+        except BadHeaderError as exc:
+            # Phase 15 checkpoint 3, Part E: ``subject``/``recipient_email``
+            # ultimately originate from tool arguments / a Customer record
+            # — untrusted, prompt-injectable text (section 27 of the Phase
+            # 15 brief). Django's own MIME header construction already
+            # refuses a value containing a CRLF/newline before anything is
+            # ever written to the wire (verified in
+            # ``TestHeaderInjection``) — this only normalizes that refusal
+            # into the same safe error taxonomy every other failure here
+            # uses, rather than letting a raw ``django.core.mail`` exception
+            # type propagate uncaught (section 47-48).
+            raise IntegrationInvalidRequestError(
+                "The message could not be sent: an address or header was invalid."
+            ) from exc
         except TimeoutError as exc:
             raise IntegrationTimeoutError() from exc
         except (smtplib.SMTPException, OSError) as exc:
