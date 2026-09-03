@@ -163,6 +163,68 @@ class TestToolCallBudget:
         run.refresh_from_db()
         assert run.tool_call_count == 1
 
+    @pytest.mark.django_db(transaction=True)
+    def test_concurrent_calls_never_lose_a_counter_increment(self):
+        """Phase 15 finding: the budget check previously trusted a
+        possibly-stale in-memory ``tool_call_count`` and the increment was a
+        plain (non-atomic) ``.update()`` from that same in-memory value —
+        two concurrent tool calls for the same run could both read the
+        pre-increment count and one increment could silently overwrite the
+        other, understating the true count. Each of these two concurrent,
+        distinctly-keyed calls must independently claim its own
+        ``ToolExecution`` and the counter must reflect both — never net +1
+        for two successful calls."""
+        import django.db as django_db
+
+        run = _running_run(max_tool_calls=5)
+        _bind_demo_echo(run)
+
+        results: list = []
+        errors: list = []
+        barrier = threading.Barrier(2)
+
+        def worker(key: str):
+            django_db.close_old_connections()
+            barrier.wait()
+            try:
+                results.append(
+                    execute_tool(
+                        agent_run=run,
+                        tool_key="demo.echo",
+                        arguments={"message": "race"},
+                        idempotency_key=key,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+            finally:
+                django_db.close_old_connections()
+
+        threads = [threading.Thread(target=worker, args=(f"race-key-{i}",)) for i in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert not errors
+        assert len(results) == 2
+        run.refresh_from_db()
+        assert run.tool_call_count == 2
+
+    def test_budget_check_uses_the_live_db_count_not_a_stale_in_memory_value(self):
+        """A caller holding a stale in-memory ``agent_run`` (already exactly
+        at budget in the database) must still be blocked — the check must
+        not trust whatever count the caller happened to load earlier."""
+        run = _running_run(max_tool_calls=1)
+        _bind_demo_echo(run)
+        stale_run = type(run).objects.get(pk=run.pk)
+        stale_run.tool_call_count = 0  # never persisted — simulates staleness
+        run.tool_call_count = 1
+        run.save()
+
+        with pytest.raises(ToolBudgetExceededError):
+            execute_tool(agent_run=stale_run, tool_key="demo.echo", arguments={"message": "hi"})
+
 
 @pytest.mark.django_db
 class TestIdempotency:

@@ -21,6 +21,7 @@ from datetime import timedelta
 from typing import Any, NoReturn, cast
 
 from django.db import IntegrityError, transaction
+from django.db.models import F
 from django.utils import timezone
 from pydantic import ValidationError as PydanticValidationError
 
@@ -136,7 +137,23 @@ def execute_tool(
             raise ToolNotBoundError()
         raise ToolDisabledError()
 
-    # 3. Tool-call budget — bounded round-trips (section 41/43).
+    # 3. Tool-call budget — bounded round-trips (section 41/43). Read the
+    # live DB count rather than trusting the caller's possibly-stale
+    # in-memory ``agent_run`` (Phase 15 finding: a bare ``.update()`` here
+    # previously combined with an in-memory increment let two concurrent
+    # calls for the same run both observe the pre-increment count and both
+    # pass the check — a classic lost-update race under Celery task
+    # redelivery). Re-reading here plus the atomic ``F()`` increment in
+    # ``_increment_tool_call_count`` below closes the window to the same
+    # narrow margin every other idempotency claim in this module accepts —
+    # this is not a full ``select_for_update`` serialization of the whole
+    # tool-call lifecycle, which would be a broader change than this
+    # narrow fix justifies.
+    live_tool_call_count = (
+        AgentRun.objects.filter(pk=agent_run.pk).values_list("tool_call_count", flat=True).first()
+    )
+    if live_tool_call_count is not None:
+        agent_run.tool_call_count = live_tool_call_count
     if agent_run.tool_call_count >= agent_version.max_tool_calls:
         raise ToolBudgetExceededError()
 
@@ -914,11 +931,13 @@ def _duration_ms(started_at, completed_at) -> int | None:
 
 
 def _increment_tool_call_count(agent_run: AgentRun) -> None:
+    # ``F("tool_call_count") + 1`` — an atomic, database-side increment
+    # rather than writing back the caller's in-memory value, so two
+    # concurrent increments for the same run always net +2, never lose one
+    # to a race (Phase 15 finding; see the budget check above).
     with transaction.atomic():
-        AgentRun.objects.filter(pk=agent_run.pk).update(
-            tool_call_count=agent_run.tool_call_count + 1
-        )
-    agent_run.tool_call_count += 1
+        AgentRun.objects.filter(pk=agent_run.pk).update(tool_call_count=F("tool_call_count") + 1)
+    agent_run.refresh_from_db(fields=["tool_call_count"])
 
 
 # ---------------------------------------------------------------------------
