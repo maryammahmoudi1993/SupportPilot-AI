@@ -5,6 +5,15 @@ rather than a large vendor email SDK, since the project has no existing
 email-vendor dependency to justify one (section 59, 133-134 analog for
 email). Credentials come from the owning ``IntegrationConnection`` only —
 never from a tool argument.
+
+Destination validation is layered (Phase 15 checkpoint 2): the explicit
+``validate_outbound_host`` call below is a fast, easily-tested advisory
+check that rejects an obviously-blocked destination before even
+constructing a connection; the actual connection is built by
+``PinnedSmtpEmailBackend`` (``_smtp_transport``), which is the authoritative
+layer — it re-validates and pins the real socket to that validated address,
+closing the DNS-rebinding gap a check-then-reconnect sequence would
+otherwise leave open (see that module's docstring).
 """
 
 from __future__ import annotations
@@ -23,6 +32,8 @@ from ..errors import (
 from ..security import validate_outbound_host
 from .base import NormalizedNotification
 
+_PINNED_SMTP_BACKEND = "integrations.providers._smtp_transport.PinnedSmtpEmailBackend"
+
 
 class SmtpNotificationProvider:
     """Typed ``NotificationProvider`` backed by SMTP."""
@@ -37,7 +48,7 @@ class SmtpNotificationProvider:
         validate_outbound_host(host, port)
 
         connection = get_connection(
-            backend="django.core.mail.backends.smtp.EmailBackend",
+            backend=_PINNED_SMTP_BACKEND,
             host=host,
             port=port,
             username=credentials.get("username"),
@@ -76,7 +87,7 @@ class SmtpNotificationProvider:
         validate_outbound_host(host, port)
 
         connection = get_connection(
-            backend="django.core.mail.backends.smtp.EmailBackend",
+            backend=_PINNED_SMTP_BACKEND,
             host=host,
             port=port,
             username=credentials.get("username"),
