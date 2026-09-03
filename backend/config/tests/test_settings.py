@@ -91,3 +91,19 @@ class TestCors:
     def test_cors_allowed_origins_is_an_explicit_list(self):
         assert isinstance(settings.CORS_ALLOWED_ORIGINS, list)
         assert "*" not in settings.CORS_ALLOWED_ORIGINS
+
+
+class TestForwardedHeaderTrust:
+    """Phase 15 checkpoint 4, Part F, section 25: neither
+    ``USE_X_FORWARDED_HOST`` nor ``SECURE_PROXY_SSL_HEADER`` is set
+    anywhere in settings.py, so Django's own safe defaults apply —
+    ``X-Forwarded-Host``/``X-Forwarded-Proto``/``Forwarded`` are never
+    trusted to determine the request's host or scheme. This locks that in
+    as a regression guard: a future change that starts trusting either
+    header must change this test deliberately, not silently."""
+
+    def test_x_forwarded_host_is_not_trusted(self):
+        assert getattr(settings, "USE_X_FORWARDED_HOST", False) is False
+
+    def test_x_forwarded_proto_is_not_trusted(self):
+        assert getattr(settings, "SECURE_PROXY_SSL_HEADER", None) is None

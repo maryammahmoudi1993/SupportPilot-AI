@@ -81,6 +81,59 @@ class TestDefaultConfigurationIgnoresForwardedFor:
 
 
 @pytest.mark.django_db
+class TestOtherForwardingHeadersAreNeverConsulted:
+    """Phase 15 checkpoint 4, Part C: DRF's ``SimpleRateThrottle.get_ident``
+    (quoted in the module docstring above) reads only
+    ``HTTP_X_FORWARDED_FOR`` and ``REMOTE_ADDR`` — ``X-Real-IP`` and
+    ``Forwarded`` are never referenced anywhere in this codebase (grepped:
+    no match) or by DRF's own identity function. There is nothing to
+    "block" for those two headers because nothing ever reads them; these
+    tests prove that structurally, both at the identity-function level and
+    against a real public endpoint."""
+
+    def test_get_ident_ignores_x_real_ip_and_forwarded(self):
+        throttle = BaseThrottle()
+        meta = {
+            "REMOTE_ADDR": "203.0.113.9",
+            "HTTP_X_REAL_IP": "198.51.100.50",
+            "HTTP_FORWARDED": "for=198.51.100.51;proto=https;by=203.0.113.43",
+        }
+        request = SimpleNamespace(META=meta)
+        assert throttle.get_ident(request) == "203.0.113.9"
+
+    def test_rotating_x_real_ip_and_forwarded_maps_to_the_same_bucket(self):
+        endpoint = WebChatEndpointFactory()
+        client = APIClient()
+        token = client.post(
+            f"/api/v1/channels/public/webchat/{endpoint.id}/session/",
+            REMOTE_ADDR="10.0.0.1",
+        ).data["session_token"]
+
+        headers = [
+            {"HTTP_X_REAL_IP": "198.51.100.1"},
+            {"HTTP_FORWARDED": "for=198.51.100.2"},
+            {"HTTP_X_REAL_IP": "198.51.100.3", "HTTP_FORWARDED": "for=198.51.100.4"},
+        ]
+        with _throttle_rate("channel_webchat_message", "2/min"):
+            responses = [
+                client.post(
+                    f"/api/v1/channels/public/webchat/session/{token}/messages/",
+                    {"client_message_id": f"msg-{i}", "body": "hi"},
+                    format="json",
+                    REMOTE_ADDR="10.0.0.1",
+                    **kwargs,
+                )
+                for i, kwargs in enumerate(headers)
+            ]
+
+        # Same REMOTE_ADDR throughout: still one bucket regardless of
+        # X-Real-IP/Forwarded rotation — first two allowed, the third
+        # rejected exactly as the X-Forwarded-For case above.
+        assert [r.status_code for r in responses] == [202, 202, 429]
+        assert responses[-1].data["error"]["code"] == "rate_limited"
+
+
+@pytest.mark.django_db
 class TestPublicChatResistsForwardedForRotation:
     """Section 7: a direct client rotating X-Forwarded-For against a real
     PUBLIC_CHAT endpoint must land in the same throttle bucket and must not
