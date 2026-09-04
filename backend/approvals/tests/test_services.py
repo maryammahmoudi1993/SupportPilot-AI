@@ -182,6 +182,39 @@ class TestDecideApproval:
         assert execution.error_code == "approval_expired"
         assert fake.refund_call_count == 0
 
+    def test_decision_on_a_row_already_expired_by_someone_else_fails_safely(self, monkeypatch):
+        """Phase 16 Part A, section 9 regression: unlike the test above
+        (where this call's own ``_expire_if_stale`` performs the expiry),
+        here the row was *already* transitioned to EXPIRED by a prior
+        caller (a racing decision, or the periodic sweeper) before this
+        call ever acquires the lock. Before the ``decide_approval`` fix,
+        this fell through the elif chain into the PENDING-only branch and
+        recorded a phantom decision — a false "approved" audit event and
+        webhook — even though the underlying ToolExecution was already
+        terminated by the original expiry."""
+        run, approval, fake = pending_refund_approval(monkeypatch)
+        past = timezone.now() - timedelta(days=1)
+        ApprovalRequest.objects.filter(pk=approval.pk).update(
+            created_at=past,
+            expires_at=past + timedelta(seconds=1),
+            status=ApprovalStatus.EXPIRED,
+            resolved_at=timezone.now(),
+        )
+        approval.refresh_from_db()
+        approver = WorkspaceMembershipFactory(workspace=run.workspace, role=WorkspaceRole.OWNER)
+        with pytest.raises(ApprovalExpiredError):
+            services.decide_approval(
+                workspace=run.workspace,
+                approval_request=approval,
+                actor=approver.user,
+                actor_role=approver.role,
+                decision=ApprovalDecisionValue.APPROVE,
+            )
+        assert ApprovalDecision.objects.filter(approval_request=approval).count() == 0
+        approval.refresh_from_db()
+        assert approval.status == ApprovalStatus.EXPIRED
+        assert fake.refund_call_count == 0
+
     def test_decision_after_cancellation_fails_safely(self, monkeypatch):
         run, approval, fake = pending_refund_approval(monkeypatch)
         services.cancel_approval_for_execution(execution=approval.tool_execution)
@@ -365,3 +398,123 @@ class TestConcurrency:
         assert approval.status in (ApprovalStatus.APPROVED, ApprovalStatus.REJECTED)
         # Exactly one side "won" and the other was rejected as a conflict.
         assert outcomes.count("approve_failed") + outcomes.count("reject_failed") == 1
+
+    def _race_decide_against_sweep(self, monkeypatch, *, decision):
+        """Shared setup for approve/expire and expire/reject (Phase 16 Part
+        A, section 9): a request already past ``expires_at`` racing a human
+        decision against the periodic sweeper. Exactly one authoritative
+        terminal status must result, never both a decision row and an
+        expiry, and never an unresolved PENDING row left behind."""
+        run, approval, fake = pending_refund_approval(monkeypatch)
+        past = timezone.now() - timedelta(days=1)
+        ApprovalRequest.objects.filter(pk=approval.pk).update(
+            created_at=past, expires_at=past + timedelta(seconds=1)
+        )
+        approver = WorkspaceMembershipFactory(workspace=run.workspace, role=WorkspaceRole.OWNER)
+
+        outcomes: list[str] = []
+
+        def _decide():
+            try:
+                services.decide_approval(
+                    workspace=run.workspace,
+                    approval_request=ApprovalRequest.objects.get(pk=approval.pk),
+                    actor=approver.user,
+                    actor_role=approver.role,
+                    decision=decision,
+                )
+                outcomes.append("decide_ok")
+            except ApprovalExpiredError:
+                outcomes.append("decide_expired")
+            except Exception:  # noqa: BLE001
+                outcomes.append("decide_failed")
+            finally:
+                connections.close_all()
+
+        def _sweep():
+            try:
+                services.expire_stale_approvals()
+            finally:
+                connections.close_all()
+
+        threads = [threading.Thread(target=_decide), threading.Thread(target=_sweep)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        approval.refresh_from_db()
+        # Exactly one ApprovalDecision row may exist (only the "decide" side
+        # ever creates one; the sweeper never does), and the final status is
+        # always terminal — never a resurrected PENDING.
+        assert ApprovalDecision.objects.filter(approval_request=approval).count() <= 1
+        return approval, outcomes
+
+    def test_approve_vs_expire_race_produces_one_authoritative_terminal_status(self, monkeypatch):
+        approval, outcomes = self._race_decide_against_sweep(
+            monkeypatch, decision=ApprovalDecisionValue.APPROVE
+        )
+        # The sweeper's expiry check runs first inside decide_approval too
+        # (_expire_if_stale), so whichever side's transaction commits first
+        # wins; the request is always past its deadline here, so EXPIRED is
+        # the only state that can ever win — APPROVED must never win a race
+        # against an already-expired deadline.
+        assert approval.status == ApprovalStatus.EXPIRED
+        assert "decide_expired" in outcomes or "decide_ok" not in outcomes
+
+    def test_expire_vs_reject_race_produces_one_authoritative_terminal_status(self, monkeypatch):
+        approval, outcomes = self._race_decide_against_sweep(
+            monkeypatch, decision=ApprovalDecisionValue.REJECT
+        )
+        assert approval.status == ApprovalStatus.EXPIRED
+        assert "decide_expired" in outcomes or "decide_ok" not in outcomes
+
+    def test_two_concurrent_resumes_invoke_the_continuation_exactly_once(self, monkeypatch):
+        """resume/resume (Phase 16 Part A, section 9): two concurrent (e.g.
+        redelivered) calls to the real production resume entrypoint for the
+        same approval must invoke the refund handler exactly once — proven
+        through ``agents.services.resume_agent_run_after_approval`` itself,
+        not a lower-layer proxy, so this exercises the full run-level claim
+        that gates every resume in production."""
+        from agents.models import AgentRun, AgentRunStatus
+        from agents.services import resume_agent_run_after_approval
+
+        run, approval, fake = pending_refund_approval(monkeypatch)
+        # ``pending_refund_approval`` drives the tool-execution/approval gate
+        # directly, not the full orchestration graph, so it leaves the
+        # AgentRun itself at RUNNING even though the ToolExecution is
+        # WAITING_FOR_APPROVAL. Mirror what the orchestration graph would
+        # have done (see agents/services.py::_pause_run_for_approval) so
+        # ``_claim_run_for_resume`` has a real WAITING_FOR_APPROVAL row to
+        # race over, matching production.
+        AgentRun.objects.filter(pk=run.pk).update(status=AgentRunStatus.WAITING_FOR_APPROVAL)
+        approver = WorkspaceMembershipFactory(workspace=run.workspace, role=WorkspaceRole.OWNER)
+        services.decide_approval(
+            workspace=run.workspace,
+            approval_request=approval,
+            actor=approver.user,
+            actor_role=approver.role,
+            decision=ApprovalDecisionValue.APPROVE,
+        )
+
+        results: list[str] = []
+
+        def _resume():
+            try:
+                results.append(resume_agent_run_after_approval(approval.pk))
+            finally:
+                connections.close_all()
+
+        threads = [threading.Thread(target=_resume) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert fake.refund_call_count == 1
+        assert len(results) == 2
+        # Exactly one caller performed the real continuation (the run's
+        # terminal/next status); the other observed the run-level claim's
+        # own no-op signal.
+        assert "already_resumed" in results
+        assert any(r != "already_resumed" for r in results)
