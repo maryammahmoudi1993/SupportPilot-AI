@@ -36,7 +36,7 @@ def _age(run: AgentRun, seconds: int) -> None:
 class TestRecoverStuckAgentRuns:
     def test_not_stale_running_run_is_untouched(self):
         run = AgentRunFactory(status=AgentRunStatus.RUNNING)
-        _age(run, seconds=1)  # well under the default 900s threshold
+        _age(run, seconds=1)  # well under the default 3600s threshold
 
         recovered = recover_stuck_agent_runs()
 
@@ -44,6 +44,31 @@ class TestRecoverStuckAgentRuns:
         assert recovered == 0
         assert run.status == AgentRunStatus.RUNNING
         assert run.failure_code == ""
+
+    def test_healthy_worker_at_the_theoretical_worst_case_duration_is_not_recovered(self):
+        """Phase 16 Checkpoint 2A section 13: ``AgentRun.updated_at`` is
+        frozen at claim time for a run's entire real execution — it is
+        *not* refreshed by intermediate steps (see
+        ``agents/services.py``'s save() call sites). A legitimately
+        slow-but-alive run can therefore look exactly this stale purely by
+        still being correctly mid-execution. The worst-case duration such a
+        healthy run can ever legitimately take is bounded by
+        ``AgentVersion``'s own serializer ceilings —
+        ``wall_time_limit_seconds<=600`` plus one trailing
+        ``provider_timeout_seconds<=300`` call already in flight when that
+        ceiling trips (``agents/runtime/budgets.py`` only re-checks
+        wall-time *before* starting another call) — i.e. 900s. This proves
+        the default stale threshold (validated in settings.py to be >=1800s)
+        comfortably clears that real worst case, not just an arbitrary
+        round number."""
+        run = AgentRunFactory(status=AgentRunStatus.RUNNING)
+        _age(run, seconds=900)  # the derived worst-case legitimate duration
+
+        recovered = recover_stuck_agent_runs()
+
+        run.refresh_from_db()
+        assert recovered == 0
+        assert run.status == AgentRunStatus.RUNNING
 
     def test_stale_running_run_is_recovered(self):
         run = AgentRunFactory(status=AgentRunStatus.RUNNING)

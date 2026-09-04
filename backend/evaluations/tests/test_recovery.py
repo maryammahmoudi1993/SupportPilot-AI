@@ -60,6 +60,21 @@ class TestRecoverStuckEvaluationRuns:
         assert recovered == 0
         assert run.status == EvaluationRunStatus.RUNNING
 
+    def test_healthy_worker_at_the_theoretical_worst_case_duration_is_not_recovered(self):
+        """Phase 16 Checkpoint 2A section 13: a case executes through the
+        same agent run-loop budgets as a normal AgentRun, so the same
+        derived worst-case legitimate duration (900s — see
+        agents/tests/test_recovery.py's equivalent test) applies here too.
+        The default stale threshold (validated in settings.py to be
+        >=1800s) comfortably clears it."""
+        run, results = _make_stuck_run(seconds=900)
+
+        recovered = recover_stuck_evaluation_runs()
+
+        run.refresh_from_db()
+        assert recovered == 0
+        assert run.status == EvaluationRunStatus.RUNNING
+
     def test_stale_running_case_is_failed_and_run_finalized(self):
         run, (result,) = _make_stuck_run(total_cases=1)
 

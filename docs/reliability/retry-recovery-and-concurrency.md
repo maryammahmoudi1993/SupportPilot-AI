@@ -133,6 +133,47 @@ exposure is `ApprovalRequest` sitting `PENDING` past its TTL, which
 already covers — there is no separate `approvals`-owned `RUNNING` state a
 crashed worker could strand.
 
+**External side-effect window (Phase 16 Checkpoint 2A, section 15) — read
+carefully, this is a real, named gap, not a solved problem.** What the
+lock-then-recheck fencing above actually proves is narrower than "recovery
+is safe": it proves the *database record* cannot regress — the old
+worker's own eventual `_finalize_success`/`_finalize_failure` call
+re-locks the `ToolExecution` row, sees it is no longer `RUNNING` (recovery
+already moved it to `FAILED`), and no-ops instead of overwriting the
+recovered state. **It does not prove, and must not be read as proving,
+that the external action itself never happened.** The sequence this cannot
+prevent: the old worker's in-flight provider call (e.g. `payment.refund`)
+actually succeeds at the provider *after* the sweeper has already declared
+the row stale and marked it `FAILED`; the old worker's own finalize
+attempt then correctly no-ops (per the fencing above), but the system's
+own record now permanently disagrees with reality — it believes the
+refund failed when it actually went through. This is not new to recovery
+and not a defect recovery introduces: it is the same "response lost after
+the request already succeeded" ambiguity that exists for *any* tool call
+whose network response never makes it back (a timeout, a dropped
+connection, or — now — a crash detected by the sweeper), and no
+reconciliation job (checking the provider's own records against ours)
+exists anywhere in this codebase today for that broader category, not just
+for recovery's slice of it. What recovery does *not* add on top of that
+pre-existing ambiguity: recovery itself never redispatches or retries the
+side-effecting call — only failing, never re-executing — so recovery is
+not itself a new source of a *duplicate* side effect. Whether a *later,
+independent* retry of the same logical action (an operator or a fresh
+run reissuing the same refund) risks a real duplicate then depends
+entirely on that specific tool/provider's own idempotency behavior: for
+`payment.refund` specifically, both the fake provider and the real
+`integrations.providers.stripe_provider` adapter forward the tool's
+`idempotency_key` to the provider itself (Stripe's own idempotency-key
+support), so a retry reusing the *same* key is provider-side deduplicated
+— but this was verified only for this one tool as an existence proof, not
+audited across every registered tool, and it only helps if the retry
+actually reuses the same key. Building a general side-effect
+reconciliation mechanism is a genuine, cross-cutting feature addition with
+real design decisions attached (what "checking the provider's own record"
+even means per provider), deliberately out of this checkpoint's "smallest
+reliable primitive" scope — flagged here explicitly rather than silently
+assumed away.
+
 ## At-least-once boundaries (never exactly-once)
 
 - Webhook/notification delivery is at-least-once at the transport level;
@@ -187,17 +228,44 @@ conversation") while avoiding a second per-conversation counter table.
 Verified this checkpoint:
 
 - **Fresh migration** (zero → latest on an empty database): PASS.
-- **Upgrade migration with pre-existing rows**: PASS — five rows sharing an
-  identical `created_at`, inserted before migration `0003` existed, were
-  backfilled with five distinct, sequential `sequence` values in exact
-  insertion order. The backfill ordering rule is PostgreSQL's own: adding a
-  column with a volatile (`nextval()`) default forces a full table rewrite
-  that calls the default once per existing row in physical heap-scan order
-  — for an append-only, immutable-after-creation table like `Message`
-  (there is deliberately no update/delete API for it) that order matches
-  true insertion order in practice, though it is a property of how
-  PostgreSQL performs the rewrite, not an independently-computed ordering
-  from `created_at`.
+- **Upgrade migration with pre-existing rows**: PASS in the narrow sense
+  that follows from `sequence`'s own `UNIQUE` constraint — migration `0003`
+  cannot complete without giving every pre-existing row a distinct value,
+  and it did (verified: five rows sharing one `created_at` came out with
+  five distinct sequential values). **Correction (Phase 16 Checkpoint 2A):
+  the backfill order those values landed in — PostgreSQL's physical
+  heap-scan order during the `ADD COLUMN`-with-volatile-default table
+  rewrite — is an implementation detail of how that one-time rewrite
+  happened to execute, never a semantic chronology contract.** It is not
+  claimed, and must not be read, as "PostgreSQL preserved true insertion
+  order." Two genuinely different populations exist and only one of them
+  has a real ordering guarantee:
+  - **Rows inserted after migration `0003`**: `sequence` is DB-assigned via
+    `nextval()` at INSERT time — monotonic, concurrent-safe, and
+    deterministic by construction. This is a real guarantee.
+  - **Rows that already existed when migration `0003` ran**: for any two
+    such rows that do *not* share an identical `created_at`, ordering by
+    `(created_at, sequence)` is unaffected — `created_at` alone already
+    orders them correctly regardless of what backfill value `sequence`
+    landed on. For two such rows that *do* share an identical `created_at`,
+    their relative order was **already unknowable** before this migration
+    existed — the prior tie-breaker was `id`, a random UUID with zero
+    correlation to insertion order, which is the exact defect this column
+    was built to close. The backfill does not regress that: it replaces
+    one arbitrary-for-ties ordering (`id`) with another
+    (heap-scan-order-derived `sequence`), not a known-correct ordering with
+    an unknown one. **No corrective follow-up migration is warranted**: a
+    migration recomputing legacy `sequence` values via, say,
+    `ROW_NUMBER() OVER (ORDER BY created_at, id)` would only re-derive
+    ordering from the same random `id` this system already knows carries
+    no chronological information — manufacturing an appearance of recovered
+    chronology that does not actually exist, at the real cost of a
+    table-wide `UPDATE` (lock/write-amplification) for zero correctness
+    gain. Documented honestly instead: **new rows carry a true DB
+    insertion sequence; legacy rows that happen to share an identical
+    `created_at` have a stable, deterministic ordering after this
+    migration, but their original relative insertion order cannot be, and
+    never could be, recovered.**
 - **Concurrent insert (real threads, real PostgreSQL)**: no duplicate
   sequence, no lost/skipped assignment
   (`conversations/tests/test_concurrency.py`).
@@ -236,14 +304,39 @@ Verified this checkpoint:
   scale) has not been load-tested at internet scale; this phase's
   concurrency proofs establish *correctness* under real concurrent access,
   not throughput ceilings.
-- The stuck-run staleness threshold approximates "worker is dead" via
-  `updated_at` in the absence of a real per-run heartbeat/lease. This is
-  safe (never mistakes a fast, healthy run for a stuck one, since the
-  default thresholds are deliberately far above any realistic single-run
-  duration) but coarse — a genuinely stuck row can sit for up to the full
-  threshold before being recovered. A real heartbeat would allow a tighter
-  bound; not implemented this checkpoint as a "smallest reliable
+- **The stuck-run staleness threshold approximates "worker is dead" via
+  `updated_at` in the absence of a real per-run heartbeat/lease — and
+  `updated_at` is not refreshed by a run's own intermediate steps**
+  (Checkpoint 2A correction: an earlier version of this document asserted
+  the defaults were "deliberately far above any realistic single-run
+  duration" without deriving that claim; that framing was too confident).
+  What is actually true: `AgentRun.updated_at` is set once at claim time
+  and not touched again until the run reaches a terminal state or pauses
+  for approval — a run legitimately still executing for a long time looks
+  exactly as stale as a genuinely dead one, purely by construction. The
+  real worst-case duration a *healthy* run can ever legitimately take is
+  bounded by `AgentVersion`'s own serializer ceilings
+  (`wall_time_limit_seconds<=600`, `provider_timeout_seconds<=300` —
+  `agents/serializers.py`), since `check_budget` only re-checks the
+  wall-time ceiling *before* starting another provider call
+  (`agents/runtime/budgets.py`) — the call already in flight when that
+  ceiling trips can still run to its own timeout: ~900s worst case for the
+  model-call loop alone. `AGENTS_STUCK_RUN_STALE_SECONDS` /
+  `EVALUATIONS_STUCK_RUN_STALE_SECONDS` now default to 3600s and are
+  validated at process startup (`config/settings.py`) to never be
+  configured below a hard-coded 1800s safety floor derived from that
+  arithmetic — raising either threshold is always safe; lowering it below
+  the floor is refused outright. This is a real, checked invariant now,
+  not an assumption. It remains coarse — a genuinely dead row can sit for
+  up to the full threshold before being recovered — and a real heartbeat
+  would allow a materially tighter bound without touching the ceiling
+  math above; not implemented this checkpoint as a "smallest reliable
   primitive" scope decision.
+- **A recovered row's fencing prevents database regression, not an
+  already-issued external side effect** — see "External side-effect
+  window" above. This is a real, currently-unaddressed reconciliation gap
+  (shared with any lost-response scenario, not unique to recovery),
+  deliberately out of this checkpoint's scope.
 
 ## Lock-order audit (Phase 16 Checkpoint 2 Part D)
 

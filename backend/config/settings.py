@@ -162,13 +162,32 @@ env = environ.Env(
     # heartbeat/lease exists yet, so "no progress" is approximated by
     # ``updated_at``) is only ever recovered — never silently re-executed,
     # which would risk duplicating side effects a partially-completed run
-    # already caused. The stale threshold must exceed any legitimate run's
-    # real wall-clock duration; it is intentionally coarse in the absence of
-    # a per-run wall-time budget visible to the sweeper (mirrors
-    # ``CHANNELS_INBOUND_SWEEP_*``/``DELIVERY_SWEEP_*``).
-    AGENTS_STUCK_RUN_STALE_SECONDS=(int, 900),
+    # already caused.
+    #
+    # Checkpoint 2A correction: ``AgentRun.updated_at`` is *not* refreshed
+    # during a run's own step-by-step execution loop — only at claim time
+    # and at its terminal transition (see ``agents/services.py``). A
+    # legitimately slow-but-alive run's ``updated_at`` is therefore frozen
+    # at its claim time for its entire real duration, so the stale
+    # threshold must safely exceed the true worst-case wall-clock duration
+    # a *healthy* run can ever legitimately take — not an arbitrary round
+    # number. ``AgentVersion``'s serializer caps that at
+    # ``wall_time_limit_seconds<=600`` and ``provider_timeout_seconds<=300``
+    # (agents/serializers.py) — ``check_budget`` only re-checks the wall-time
+    # ceiling *before* starting another provider call (agents/runtime/
+    # budgets.py), so the one call already in flight when that ceiling
+    # trips can still run to its own timeout: worst case
+    # 600 + 300 = 900s for the model-call loop alone, before accounting for
+    # a trailing tool call's own timeout. ``AGENTS_STUCK_RUN_SAFE_FLOOR_SECONDS``
+    # below is a hard-coded, documented safety floor derived from that
+    # arithmetic (not the exact bound — real tool timeouts are code-owned,
+    # not centrally capped, so a generous margin is used deliberately
+    # rather than a falsely precise one); raising the threshold itself is
+    # always safe, lowering it below the floor is refused at startup the
+    # same way ``DELIVERY_SWEEP_INTERVAL_SECONDS`` is validated below.
+    AGENTS_STUCK_RUN_STALE_SECONDS=(int, 3600),
     AGENTS_STUCK_RUN_SWEEP_BATCH_SIZE=(int, 100),
-    EVALUATIONS_STUCK_RUN_STALE_SECONDS=(int, 1800),
+    EVALUATIONS_STUCK_RUN_STALE_SECONDS=(int, 3600),
     EVALUATIONS_STUCK_RUN_SWEEP_BATCH_SIZE=(int, 100),
     # Phase 14 (Section 3): the public message-history poll has no page
     # parameter of its own (the `after` cursor already bounds incremental
@@ -623,6 +642,32 @@ AGENTS_STUCK_RUN_STALE_SECONDS = env("AGENTS_STUCK_RUN_STALE_SECONDS")
 AGENTS_STUCK_RUN_SWEEP_BATCH_SIZE = env("AGENTS_STUCK_RUN_SWEEP_BATCH_SIZE")
 EVALUATIONS_STUCK_RUN_STALE_SECONDS = env("EVALUATIONS_STUCK_RUN_STALE_SECONDS")
 EVALUATIONS_STUCK_RUN_SWEEP_BATCH_SIZE = env("EVALUATIONS_STUCK_RUN_SWEEP_BATCH_SIZE")
+
+# Phase 16 Checkpoint 2A (Part C, section 14/16): a hard-coded, documented
+# floor derived from AgentVersion's own serializer ceilings
+# (``wall_time_limit_seconds<=600``, ``provider_timeout_seconds<=300`` —
+# agents/serializers.py) plus a real margin for a trailing tool call's own
+# timeout on top of that. Not imported from agents.serializers (settings
+# loads before the app registry is ready); kept in sync by this comment and
+# the mirrored one above the setting's own env.list() entry. Deliberately a
+# *floor*, not the setting's own default — an operator raising either
+# stuck-run threshold is always safe; this only refuses a value low enough
+# to risk recovering a legitimately slow, still-alive run.
+_AGENT_RUN_STUCK_RECOVERY_SAFE_FLOOR_SECONDS = 1800
+if AGENTS_STUCK_RUN_STALE_SECONDS < _AGENT_RUN_STUCK_RECOVERY_SAFE_FLOOR_SECONDS:
+    raise ValueError(
+        "AGENTS_STUCK_RUN_STALE_SECONDS must be at least "
+        f"{_AGENT_RUN_STUCK_RECOVERY_SAFE_FLOOR_SECONDS}s — a lower value risks recovering "
+        "a legitimately slow, still-running AgentRun (see the comment above this setting's "
+        "env.list() entry for the worst-case wall-time/provider-timeout derivation)."
+    )
+if EVALUATIONS_STUCK_RUN_STALE_SECONDS < _AGENT_RUN_STUCK_RECOVERY_SAFE_FLOOR_SECONDS:
+    raise ValueError(
+        "EVALUATIONS_STUCK_RUN_STALE_SECONDS must be at least "
+        f"{_AGENT_RUN_STUCK_RECOVERY_SAFE_FLOOR_SECONDS}s — an evaluation case executes "
+        "through the same agent run-loop budgets as a normal AgentRun (see "
+        "AGENTS_STUCK_RUN_STALE_SECONDS above)."
+    )
 
 # Production observability (Phase 11 Block 1) — see ``observability/metrics.py``
 # and ``observability/views.py``. The metrics endpoint is deployment
