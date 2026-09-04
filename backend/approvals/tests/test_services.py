@@ -310,6 +310,34 @@ class TestExpiryProcessing:
         pending_refund_approval(monkeypatch)
         assert services.expire_stale_approvals() == 0
 
+    def test_running_the_sweep_twice_is_a_safe_noop_the_second_time(self, monkeypatch):
+        """Phase 16 Part B, section 16: recovery/sweeper idempotency — a
+        second sweep invocation over the same already-expired row must do
+        nothing further (no second AuditEvent, no second webhook, no
+        second resume dispatch), matching every other recovery sweeper's
+        documented contract in this codebase."""
+        from audit.models import AuditAction, AuditEvent
+
+        run, approval, fake = pending_refund_approval(monkeypatch)
+        past = timezone.now() - timedelta(days=1)
+        ApprovalRequest.objects.filter(pk=approval.pk).update(
+            created_at=past, expires_at=past + timedelta(seconds=1)
+        )
+
+        first_count = services.expire_stale_approvals()
+        second_count = services.expire_stale_approvals()
+
+        assert first_count == 1
+        assert second_count == 0
+        approval.refresh_from_db()
+        assert approval.status == ApprovalStatus.EXPIRED
+        assert (
+            AuditEvent.objects.filter(
+                action=AuditAction.APPROVAL_EXPIRED, target_id=str(approval.id)
+            ).count()
+            == 1
+        )
+
 
 @pytest.mark.django_db(transaction=True)
 class TestConcurrency:
