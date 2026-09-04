@@ -188,6 +188,31 @@ class TestRecoverStuckAgentRuns:
         assert execution.status == ToolExecutionStatus.SUCCEEDED
         assert execution.error_code == ""
 
+    def test_recovery_is_visible_via_the_stuck_run_recovery_metric(self):
+        """Phase 16 Checkpoint 3 (Part E): recovery previously only emitted
+        a structured log line, invisible to a metrics dashboard/alert."""
+        from prometheus_client.parser import text_string_to_metric_families
+
+        from observability.metrics import render_metrics
+
+        def _count():
+            body = render_metrics().decode("utf-8")
+            return sum(
+                s.value
+                for family in text_string_to_metric_families(body)
+                for s in family.samples
+                if s.name == "supportpilot_stuck_run_recoveries_total"
+                and s.labels.get("domain") == "agent"
+            )
+
+        before = _count()
+        run = AgentRunFactory(status=AgentRunStatus.RUNNING)
+        _age(run, seconds=10_000)
+
+        recover_stuck_agent_runs()
+
+        assert _count() == before + 1
+
     def test_batch_size_bounds_a_single_sweep(self):
         runs = [AgentRunFactory(status=AgentRunStatus.RUNNING) for _ in range(3)]
         for run in runs:

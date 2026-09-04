@@ -41,6 +41,7 @@ from django.utils import timezone
 
 from audit.models import AuditAction
 from audit.services import record_event
+from observability.metrics import observe_stuck_run_recovery
 
 from .models import (
     AgentRun,
@@ -78,6 +79,7 @@ def recover_stuck_agent_runs(*, batch_size: int | None = None, now=None) -> int:
             "agents_stuck_run_recovered",
             extra={"event": "agents_stuck_run_recovered", "count": recovered},
         )
+        observe_stuck_run_recovery(domain="agent", count=recovered)
     return recovered
 
 
