@@ -124,6 +124,32 @@ against a still-active worker (re-checking `status`/`updated_at` after the
 lock is acquired), and incapable of regressing an already-recovered row
 (see `agents/tests/test_recovery.py`, `evaluations/tests/test_recovery.py`).
 
+**Phase 16 Checkpoint 3 (Part A) closed a real false-recovery defect in the
+`evaluations` sweep.** `EvaluationRun.updated_at` only advances at claim time
+and again whenever *any* case *completes* (`_record_case_completion` saves
+the run row) — never while a case is merely still executing. A multi-case
+run, run through limited worker concurrency, can therefore legitimately go
+longer than `EVALUATIONS_STUCK_RUN_STALE_SECONDS` between case completions
+purely because the currently in-flight case hasn't finished yet — the run's
+own timestamp going stale is not, by itself, evidence the run is dead.
+Before this checkpoint, `_recover_one_stuck_run` computed this correctly at
+the *case* level (only individually-stale `RUNNING` cases were ever failed)
+but still unconditionally counted the sweep as a "recovery" and re-saved the
+run row whenever the *run's* own `updated_at` was stale, even when a live,
+non-stale case was found and nothing was actually wrong — a healthy,
+actively-progressing run was never mis-failed, but it was misreported as
+"recovered" and given an unnecessary write on every sweep cycle it happened
+to be examined during. Fixed by checking for at least one non-terminal case
+whose own `updated_at` is not stale before treating the run as a genuine
+candidate: if one exists, the sweep leaves the run completely untouched and
+does not count it. This uses the case's own already-existing `updated_at`
+(touched at claim and at completion) as the liveness signal — no new
+heartbeat mechanism was added, matching this checkpoint's "prefer existing
+child-case progress over a synthetic heartbeat" guidance. See
+`evaluations/tests/test_recovery.py`'s matrix (stale-with-live-case,
+single-case stale-parent/live-case, race-favors-progress, all-stale,
+recovered-run-cannot-regress) for the regression proof.
+
 **Recovery primitive exists: YES** for `agents` and `evaluations`.
 **Automatic periodic scheduling exists: NO** — nothing calls either sweep
 function on a schedule yet; see Residual risks below for the Phase 17
@@ -173,6 +199,61 @@ real design decisions attached (what "checking the provider's own record"
 even means per provider), deliberately out of this checkpoint's "smallest
 reliable primitive" scope — flagged here explicitly rather than silently
 assumed away.
+
+## Failure injection / provider-idempotency audit (Phase 16 Checkpoint 3, Part D)
+
+Every side-effecting tool's idempotency key is derived deterministically
+from `context.tool_execution_id` (`integrations/tools.py`:
+`f"payment.refund:{context.tool_execution_id}"`,
+`f"calendar.create_booking:{context.tool_execution_id}"`) — **stable across
+every retry of the same logical `ToolExecution` row**, whether that retry is
+the tool executor's own automatic loop (`RetryPolicy(max_retries=2, ...)`)
+or a caller (agent/operator) manually re-invoking the same tool call with
+the same application-level idempotency key. This is the mechanism, not a
+per-scenario coincidence.
+
+- **`payment.refund` (Stripe)**: real, provider-native idempotency —
+  `integrations.providers.stripe_provider.refund_payment` forwards the key
+  via Stripe's own `options={"idempotency_key": ...}`. The
+  provider-succeeds-but-response-lost window (a timeout after the refund
+  actually processed) is already proven closed by pre-existing tests
+  exercising the fake's `committed_before_raising=True` scenario —
+  `integrations/tests/test_tools_payment.py::TestPaymentRefund::test_ambiguous_timeout_does_not_double_refund_on_manual_retry`
+  and `::test_repeated_call_with_same_tool_execution_reuses_the_provider_refund`:
+  a transient failure that the fake models as "provider committed the
+  refund before raising" is followed by a retry (same idempotency key) that
+  returns the already-committed refund with **zero additional provider-visible
+  refund calls**. **Duplicate refund: BLOCKED**, for retries that reuse the
+  same key (the only path this system's own retry/resume machinery ever
+  takes).
+- **`calendar.create_booking` (Google Calendar)**: **no native
+  provider idempotency** — `integrations/providers/google_calendar.py`'s own
+  comment states it plainly: "Google has no native application-idempotency-key
+  concept for `events.insert`." The real adapter stores the key as an
+  `extendedProperties` field on the created event purely for **later,
+  manual reconciliation** (detecting a duplicate after the fact by
+  querying for it), not for **preventing** one. This is a real, structural
+  difference from `payment.refund` that the test suite's `FakeCalendarProvider`
+  (which *does* dedupe by key in-memory, matching `FakePaymentProvider`'s
+  shape for symmetry/simplicity) does not itself reveal — the fake is more
+  forgiving than the real provider here. **Duplicate booking residual risk:
+  YES** — a retry after an ambiguous (timeout/lost-response) booking
+  attempt can create a second real calendar event; nothing in this
+  codebase prevents it today. Documented here rather than invented away;
+  building real dedupe (e.g. a pre-insert existence check against the
+  `extendedProperties` value, itself racy without a provider-side unique
+  constraint) is a genuine feature addition out of this checkpoint's scope.
+- **Notifications/webhooks**: delivery is at-least-once at the transport
+  layer (see below) — a provider/network send can succeed while this
+  system's own local delivery-record finalize is lost (crash, DB error),
+  and the claim-then-process boundary's own retry will then re-attempt the
+  *send*, not just the bookkeeping. **Duplicate network delivery: POSSIBLE**,
+  by construction of at-least-once semantics — this is not "fixed" here
+  because it cannot be, without the receiving system's own idempotent
+  handling (e.g. a webhook HMAC/event-id dedupe on the receiver), which is
+  outside this codebase's control. This was already true before this
+  checkpoint and remains explicitly documented rather than silently
+  assumed away.
 
 ## At-least-once boundaries (never exactly-once)
 
@@ -337,6 +418,35 @@ Verified this checkpoint:
   window" above. This is a real, currently-unaddressed reconciliation gap
   (shared with any lost-response scenario, not unique to recovery),
   deliberately out of this checkpoint's scope.
+- **`AgentRun`'s recovery safety bound is narrower than "automatically
+  safe forever"** (Phase 16 Checkpoint 3, Part A section 8): the 900s
+  worst-case derivation above holds only for the *currently registered*
+  execution surface — `AgentVersion.wall_time_limit_seconds<=600` /
+  `provider_timeout_seconds<=300` (both DRF serializer ceilings) plus one
+  trailing tool call's own timeout. That trailing timeout is
+  **code-owned, not centrally capped**: every `ToolDefinition.max_timeout_seconds`
+  in the codebase today is a `ToolSpec` constant seeded by
+  `tools.services.sync_tool_catalog` from code (`tools/demo_tools.py`,
+  10s max observed) — `ToolDefinitionSerializer` is entirely
+  `read_only_fields = fields`, so there is no API path for an operator to
+  register a tool with a larger timeout at runtime. The invariant that
+  actually holds is: *current registered/configurable execution bounds (≤900s)
+  < recovery threshold floor (1800s)* — not an automatic guarantee that
+  survives a future code change. If a future tool is added with a
+  materially larger `max_timeout_seconds` (or the serializer ceilings on
+  `AgentVersion` are raised), this arithmetic must be re-derived and the
+  settings-time floor (`_AGENT_RUN_STUCK_RECOVERY_SAFE_FLOOR_SECONDS` in
+  `config/settings.py`) re-checked by hand — no runtime validation links
+  a per-tool DB timeout to the global staleness threshold, deliberately:
+  `ToolDefinition` rows are dynamic, per-workspace-agnostic catalog data,
+  not startup-time `env()` config, so no `settings.py`-time check could
+  observe them, and a DB-level `CHECK` comparing a table column against a
+  Django setting value isn't expressible as a portable constraint. Given
+  every current tool sits comfortably under the floor and the catalog is
+  code-only (not admin-configurable), building new cross-cutting
+  validation machinery for a currently-hypothetical future risk was judged
+  overengineering for this checkpoint; this paragraph is the explicit,
+  narrow documentation of the invariant instead.
 
 ## Lock-order audit (Phase 16 Checkpoint 2 Part D)
 
