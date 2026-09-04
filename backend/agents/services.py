@@ -733,7 +733,7 @@ def resume_agent_run_after_approval(approval_request_id: uuid.UUID | str) -> str
     of idempotency for *all* of these outcomes, not just the approved one.
     """
     from approvals.models import ApprovalRequest, ApprovalStatus
-    from tools.errors import ToolError
+    from tools.errors import ToolError, ToolExecutionInProgressError
     from tools.execution import resume_after_approval
 
     approval = ApprovalRequest.objects.select_related(
@@ -766,6 +766,12 @@ def resume_agent_run_after_approval(approval_request_id: uuid.UUID | str) -> str
             tool_result = resume_after_approval(
                 tool_execution_id=str(approval.tool_execution_id), record_step=record_step
             )
+        except ToolExecutionInProgressError:
+            # Phase 16 Part A, section 8: a genuinely concurrent/redelivered
+            # resume observed another caller already owning this exact
+            # ToolExecution — a safe no-op, exactly like ``_claim_run_for_
+            # resume`` returning None above, never a run failure.
+            return "already_resumed"
         except ToolError as exc:
             return _fail_run(run, code=exc.code, message=exc.safe_message).status
         # Section 35-36, 60: the approved result is normalized through the

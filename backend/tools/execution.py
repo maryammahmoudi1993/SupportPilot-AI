@@ -786,6 +786,18 @@ def resume_after_approval(
             return ToolExecutionResult(
                 execution=execution, output=execution.result_redacted, reused=True
             )
+        if execution.status == ToolExecutionStatus.RUNNING:
+            # Phase 16 Part A, section 8: a genuine concurrent/redelivered
+            # resume call observed the winning racer's claim (WAITING_FOR_
+            # APPROVAL -> RUNNING) but that racer has not finished yet — this
+            # is not a rejection, expiry, or policy denial, so it must never
+            # be misreported as one (the ``error_cls is None`` defensive
+            # fallback below would otherwise fabricate
+            # ``ToolApprovalRejectedError`` for a call that was never
+            # actually rejected, incorrectly failing the whole agent run).
+            # Mirrors ``_resolve_existing``'s identical "another caller
+            # already owns this row" signal for the first-execution path.
+            raise ToolExecutionInProgressError()
         _raise_policy_terminal_outcome(execution)
     execution = claimed
 
