@@ -116,6 +116,11 @@ class EvaluationFailureCode(models.TextChoices):
     OUTCOME_MISMATCH = "outcome_mismatch", "Outcome mismatch"
     SCORING_FAILED = "scoring_failed", "Scoring failed"
     CANCELLED = "cancelled", "Cancelled"
+    # Phase 16 Checkpoint 2 Part C: assigned only by
+    # ``evaluations.recovery.recover_stuck_evaluation_runs`` to a case whose
+    # worker crashed mid-execution and never reached a terminal state —
+    # never assigned by normal case-execution failure handling.
+    WORKER_CRASH_RECOVERED = "worker_crash_recovered", "Worker crash recovered"
 
 
 class EvaluationDataset(BaseModel):
@@ -259,6 +264,15 @@ class EvaluationRun(BaseModel):
             models.Index(fields=["workspace", "status"], name="eval_run_ws_status_idx"),
             models.Index(fields=["workspace", "-created_at"], name="eval_run_ws_created_idx"),
             models.Index(fields=["dataset", "-created_at"], name="eval_run_dataset_created_idx"),
+            # Phase 16 Checkpoint 2 Part F: backs
+            # ``evaluations.recovery.recover_stuck_evaluation_runs``'s sweep
+            # query (``status=RUNNING, updated_at<=cutoff``), deliberately
+            # global/cross-workspace like ``agents``' equivalent index.
+            # Measured with ``EXPLAIN ANALYZE`` against 150k synthetic rows:
+            # a full parallel sequential scan (~18ms, ~6,400 buffer reads)
+            # before this index vs. an index scan (~0.13ms, ~104 buffer
+            # reads) after it.
+            models.Index(fields=["status", "updated_at"], name="eval_run_status_updated_idx"),
         ]
 
     def clean(self) -> None:

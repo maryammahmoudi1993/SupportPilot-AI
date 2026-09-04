@@ -157,6 +157,19 @@ env = environ.Env(
     CHANNELS_INBOUND_SWEEP_INTERVAL_SECONDS=(float, 30.0),
     CHANNEL_WEBCHAT_SESSION_THROTTLE_RATE=(str, "30/min"),
     CHANNEL_WEBCHAT_MESSAGE_THROTTLE_RATE=(str, "60/min"),
+    # Phase 16 Checkpoint 2 (Part C): stuck-worker recovery for ``agents`` and
+    # ``evaluations``. A row a crashed worker left ``RUNNING`` (no
+    # heartbeat/lease exists yet, so "no progress" is approximated by
+    # ``updated_at``) is only ever recovered — never silently re-executed,
+    # which would risk duplicating side effects a partially-completed run
+    # already caused. The stale threshold must exceed any legitimate run's
+    # real wall-clock duration; it is intentionally coarse in the absence of
+    # a per-run wall-time budget visible to the sweeper (mirrors
+    # ``CHANNELS_INBOUND_SWEEP_*``/``DELIVERY_SWEEP_*``).
+    AGENTS_STUCK_RUN_STALE_SECONDS=(int, 900),
+    AGENTS_STUCK_RUN_SWEEP_BATCH_SIZE=(int, 100),
+    EVALUATIONS_STUCK_RUN_STALE_SECONDS=(int, 1800),
+    EVALUATIONS_STUCK_RUN_SWEEP_BATCH_SIZE=(int, 100),
     # Phase 14 (Section 3): the public message-history poll has no page
     # parameter of its own (the `after` cursor already bounds incremental
     # polling) — this caps a single call so a widget re-opening a very long
@@ -601,6 +614,15 @@ CHANNELS_CHAT_SESSION_TTL_SECONDS = env("CHANNELS_CHAT_SESSION_TTL_SECONDS")
 CHANNELS_INBOUND_SWEEP_BATCH_SIZE = env("CHANNELS_INBOUND_SWEEP_BATCH_SIZE")
 CHANNELS_INBOUND_SWEEP_STALE_SECONDS = env("CHANNELS_INBOUND_SWEEP_STALE_SECONDS")
 CHANNELS_INBOUND_SWEEP_INTERVAL_SECONDS = env("CHANNELS_INBOUND_SWEEP_INTERVAL_SECONDS")
+
+# Stuck-worker recovery (Phase 16 Checkpoint 2 Part C) — see
+# ``agents/recovery.py`` and ``evaluations/recovery.py``. No Celery Beat
+# schedule is wired for these yet (Phase 17 packaging concern); the settings
+# exist so the sweep functions themselves are correct and testable now.
+AGENTS_STUCK_RUN_STALE_SECONDS = env("AGENTS_STUCK_RUN_STALE_SECONDS")
+AGENTS_STUCK_RUN_SWEEP_BATCH_SIZE = env("AGENTS_STUCK_RUN_SWEEP_BATCH_SIZE")
+EVALUATIONS_STUCK_RUN_STALE_SECONDS = env("EVALUATIONS_STUCK_RUN_STALE_SECONDS")
+EVALUATIONS_STUCK_RUN_SWEEP_BATCH_SIZE = env("EVALUATIONS_STUCK_RUN_SWEEP_BATCH_SIZE")
 
 # Production observability (Phase 11 Block 1) — see ``observability/metrics.py``
 # and ``observability/views.py``. The metrics endpoint is deployment
