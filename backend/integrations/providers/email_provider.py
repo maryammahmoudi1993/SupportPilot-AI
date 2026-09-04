@@ -5,6 +5,15 @@ rather than a large vendor email SDK, since the project has no existing
 email-vendor dependency to justify one (section 59, 133-134 analog for
 email). Credentials come from the owning ``IntegrationConnection`` only —
 never from a tool argument.
+
+Destination validation is layered (Phase 15 checkpoint 2): the explicit
+``validate_outbound_host`` call below is a fast, easily-tested advisory
+check that rejects an obviously-blocked destination before even
+constructing a connection; the actual connection is built by
+``PinnedSmtpEmailBackend`` (``_smtp_transport``), which is the authoritative
+layer — it re-validates and pins the real socket to that validated address,
+closing the DNS-rebinding gap a check-then-reconnect sequence would
+otherwise leave open (see that module's docstring).
 """
 
 from __future__ import annotations
@@ -12,7 +21,7 @@ from __future__ import annotations
 import smtplib
 from email.utils import make_msgid
 
-from django.core.mail import EmailMessage, get_connection
+from django.core.mail import BadHeaderError, EmailMessage, get_connection
 
 from ..errors import (
     IntegrationAuthenticationFailedError,
@@ -20,7 +29,10 @@ from ..errors import (
     IntegrationTemporarilyUnavailableError,
     IntegrationTimeoutError,
 )
+from ..security import validate_outbound_host
 from .base import NormalizedNotification
+
+_PINNED_SMTP_BACKEND = "integrations.providers._smtp_transport.PinnedSmtpEmailBackend"
 
 
 class SmtpNotificationProvider:
@@ -31,10 +43,14 @@ class SmtpNotificationProvider:
     def probe(self, *, credentials: dict, timeout_seconds: float) -> None:
         """Read-only connection-test probe: opens and closes the SMTP
         connection without sending anything."""
+        host = credentials.get("host")
+        port = int(credentials.get("port", 587))
+        validate_outbound_host(host, port)
+
         connection = get_connection(
-            backend="django.core.mail.backends.smtp.EmailBackend",
-            host=credentials.get("host"),
-            port=int(credentials.get("port", 587)),
+            backend=_PINNED_SMTP_BACKEND,
+            host=host,
+            port=port,
             username=credentials.get("username"),
             password=credentials.get("password"),
             use_tls=bool(credentials.get("use_tls", True)),
@@ -66,10 +82,14 @@ class SmtpNotificationProvider:
         if not from_email:
             raise IntegrationInvalidRequestError("No sender address is configured.")
 
+        host = credentials.get("host")
+        port = int(credentials.get("port", 587))
+        validate_outbound_host(host, port)
+
         connection = get_connection(
-            backend="django.core.mail.backends.smtp.EmailBackend",
-            host=credentials.get("host"),
-            port=int(credentials.get("port", 587)),
+            backend=_PINNED_SMTP_BACKEND,
+            host=host,
+            port=port,
             username=credentials.get("username"),
             password=credentials.get("password"),
             use_tls=bool(credentials.get("use_tls", True)),
@@ -98,6 +118,20 @@ class SmtpNotificationProvider:
             raise IntegrationAuthenticationFailedError() from exc
         except smtplib.SMTPRecipientsRefused as exc:
             raise IntegrationInvalidRequestError("The recipient address was refused.") from exc
+        except BadHeaderError as exc:
+            # Phase 15 checkpoint 3, Part E: ``subject``/``recipient_email``
+            # ultimately originate from tool arguments / a Customer record
+            # — untrusted, prompt-injectable text (section 27 of the Phase
+            # 15 brief). Django's own MIME header construction already
+            # refuses a value containing a CRLF/newline before anything is
+            # ever written to the wire (verified in
+            # ``TestHeaderInjection``) — this only normalizes that refusal
+            # into the same safe error taxonomy every other failure here
+            # uses, rather than letting a raw ``django.core.mail`` exception
+            # type propagate uncaught (section 47-48).
+            raise IntegrationInvalidRequestError(
+                "The message could not be sent: an address or header was invalid."
+            ) from exc
         except TimeoutError as exc:
             raise IntegrationTimeoutError() from exc
         except (smtplib.SMTPException, OSError) as exc:

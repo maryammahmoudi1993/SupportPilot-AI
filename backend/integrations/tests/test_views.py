@@ -272,3 +272,52 @@ class TestTenantIsolation:
             format="json",
         )
         assert response.status_code == 403
+
+
+@pytest.mark.django_db
+class TestAuditForgeryResistance:
+    """Phase 15 Security Checkpoint 5 (Part E.1): the resulting AuditEvent's
+    actor/workspace must reflect the true authenticated request context,
+    never any client-supplied field of the same name. There is no audit
+    write/read API at all (`audit/services.py:record_event` is the only way
+    to create an AuditEvent, called only from server-side service code), so
+    this exercises a real security-sensitive service — credential rotation —
+    through its actual HTTP endpoint and reads the resulting row back via
+    the ORM directly."""
+
+    def test_rotate_credentials_audit_row_ignores_spoofed_actor_and_workspace_fields(self):
+        from audit.models import AuditAction, AuditEvent
+
+        connection = IntegrationConnectionFactory()
+        membership = WorkspaceMembershipFactory(
+            workspace=connection.workspace, role=WorkspaceRole.OWNER
+        )
+        attacker_membership = WorkspaceMembershipFactory(role=WorkspaceRole.OWNER)
+
+        response = _client(membership.user).put(
+            f"{_base(connection.workspace)}/{connection.id}/credentials/",
+            data={
+                "credentials": {"secret_key": "sk_test_new"},
+                # Attempted forgery: none of these are real serializer
+                # fields, and even if DRF silently ignored the unknown
+                # fields, the service function only ever accepts
+                # `actor`/`workspace` from the view's own server-derived
+                # `request.user` / `self.workspace` — never from the body.
+                "actor": str(attacker_membership.user.id),
+                "actor_id": str(attacker_membership.user.id),
+                "workspace": str(attacker_membership.workspace.id),
+                "workspace_id": str(attacker_membership.workspace.id),
+            },
+            format="json",
+        )
+
+        assert response.status_code == 200
+        event = AuditEvent.objects.filter(
+            action=AuditAction.INTEGRATION_CREDENTIALS_ROTATED,
+            target_type="integration_connection",
+            target_id=str(connection.id),
+        ).latest("created_at")
+        assert event.actor_id == membership.user.id
+        assert event.workspace_id == connection.workspace.id
+        assert event.actor_id != attacker_membership.user.id
+        assert event.workspace_id != attacker_membership.workspace.id

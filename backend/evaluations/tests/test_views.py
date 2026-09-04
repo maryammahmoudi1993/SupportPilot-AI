@@ -105,6 +105,26 @@ class TestCaseApi:
         )
         assert response.status_code == 400
 
+    def test_case_create_rejects_oversized_seeded_context_and_expectations(self):
+        """Phase 15 checkpoint 5, Part G: ``seeded_context``/``expectations``
+        previously had no size validator at all (unlike the equivalent
+        ``runtime_config``/``input_metadata``/``configuration`` fields on
+        agents/tools/integrations, which are all capped) — bring evaluation
+        cases in line with that established pattern."""
+        membership = WorkspaceMembershipFactory(role=WorkspaceRole.OWNER)
+        dataset = EvaluationDatasetFactory(workspace=membership.workspace)
+        response = _client(membership.user).post(
+            f"{_base(membership.workspace)}/datasets/{dataset.id}/cases/",
+            {
+                "key": "order-status",
+                "name": "Order status",
+                "input_message": "Where is my order?",
+                "seeded_context": {"padding": "x" * 9000},
+            },
+            format="json",
+        )
+        assert response.status_code == 400
+
     def test_case_create_and_list(self):
         membership = WorkspaceMembershipFactory(role=WorkspaceRole.OWNER)
         dataset = EvaluationDatasetFactory(workspace=membership.workspace)
@@ -179,6 +199,20 @@ class TestRunApi:
             format="json",
         )
         assert response.status_code == 404
+
+    def test_trigger_run_rejects_oversized_threshold_config(self):
+        membership = WorkspaceMembershipFactory(role=WorkspaceRole.OWNER)
+        dataset, version = self._dataset_and_version(membership.workspace)
+        response = _client(membership.user).post(
+            f"{_base(membership.workspace)}/runs/",
+            {
+                "dataset_id": str(dataset.id),
+                "agent_version_id": str(version.id),
+                "threshold_config": {"padding": "x" * 9000},
+            },
+            format="json",
+        )
+        assert response.status_code == 400
 
     def test_trigger_run_then_read_results_and_cancel(self):
         membership = WorkspaceMembershipFactory(role=WorkspaceRole.OWNER)

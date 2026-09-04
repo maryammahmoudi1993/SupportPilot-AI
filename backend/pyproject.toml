@@ -72,6 +72,13 @@ dependencies = [
     # packages to deploy. No exporter is attached unless
     # OBSERVABILITY_OTLP_ENDPOINT is actually configured (observability/tracing.py).
     "opentelemetry-exporter-otlp-proto-http==1.44.0",
+    # Phase 15 final release gate: pip-audit flagged the base-image-bundled
+    # setuptools (79.0.1, PYSEC-2026-3447) as vulnerable. ``[build-system]
+    # requires`` above only constrains the isolated PEP 517 build
+    # environment, not the environment this package is installed into —
+    # declaring it here as a real dependency ensures every install (local
+    # dev, CI, Docker) upgrades the target environment's setuptools too.
+    "setuptools>=83.0.0",
 ]
 
 [project.optional-dependencies]

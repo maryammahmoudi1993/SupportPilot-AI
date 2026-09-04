@@ -322,3 +322,27 @@ class TestProbe:
         _patch_client(monkeypatch, client)
         with pytest.raises(IntegrationAuthenticationFailedError):
             provider.probe(credentials={"secret_key": "sk_test_bad"}, timeout_seconds=5)
+
+    def test_raw_vendor_exception_message_never_becomes_the_safe_message(
+        self, monkeypatch, provider
+    ):
+        # Phase 15 Security Checkpoint 5 (Part D.4): the underlying Stripe
+        # SDK exception's message text (which could echo back a
+        # credential-looking string) must never flow into the normalized
+        # error's `safe_message` — `_map_error()` always constructs the
+        # normalized error with no message argument, so `safe_message`
+        # stays each class's fixed default.
+        marker = "PHASE15_SECRET_KEY_MARKER_do-not-leak"
+
+        def _raise(ref):
+            raise stripe.AuthenticationError(f"invalid api key: {marker}")
+
+        client = _FakeStripeClient(_FakeV1(payment_intents=SimpleNamespace(retrieve=_raise)))
+        _patch_client(monkeypatch, client)
+        with pytest.raises(IntegrationAuthenticationFailedError) as exc_info:
+            provider.get_payment(
+                credentials={"secret_key": "sk_test_x"}, payment_reference="pi_1", timeout_seconds=5
+            )
+
+        assert marker not in exc_info.value.safe_message
+        assert exc_info.value.safe_message == "The provider rejected the configured credentials."

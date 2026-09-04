@@ -21,6 +21,7 @@ from datetime import timedelta
 from typing import Any, NoReturn, cast
 
 from django.db import IntegrityError, transaction
+from django.db.models import F
 from django.utils import timezone
 from pydantic import ValidationError as PydanticValidationError
 
@@ -136,13 +137,45 @@ def execute_tool(
             raise ToolNotBoundError()
         raise ToolDisabledError()
 
-    # 3. Tool-call budget — bounded round-trips (section 41/43).
+    # 3. Tool-call budget — early, advisory fast-fail (section 41/43). Reads
+    # the live DB count rather than trusting the caller's possibly-stale
+    # in-memory ``agent_run``, so an already-exhausted budget is rejected
+    # here with zero rows created — this is what keeps
+    # ``test_budget_exhausted_blocks_before_any_execution_record`` true.
+    #
+    # This check is deliberately NOT the authoritative security boundary
+    # for a *concurrent* boundary case (persisted count == max - 1, two
+    # callers racing): both can observe the same live count here and both
+    # pass. The actual hard ceiling is enforced by the single atomic
+    # conditional reservation in ``_reserve_budget_slot``, called
+    # immediately before the handler/provider is ever invoked (both in the
+    # main path below and in ``resume_after_approval``) — never here,
+    # since a policy-denied or still-pending-approval call must not
+    # consume a budget slot at all (only a call whose handler is actually
+    # about to run may consume one).
+    live_tool_call_count = (
+        AgentRun.objects.filter(pk=agent_run.pk).values_list("tool_call_count", flat=True).first()
+    )
+    if live_tool_call_count is not None:
+        agent_run.tool_call_count = live_tool_call_count
     if agent_run.tool_call_count >= agent_version.max_tool_calls:
         raise ToolBudgetExceededError()
 
     # 4. Input size + schema validation. The handler is never invoked on
     # invalid input (section 17, 74).
-    if len(json.dumps(arguments, default=str)) > MAX_ARGUMENTS_BYTES:
+    #
+    # ``arguments`` is still a raw, untyped dict here (schema validation
+    # happens below) — a pathologically deep-but-small nesting (e.g. ~1000
+    # levels of a single-key dict fits well under MAX_ARGUMENTS_BYTES)
+    # makes ``json.dumps`` itself raise ``RecursionError`` before this
+    # size guard can reject it on length. That must fail the same safe,
+    # closed way as an oversized payload — never as an unhandled
+    # exception escaping the tool boundary (Phase 15 checkpoint 5, Part G).
+    try:
+        arguments_json_length = len(json.dumps(arguments, default=str))
+    except RecursionError as exc:
+        raise ToolInvalidInputError("Tool arguments payload is too large.") from exc
+    if arguments_json_length > MAX_ARGUMENTS_BYTES:
         raise ToolInvalidInputError("Tool arguments payload is too large.")
     if idempotency_key and len(idempotency_key) > MAX_IDEMPOTENCY_KEY_LENGTH:
         raise ToolInvalidInputError("Idempotency key is too long.")
@@ -233,6 +266,31 @@ def execute_tool(
         )
 
     _transition_running(execution)
+
+    # Authoritative hard-ceiling reservation (section 35-37 of the Phase 15
+    # brief): one conditional atomic UPDATE whose WHERE clause embeds the
+    # budget predicate itself — never a separate read-then-check-then-write
+    # sequence, which is exactly what a strict ceiling under concurrency
+    # cannot tolerate. Placed here, immediately before the handler is ever
+    # invoked, so the slot is reserved strictly before the external/tool
+    # side effect — never discovered as over-budget only after the side
+    # effect already happened. A policy-denied or still-pending-approval
+    # call never reaches this line, so it never consumes a slot.
+    if not _reserve_budget_slot(agent_run=agent_run, max_tool_calls=agent_version.max_tool_calls):
+        _finalize_failure(
+            execution,
+            status=ToolExecutionStatus.FAILED,
+            code=ToolBudgetExceededError.code,
+            message="The run's tool-call budget was exhausted by a concurrent call.",
+        )
+        _step(
+            AgentStepType.TOOL_EXECUTION_FAILED,
+            AgentStepStatus.FAILED,
+            error_code=ToolBudgetExceededError.code,
+            safe_metadata={"tool_key": tool_key, "tool_execution_id": str(execution.id)},
+        )
+        raise ToolBudgetExceededError()
+
     _step(
         AgentStepType.TOOL_EXECUTION_STARTED,
         AgentStepStatus.STARTED,
@@ -273,7 +331,6 @@ def execute_tool(
                 message=exc.safe_message,
             )
             finalize_domain_span(tool_span, outcome=ToolExecutionStatus.TIMED_OUT, is_error=True)
-            _increment_tool_call_count(agent_run)
             _step(
                 AgentStepType.TOOL_EXECUTION_TIMED_OUT,
                 AgentStepStatus.FAILED,
@@ -289,7 +346,6 @@ def execute_tool(
                 message=exc.safe_message,
             )
             finalize_domain_span(tool_span, outcome=ToolExecutionStatus.FAILED, is_error=True)
-            _increment_tool_call_count(agent_run)
             _step(
                 AgentStepType.TOOL_EXECUTION_FAILED,
                 AgentStepStatus.FAILED,
@@ -300,7 +356,6 @@ def execute_tool(
 
         _finalize_success(execution, output=output)
         finalize_domain_span(tool_span, outcome=ToolExecutionStatus.SUCCEEDED)
-        _increment_tool_call_count(agent_run)
         _step(
             AgentStepType.TOOL_EXECUTION_SUCCEEDED,
             AgentStepStatus.SUCCEEDED,
@@ -793,6 +848,26 @@ def resume_after_approval(
         ),
     )
 
+    # Same authoritative hard-ceiling reservation as the main execute_tool
+    # path (section 35-37): the approval pause never itself consumed a
+    # budget slot (a still-pending approval must not count against the
+    # budget), so the slot is reserved here, strictly before the handler
+    # runs, not at claim/creation time. ``_claim_resume`` above already
+    # guarantees only one caller ever reaches this point for a given
+    # ``ToolExecution`` (concurrent/redelivered resumes are rejected
+    # earlier), so this only ever races a *different* tool call on the same
+    # run — exactly the case this single atomic conditional UPDATE closes.
+    if not _reserve_budget_slot(
+        agent_run=execution.agent_run, max_tool_calls=execution.agent_version.max_tool_calls
+    ):
+        _finalize_failure(
+            execution,
+            status=ToolExecutionStatus.FAILED,
+            code=ToolBudgetExceededError.code,
+            message="The run's tool-call budget was exhausted by a concurrent call.",
+        )
+        raise ToolBudgetExceededError()
+
     _step(
         AgentStepType.EXECUTION_RESUMED,
         AgentStepStatus.STARTED,
@@ -827,7 +902,6 @@ def resume_after_approval(
                 message=exc.safe_message,
             )
             finalize_domain_span(tool_span, outcome=ToolExecutionStatus.TIMED_OUT, is_error=True)
-            _increment_tool_call_count(execution.agent_run)
             raise
         except ToolError as exc:
             _finalize_failure(
@@ -837,12 +911,10 @@ def resume_after_approval(
                 message=exc.safe_message,
             )
             finalize_domain_span(tool_span, outcome=ToolExecutionStatus.FAILED, is_error=True)
-            _increment_tool_call_count(execution.agent_run)
             raise
 
         _finalize_success(execution, output=output)
         finalize_domain_span(tool_span, outcome=ToolExecutionStatus.SUCCEEDED)
-        _increment_tool_call_count(execution.agent_run)
         _step(
             AgentStepType.TOOL_EXECUTION_SUCCEEDED,
             AgentStepStatus.SUCCEEDED,
@@ -913,12 +985,29 @@ def _duration_ms(started_at, completed_at) -> int | None:
     return max(0, int((completed_at - started_at).total_seconds() * 1000))
 
 
-def _increment_tool_call_count(agent_run: AgentRun) -> None:
-    with transaction.atomic():
-        AgentRun.objects.filter(pk=agent_run.pk).update(
-            tool_call_count=agent_run.tool_call_count + 1
-        )
-    agent_run.tool_call_count += 1
+def _reserve_budget_slot(*, agent_run: AgentRun, max_tool_calls: int) -> bool:
+    """Atomically reserve one tool-call budget slot: a single conditional
+    ``UPDATE ... WHERE tool_call_count < max_tool_calls`` whose affected-row
+    count *is* the reservation result (section 35-37 of the Phase 15
+    security brief) — never a separate read, compare, and
+    ``F("tool_call_count") + 1`` write, since splitting those into distinct
+    operations is exactly what lets two concurrent callers both observe
+    room for one more call and both proceed. Postgres evaluates a single
+    UPDATE's WHERE clause and SET atomically per row, so at most one of two
+    truly concurrent callers targeting the same run can ever have this
+    return ``True`` for the same slot.
+
+    Callers must call this immediately before invoking the tool
+    handler/provider — never earlier (a policy-denied or
+    still-pending-approval call must never consume a slot) and never
+    later (that would let the side effect happen before the reservation
+    is known to have succeeded)."""
+    updated = AgentRun.objects.filter(pk=agent_run.pk, tool_call_count__lt=max_tool_calls).update(
+        tool_call_count=F("tool_call_count") + 1
+    )
+    if updated:
+        agent_run.refresh_from_db(fields=["tool_call_count"])
+    return bool(updated)
 
 
 # ---------------------------------------------------------------------------

@@ -184,6 +184,25 @@ class TestLogin:
         )
         assert response.status_code == status.HTTP_403_FORBIDDEN
 
+    def test_csrf_token_from_a_different_session_is_rejected(self):
+        """A CSRF token another client's session was issued cannot be
+        replayed against this session — enforce_csrf is a pure
+        cookie/header double-submit match, and this client's own cookie
+        jar never received that other token, so the two can never agree."""
+        UserFactory(email="jane@example.com")
+        other_client, other_token = _csrf_client()
+        assert other_token  # sanity: a real token was actually issued
+
+        client = APIClient(enforce_csrf_checks=True)
+        client.get("/api/v1/auth/csrf/")  # this client primes its own, different cookie
+        response = client.post(
+            "/api/v1/auth/login/",
+            {"email": "jane@example.com", "password": DEFAULT_PASSWORD},
+            format="json",
+            HTTP_X_CSRFTOKEN=other_token,
+        )
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+
     def test_login_throttle_returns_429_after_threshold(self):
         # `ScopedRateThrottle.THROTTLE_RATES` is bound to
         # `api_settings.DEFAULT_THROTTLE_RATES` once, at class-import time —
@@ -405,6 +424,84 @@ class TestMe:
 
         client = APIClient()
         client.credentials(HTTP_AUTHORIZATION=f"Bearer {refresh}")
+        response = client.get("/api/v1/auth/me/")
+        assert response.status_code == status.HTTP_401_UNAUTHORIZED
+
+    def test_token_with_a_tampered_signature_is_rejected(self):
+        """Phase 15 checkpoint 4: a syntactically valid, real access token
+        with one byte flipped in its signature segment — distinct from the
+        existing garbage-string malformed-token test, which never exercises
+        simplejwt's actual signature verification path."""
+        user = UserFactory()
+        token = str(AccessToken.for_user(user))
+        header_b64, payload_b64, signature_b64 = token.split(".")
+        # Flip the first character of the signature to something else,
+        # guaranteed different, while staying in the base64url alphabet.
+        tampered_char = "A" if signature_b64[0] != "A" else "B"
+        tampered_signature = tampered_char + signature_b64[1:]
+        tampered_token = f"{header_b64}.{payload_b64}.{tampered_signature}"
+
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f"Bearer {tampered_token}")
+        response = client.get("/api/v1/auth/me/")
+        assert response.status_code == status.HTTP_401_UNAUTHORIZED
+        assert "Traceback" not in str(response.data)
+
+    def test_token_signed_with_a_different_key_is_rejected(self):
+        """Algorithm/key-confusion proof: a token that is a well-formed
+        HS256 JWT but signed with a key other than ``settings.SECRET_KEY``
+        must be rejected exactly like any other invalid signature — never
+        accepted because its structure otherwise looks legitimate."""
+        import jwt as pyjwt
+
+        user = UserFactory()
+        genuine = AccessToken.for_user(user)
+        forged = pyjwt.encode(dict(genuine.payload), "attacker-controlled-key", algorithm="HS256")
+
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f"Bearer {forged}")
+        response = client.get("/api/v1/auth/me/")
+        assert response.status_code == status.HTTP_401_UNAUTHORIZED
+
+    def test_wrong_auth_scheme_is_rejected(self):
+        """A well-formed access token presented under a non-Bearer scheme
+        must not authenticate — JWTAuthentication only recognizes the
+        configured ``AUTH_HEADER_TYPES`` (Bearer)."""
+        user = UserFactory()
+        token = AccessToken.for_user(user)
+
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f"Basic {token}")
+        response = client.get("/api/v1/auth/me/")
+        assert response.status_code == status.HTTP_401_UNAUTHORIZED
+
+    def test_empty_bearer_token_is_rejected(self):
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION="Bearer ")
+        response = client.get("/api/v1/auth/me/")
+        assert response.status_code == status.HTTP_401_UNAUTHORIZED
+
+    def test_bearer_scheme_with_no_token_at_all_is_rejected(self):
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION="Bearer")
+        response = client.get("/api/v1/auth/me/")
+        assert response.status_code == status.HTTP_401_UNAUTHORIZED
+
+    def test_a_second_smuggled_authorization_value_is_rejected(self):
+        """ "Multiple Authorization headers" is not representable through
+        Django's WSGI environ (a single dict entry per header name — there
+        is structurally no second value for the app to ever see), so the
+        adjacent, actually reachable attack is a single header value an
+        attacker tries to smuggle a second credential into (e.g. a
+        comma-joined or newline-style combination). DRF's
+        ``get_authorization_header`` splits on whitespace and takes exactly
+        two parts; anything else fails closed rather than picking either
+        credential."""
+        user = UserFactory()
+        token = AccessToken.for_user(user)
+
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}, Bearer someone-elses-token")
         response = client.get("/api/v1/auth/me/")
         assert response.status_code == status.HTTP_401_UNAUTHORIZED
 
