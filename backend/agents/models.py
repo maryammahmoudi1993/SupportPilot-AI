@@ -295,6 +295,16 @@ class AgentRun(BaseModel):
             models.Index(fields=["workspace", "status"], name="agent_run_workspace_status_idx"),
             models.Index(fields=["workspace", "-created_at"], name="agent_run_ws_created_idx"),
             models.Index(fields=["agent_version"], name="agent_run_agent_version_idx"),
+            # Phase 16 Checkpoint 2 Part F: backs
+            # ``agents.recovery.recover_stuck_agent_runs``'s sweep query
+            # (``status=RUNNING, updated_at<=cutoff``), which is
+            # deliberately global/cross-workspace — the existing
+            # ``(workspace, status)`` index can't serve a query that never
+            # filters on workspace. Measured with ``EXPLAIN ANALYZE`` against
+            # 308k synthetic rows: a full parallel sequential scan (~27ms,
+            # ~11,900 buffer reads) before this index vs. an index scan
+            # (~0.2ms, ~103 buffer reads) after it.
+            models.Index(fields=["status", "updated_at"], name="agent_run_status_updated_idx"),
         ]
 
     def clean(self) -> None:
