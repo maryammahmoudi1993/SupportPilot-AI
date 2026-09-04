@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from django.utils import timezone
 
 from agents.context import (
     ConversationContextLimits,
@@ -75,6 +76,52 @@ class TestConversationContext:
         assert result.character_count == 15
         assert result.truncated is True
         assert [item.message_id for item in result.messages].count(trigger.id) == 1
+
+    def test_newest_history_is_retained_even_when_created_at_ties(self):
+        """Phase 16 Part F (section 31/33) regression: this is the
+        deterministic root cause behind the historically-observed flake in
+        ``test_newest_history_is_retained_...`` above — two messages
+        sharing the exact same ``created_at`` (a real, if rare,
+        possibility) previously sorted by ``id``, a random UUID with zero
+        correlation to creation order. Reproduced concretely before the
+        fix: forcing a tie made the *older* message survive the trim while
+        the newer one was dropped, inverting this test's own guarantee.
+        ``Message.sequence`` (a DB-assigned, strictly-increasing tie-
+        breaker) closes that gap; this test forces the exact tie condition
+        that broke it, rather than hoping wall-clock timing collides on its
+        own."""
+        from conversations.models import Message
+
+        conversation = ConversationFactory()
+        oldest = MessageFactory(conversation=conversation, body="oldest-000")
+        newest = MessageFactory(
+            conversation=conversation,
+            sender_type=MessageSenderType.AI_AGENT,
+            direction=MessageDirection.OUTBOUND,
+            body="recent-111",
+        )
+        trigger = MessageFactory(conversation=conversation, body="trigger-22")
+
+        # Force an exact created_at collision across all three messages —
+        # the condition under which a random-UUID tie-break previously
+        # produced the wrong (non-chronological) ordering.
+        same_instant = timezone.now()
+        Message.objects.filter(pk__in=[oldest.pk, newest.pk, trigger.pk]).update(
+            created_at=same_instant
+        )
+        trigger.refresh_from_db()
+
+        result = build_conversation_context(
+            workspace=conversation.workspace,
+            conversation=conversation,
+            trigger_message=trigger,
+            limits=ConversationContextLimits(max_messages=2, max_characters=100),
+        )
+
+        # sequence (insertion order), not the timestamp, is what must still
+        # correctly identify "newest" once created_at can no longer do so.
+        assert oldest.id not in [item.message_id for item in result.messages]
+        assert [item.message_id for item in result.messages] == [newest.id, trigger.id]
 
     def test_one_oversized_trigger_cannot_exceed_the_total_limit(self):
         conversation = ConversationFactory()
