@@ -115,6 +115,29 @@ a second invocation (no duplicate `AuditEvent`).
   (correctly weaker) guarantee than "the message was delivered exactly
   once."
 
+## Ordering determinism
+
+`Message` rows are ordered `(created_at, sequence)` — `sequence` is a real
+PostgreSQL-assigned, strictly-increasing insertion counter (see
+`conversations/models.py`), not the row's UUID primary key. This closed a
+real, reproduced defect: a `created_at` timestamp tie between two messages
+previously fell back to sorting by `id` (a random UUID with zero
+correlation to creation order), which could invert
+`agents.context.build_conversation_context`'s "newest history is retained"
+guarantee — the older of two same-instant messages could survive a
+context-window trim while the newer one was silently dropped. This is the
+deterministic root cause behind the historically-observed flake in
+`agents/tests/test_context.py::test_newest_history_is_retained_...`; a
+dedicated regression test now forces the exact tie condition and is
+stress-verified clean. The same random-UUID-as-tiebreaker pattern
+(`.order_by("-created_at", "-id")`) exists in several list-display
+selectors elsewhere (`agents/selectors.py`, `channel_ingress/selectors.py`,
+`conversations/selectors.py`'s own list ordering) — those were left
+unchanged because relative order among same-instant rows in a paginated
+list view carries no tested product guarantee, unlike conversation
+history feeding an LLM's context window. Worth a broader audit if a
+similar guarantee is ever built on top of one of those orderings.
+
 ## Residual risks
 
 - **No stuck-run recovery sweeper for `agents`, `approvals`, or
