@@ -58,8 +58,21 @@ class TestUnknownAndUnboundTool:
 
     def test_registered_but_unbound_tool_is_rejected(self):
         run = _running_run()
+        # Phase 16 Checkpoint 2A root cause: the catalog row must actually
+        # exist (published, with a handler_key matching the code registry)
+        # for this to genuinely exercise "registered + published, but not
+        # bound to this agent version" -> ToolNotBoundError. Without it,
+        # execute_tool's earlier "not published to catalog" check
+        # (ToolConfigurationError) fires first, which is a different, and
+        # correctly terminal, misconfiguration outcome.
+        ToolDefinitionFactory(key="demo.echo", handler_key="demo.echo")
         with pytest.raises(ToolNotBoundError):
             execute_tool(agent_run=run, tool_key="demo.echo", arguments={"message": "hi"})
+        # Security invariant (Phase 16 Checkpoint 2A section 6): the
+        # unbound tool's handler is never invoked - no ToolExecution row.
+        from tools.models import ToolExecution
+
+        assert not ToolExecution.objects.filter(agent_run=run).exists()
 
     def test_bound_but_disabled_binding_is_rejected(self):
         run = _running_run()

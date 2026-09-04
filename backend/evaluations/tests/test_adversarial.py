@@ -72,7 +72,14 @@ class TestPromptInjectionCannotExpandPermissionsOrBypassApproval:
         privileged path to influence policy or scoring."""
         workspace = WorkspaceFactory()
         version = PublishedAgentVersionFactory(agent_definition__workspace=workspace)
-        tool_definition = ToolDefinitionFactory(key="demo.add")
+        # Phase 16 Checkpoint 2A root cause: handler_key must match the code
+        # registry's key ("demo.add"), not the factory's unrelated default
+        # ("demo.echo") - a mismatch trips get_bound_tool_descriptors' own
+        # consistency check (ToolCatalogConfigurationError, correctly
+        # terminal) before the agent run ever reaches the tool call this
+        # test means to exercise, masking the real scenario as
+        # AGENT_EXECUTION_FAILED instead of FORBIDDEN_TOOL_VIOLATION.
+        tool_definition = ToolDefinitionFactory(key="demo.add", handler_key="demo.add")
         from tools.tests.factories import ToolBindingFactory
 
         ToolBindingFactory(agent_version=version, tool_definition=tool_definition)

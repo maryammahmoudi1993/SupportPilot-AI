@@ -124,6 +124,15 @@ class TestUnknownToolAgentIntegration:
 class TestUnboundToolAgentIntegration:
     def test_registered_but_unbound_tool_request_fails_safely(self, monkeypatch):
         version = PublishedAgentVersionFactory(max_model_calls=2, max_tool_calls=3)
+        # Phase 16 Checkpoint 2A root cause: the catalog row must actually
+        # exist (published, with a handler_key matching the code registry)
+        # for this to genuinely exercise "registered + published, but not
+        # bound to this agent version". Without it, execute_tool's earlier
+        # "not published to catalog" check (ToolConfigurationError) fires
+        # first instead of ToolNotBoundError - a different, and correctly
+        # terminal, misconfiguration outcome that this test does not intend
+        # to exercise.
+        ToolDefinitionFactory(key="demo.add", handler_key="demo.add")
         run = AgentRunFactory(agent_version=version, workspace=version.agent_definition.workspace)
 
         scenarios = [
@@ -141,6 +150,10 @@ class TestUnboundToolAgentIntegration:
 
         assert result.status == AgentRunStatus.SUCCEEDED
         assert "tool_not_bound" in _useful_request_text(provider.requests[1])
+        # Security invariant (Phase 16 Checkpoint 2A section 6): an unbound
+        # tool's handler is never invoked - no ToolExecution row at all,
+        # matching the unregistered-tool test's own assertion above.
+        assert not ToolExecution.objects.filter(agent_run=run).exists()
 
 
 @pytest.mark.django_db

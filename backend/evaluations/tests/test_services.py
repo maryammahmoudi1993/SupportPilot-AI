@@ -8,6 +8,7 @@ import pytest
 from accounts.tests.factories import UserFactory
 from agents.models import AgentRunStatus
 from agents.tests.factories import PublishedAgentVersionFactory
+from tools.models import ToolExecution, ToolExecutionStatus
 from tools.tests.factories import ToolBindingFactory, ToolDefinitionFactory
 from workspaces.tests.factories import WorkspaceFactory
 
@@ -116,7 +117,14 @@ class TestForbiddenToolSafety:
         version = PublishedAgentVersionFactory(
             agent_definition__workspace=workspace, max_model_calls=2
         )
-        tool_definition = ToolDefinitionFactory(key="demo.add")
+        # Phase 16 Checkpoint 2A root cause: handler_key must match the code
+        # registry's key ("demo.add"), not the factory's unrelated default
+        # ("demo.echo") - a mismatch trips get_bound_tool_descriptors' own
+        # consistency check (ToolCatalogConfigurationError, correctly
+        # terminal) before the agent run ever reaches the tool call this
+        # test means to exercise, masking the real scenario as
+        # AGENT_EXECUTION_FAILED instead of FORBIDDEN_TOOL_VIOLATION.
+        tool_definition = ToolDefinitionFactory(key="demo.add", handler_key="demo.add")
         ToolBindingFactory(agent_version=version, tool_definition=tool_definition)
 
         dataset = EvaluationDatasetFactory(workspace=workspace)
@@ -145,7 +153,15 @@ class TestForbiddenToolSafety:
         # The demo tool actually running is expected here (it is a safe,
         # side-effect-free deterministic demo handler) — the assertion is
         # that the *evaluator* correctly flags it, matching the runtime's
-        # real permission grant for this case's tool binding.
+        # real permission grant for this case's tool binding. Asserted
+        # explicitly (Phase 16 Checkpoint 2A section 6) rather than left as
+        # only a comment: the handler DID execute (a real, bound, enabled
+        # tool — "forbidden" here is a scenario-level scoring constraint,
+        # never a runtime policy/permission denial), and it produced no
+        # side effect beyond its own deterministic, pure computation.
+        execution = ToolExecution.objects.get(agent_run=result.agent_run)
+        assert execution.status == ToolExecutionStatus.SUCCEEDED
+        assert execution.result_redacted == {"sum": 3}
 
 
 @pytest.mark.django_db
