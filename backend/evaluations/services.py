@@ -18,6 +18,7 @@ from typing import Any
 
 from django.conf import settings
 from django.db import transaction
+from django.db.models import Count, Q
 from django.utils import timezone
 from pydantic import ValidationError as PydanticValidationError
 
@@ -313,8 +314,22 @@ def _dispatch_case_executions(result_ids: list[uuid.UUID]) -> None:
 
 def _claim_evaluation_result(result_id: uuid.UUID | str) -> EvaluationResult | None:
     with transaction.atomic():
+        # Phase 16 Part I (section 40): lock the run before the result, in
+        # that fixed order, matching every other multi-row lock in this
+        # module (cancel_evaluation_run, _record_case_completion). Locking
+        # Result -> Run here (the order this used to take) can deadlock
+        # against a concurrent cancel_evaluation_run, which always locks
+        # Run -> Result: two real threads doing the reverse of each other
+        # is a textbook lock-ordering cycle, reproduced by
+        # evaluations/tests/test_concurrency.py's cancel-vs-claim race. The
+        # run id is read unlocked first purely to know which run row to
+        # lock; the authoritative status re-checks below all happen after
+        # both locks are held.
+        run_id = (
+            EvaluationResult.objects.filter(pk=result_id).values_list("run_id", flat=True).get()
+        )
+        run = EvaluationRun.objects.select_for_update().get(pk=run_id)
         result = EvaluationResult.objects.select_for_update().get(pk=result_id)
-        run = EvaluationRun.objects.select_for_update().get(pk=result.run_id)
         if result.status != EvaluationResultStatus.PENDING:
             return None
         if run.status == EvaluationRunStatus.CANCELLED or run.cancelled_at is not None:
@@ -482,6 +497,28 @@ def _result_duration_seconds(result: EvaluationResult) -> float | None:
     return None
 
 
+def _aggregate_case_counts(run: EvaluationRun) -> tuple[int, int]:
+    """Phase 16 Part J (failure injection / race hardening): ``completed``
+    and ``passed`` must come from the *same* query, not two sequential
+    ``.count()`` calls. Under READ COMMITTED, two separate SELECTs in one
+    transaction each see whatever was committed at the instant they run —
+    a concurrent case finishing (a different row, so never blocked by this
+    function's own run-row lock) between the two counts could make
+    ``passed`` reflect one more committed result than ``completed`` did,
+    driving ``failed_cases = completed - passed`` negative and violating
+    the ``eval_run_passed_lte_completed`` DB constraint. A single
+    conditional-aggregate query has one snapshot for both counts, closing
+    the window entirely."""
+    counts = EvaluationResult.objects.filter(run=run, replay_of__isnull=True).aggregate(
+        completed=Count(
+            "id",
+            filter=Q(status__in=(EvaluationResultStatus.SUCCEEDED, EvaluationResultStatus.FAILED)),
+        ),
+        passed=Count("id", filter=Q(passed=True)),
+    )
+    return counts["completed"], counts["passed"]
+
+
 def _record_case_completion(run_id: uuid.UUID, result: EvaluationResult) -> None:
     """Updates the run's aggregate counters and finalizes it once every
     (non-replay) case has reached a terminal state (section 22, 24, 34).
@@ -490,14 +527,7 @@ def _record_case_completion(run_id: uuid.UUID, result: EvaluationResult) -> None
         return
     with transaction.atomic():
         run = EvaluationRun.objects.select_for_update().get(pk=run_id)
-        run.completed_cases = EvaluationResult.objects.filter(
-            run=run,
-            replay_of__isnull=True,
-            status__in=(EvaluationResultStatus.SUCCEEDED, EvaluationResultStatus.FAILED),
-        ).count()
-        run.passed_cases = EvaluationResult.objects.filter(
-            run=run, replay_of__isnull=True, passed=True
-        ).count()
+        run.completed_cases, run.passed_cases = _aggregate_case_counts(run)
         run.failed_cases = run.completed_cases - run.passed_cases
         run.save()
         should_finalize = (
@@ -558,14 +588,11 @@ def cancel_evaluation_run(
         ).update(status=EvaluationResultStatus.CANCELLED, completed_at=timezone.now())
         locked.status = EvaluationRunStatus.CANCELLED
         locked.cancelled_at = timezone.now()
-        locked.completed_cases = EvaluationResult.objects.filter(
-            run=locked,
-            replay_of__isnull=True,
-            status__in=(EvaluationResultStatus.SUCCEEDED, EvaluationResultStatus.FAILED),
-        ).count()
-        locked.passed_cases = EvaluationResult.objects.filter(
-            run=locked, replay_of__isnull=True, passed=True
-        ).count()
+        # Same single-query aggregate as _record_case_completion, for the
+        # same reason: two sequential .count() calls here could otherwise
+        # observe a concurrently-completing case between them and drive
+        # failed_cases negative.
+        locked.completed_cases, locked.passed_cases = _aggregate_case_counts(locked)
         locked.failed_cases = locked.completed_cases - locked.passed_cases
         locked.save()
         record_event(
