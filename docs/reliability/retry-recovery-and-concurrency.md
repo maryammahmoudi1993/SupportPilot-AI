@@ -236,13 +236,11 @@ per-scenario coincidence.
   difference from `payment.refund` that the test suite's `FakeCalendarProvider`
   (which *does* dedupe by key in-memory, matching `FakePaymentProvider`'s
   shape for symmetry/simplicity) does not itself reveal — the fake is more
-  forgiving than the real provider here. **Duplicate booking residual risk:
-  YES** — a retry after an ambiguous (timeout/lost-response) booking
-  attempt can create a second real calendar event; nothing in this
-  codebase prevents it today. Documented here rather than invented away;
-  building real dedupe (e.g. a pre-insert existence check against the
-  `extendedProperties` value, itself racy without a provider-side unique
-  constraint) is a genuine feature addition out of this checkpoint's scope.
+  forgiving than the real provider here, which was a genuine masked defect
+  until Checkpoint 4 (see below): the old version of this file's own test
+  (`integrations/tests/test_tools_calendar.py`) asserted a manual retry
+  after an ambiguous timeout *succeeded silently*, relying on that same
+  forgiving fake, which does not reflect the real provider's behavior.
 - **Notifications/webhooks**: delivery is at-least-once at the transport
   layer (see below) — a provider/network send can succeed while this
   system's own local delivery-record finalize is lost (crash, DB error),
@@ -254,6 +252,135 @@ per-scenario coincidence.
   outside this codebase's control. This was already true before this
   checkpoint and remains explicitly documented rather than silently
   assumed away.
+
+## Calendar ambiguous-outcome fix (Phase 16 Checkpoint 4, Part A)
+
+The Checkpoint 3 residual above ("duplicate booking residual risk: YES")
+covered only *manual* retry. Investigation this checkpoint traced the exact
+retry path a same-key retry takes: automatic in-process retry, manual/
+operator retry, agent-driven retry, and Celery task redelivery all funnel
+through the *same* function, `tools.execution._resolve_existing`, because
+they all reuse the same idempotency key against the same `ToolExecution`
+row. That function's generic "ordinary terminal failure: reset to PENDING
+and re-invoke the handler" path previously treated an ambiguous outcome
+(a timeout, or the executor's own wall-clock cutoff) identically to a
+known-safe-to-retry one — silently making a second real Google Calendar
+call with no way to know the first had already succeeded.
+
+**Fix**: `RetryPolicy` gained a new field, `ambiguous_outcome_error_codes`
+— error codes that, when found as a prior attempt's stored outcome, refuse
+*any* further retry (automatic, manual, or task redelivery) with a new
+`ToolAmbiguousOutcomeRequiresReconciliationError`, instead of resetting to
+PENDING. Empty by default — every existing tool, including `payment.refund`,
+is unaffected. Assigned to `calendar.create_booking` for
+`integration_timeout`, `integration_malformed_response`, and the executor's
+own `tool_timeout` — all three leave Google's actual commit outcome unknown.
+
+**What this closes**: the backend's own retry/redelivery machinery can no
+longer automatically issue a second `events.insert` call for the same
+logical booking after an ambiguous failure — proven for automatic retry,
+manual/operator retry, and task redelivery (the last two are the same code
+path as the fix, so one test matrix covers both; see
+`integrations/tests/test_tools_calendar.py::TestCreateBooking`).
+
+**What remains a real, named residual — MANUAL RESIDUAL RISK, not
+"automatic retry-safe"**: nothing reconciles the *true* provider-side
+outcome. An operator who, believing the booking failed, issues a genuinely
+*new* request (a fresh idempotency key — a different `ToolExecution`, e.g.
+the agent trying again on a later turn, or a human manually re-submitting)
+can still create a real duplicate event; the fix only prevents the
+backend's own machinery from doing this to itself automatically.
+`integrations/providers/google_calendar.py` has no `list`/`search` method
+today — no existing primitive to look up a possibly-already-created event
+by its stored `extendedProperties` key — so building real reconciliation
+(a pre-insert existence check, itself racy without a provider-side unique
+constraint) is a genuine feature addition, deliberately out of scope this
+checkpoint, not attempted.
+
+## Measured local benchmarks (Phase 16 Checkpoint 4, Part C)
+
+**Caveat, read before any number below**: single dev machine, Docker
+Compose PostgreSQL 16, warm Django test process, deterministic fakes, no
+network calls. These are not a production SLA and must never be quoted as
+one — they exist to catch structural regressions (query growth, unbounded
+fetches), not to characterize production latency.
+
+- **Representative API list endpoints** (customer, conversation, agent
+  run, evaluation result, webchat message history — 61 seeded rows each,
+  40 timed iterations after 1 warmup): 3–5 queries per request across the
+  board, median 9.5–16.6ms, p95 19.7–35.5ms. No endpoint showed unbounded
+  query growth.
+- **Query-growth regression** (customer list at 1/10/50 rows): query count
+  held constant (4 queries) at every size — reconfirms Checkpoint 2's
+  finding; no regression.
+- **Agent context benchmark** (`build_conversation_context`, configured
+  `max_messages=20`, conversation sizes 31/301/3001 messages): rows
+  fetched and query count (2) were identical at every conversation size —
+  cost is bounded by the configured context limit, not conversation size,
+  confirming the Checkpoint 2 query-bound fix holds at 100x scale. This is
+  a structural property, not a claim of constant wall-clock latency at
+  arbitrary scale.
+- **Recovery sweep benchmark** (5,000 synthetic rows per table, 25 stale
+  candidates, real PostgreSQL `EXPLAIN`): both `AgentRun` and
+  `EvaluationRun` sweep queries used their Checkpoint 2 indexes
+  (`agent_run_status_updated_idx` via an Index Scan;
+  `eval_run_status_updated_idx` via a Bitmap Index Scan) — reconfirmed at a
+  reproducible scale, not requiring the full 300k/150k-row experiment
+  again. Total sweep cost scales with the *candidate* count (the rows
+  actually recovered), not the total table size, by construction of the
+  per-row lock-then-process loop.
+
+## Worker restart and stuck-run recovery drill (Phase 16 Checkpoint 4, Part E)
+
+Exercised against the actual Checkpoint 4 production image (built from
+feature HEAD, non-root, real PostgreSQL/Redis via Docker Compose, no live
+provider calls) rather than the pytest suite, to prove the drill holds
+outside the test harness:
+
+- **Worker restart**: created a `RUNNING` `AgentRun` with a backdated
+  `updated_at` (simulating a crashed worker), stopped and restarted the
+  Celery worker container, then invoked `recover_stuck_agent_runs()`
+  explicitly (Phase 17 still owns Beat scheduling — this checkpoint
+  invokes the primitive directly, not via a scheduled task). Result:
+  correct bounded terminal state (`FAILED`/`stuck_worker_recovered`), no
+  duplicate side effect, second sweep a safe no-op, the new
+  `supportpilot_stuck_run_recoveries_total{domain="agent"}` metric
+  incremented in the same process that ran the sweep.
+- **Agent recovery smoke** (stale / recent / terminal / double-sweep /
+  metric): all five PASS against the real image.
+- **Evaluation recovery smoke** (A: stale no-progress → recovered; B:
+  stale parent + live/recent child → untouched; C: all child work stale →
+  recovered; D: second sweep → safe): all four PASS against the real
+  image, reconfirming the Checkpoint 3 false-positive fix under
+  production-like conditions, not just the test suite.
+
+## Redis / PostgreSQL interruption drills (Phase 16 Checkpoint 4, Parts F/G)
+
+Both drills stopped the real container, hit the live endpoints, restored
+the container, and re-verified — no destructive corruption testing.
+
+- **Redis down**: `/health/` stayed `200 healthy` (liveness contract
+  correctly independent of the cache/broker); `/ready/` correctly returned
+  `503 not_ready`; a cache-backed throttled endpoint (login) failed closed
+  with `503 {"error":{"code":"service_unavailable", ...}}` — no raw Redis
+  exception/connection string in the response body (this is
+  `common.throttling.SafeScopedRateThrottle`, pre-existing from Phase 14,
+  reconfirmed here under a real outage rather than a mock). **Redis
+  restored**: `/ready/` recovered to `200` immediately, no web container
+  restart required, and the previously-503'd endpoint resumed normal
+  DRF-level responses on the next request.
+- **PostgreSQL down**: `/health/` stayed `200 healthy`; `/ready/` correctly
+  returned `503 not_ready`; a public DB-touching endpoint (webchat message
+  history with a bogus session token) failed as a generic `500
+  {"error":{"code":"internal_server_error", ...}}` — no DSN, password, or
+  raw `OperationalError` in the response body. The Celery worker container
+  stayed alive and logged a clean `OperationalError` for a task dispatched
+  during the outage (no query ever reached the DB, so no partial-write
+  risk) rather than crashing or looping. **PostgreSQL restored**:
+  `/ready/` recovered to `200`, the same public endpoint resumed normal
+  (`400 session_invalid`, not a 500) DB-backed responses, and a freshly
+  dispatched task was picked up and processed by the *same*, still-running
+  worker process — no manual data repair, no worker restart needed.
 
 ## At-least-once boundaries (never exactly-once)
 
@@ -418,6 +545,15 @@ Verified this checkpoint:
   window" above. This is a real, currently-unaddressed reconciliation gap
   (shared with any lost-response scenario, not unique to recovery),
   deliberately out of this checkpoint's scope.
+- **`calendar.create_booking` has no reconciliation primitive** (Phase 16
+  Checkpoint 4, Part A): the ambiguous-outcome fix stops the backend's own
+  retry/redelivery machinery from automatically duplicating a booking, but
+  a manually-issued *new* request after an ambiguous failure — a fresh
+  idempotency key, believing the first attempt failed — can still create a
+  real duplicate event. The Google adapter has no `list`/`search` method to
+  look up a possibly-already-created event by its stored
+  `extendedProperties` key; building one is a genuine feature addition,
+  deliberately out of scope. See "Calendar ambiguous-outcome fix" above.
 - **`AgentRun`'s recovery safety bound is narrower than "automatically
   safe forever"** (Phase 16 Checkpoint 3, Part A section 8): the 900s
   worst-case derivation above holds only for the *currently registered*
@@ -523,3 +659,21 @@ Two real, unmeasured-by-query-count issues were found and fixed instead:
 were already DB-`LIMIT`-bounded (`CHANNEL_WEBCHAT_MESSAGE_HISTORY_LIMIT`,
 DRF's standard paginator) — verified by inspection and the constant query
 counts above, not re-derived here.
+
+## Phase 16 / Phase 17 boundary (reconfirmed, Checkpoint 4)
+
+**Phase 16 owns and has closed**: recovery semantics for every domain with
+a real `RUNNING`-and-abandonable state (`agents`, `evaluations`); the
+false-positive evaluation-recovery fix; the calendar ambiguous-outcome
+retry fix; retry/idempotency classification (transient vs. permanent,
+provider-native vs. no-provider-dedup) for every registered side-effecting
+tool; measured, reproducible query-bound and index-usage proof at
+representative scale; production-image build/boot verification; and
+worker-restart, Redis-outage, and PostgreSQL-outage behavior, all exercised
+against the real built image rather than only the test suite.
+
+**Phase 17 owns and remains untouched by this checkpoint**: Celery Beat
+process/schedule packaging for every periodic sweep named above (no Beat
+schedule was added this checkpoint, on instruction); production reverse
+proxy/runtime composition; final backend acceptance packaging and the
+Phase 16 release gate itself (deliberately not run this checkpoint).
