@@ -118,6 +118,29 @@ class TestRecoverStuckAgentRuns:
         assert run.status == AgentRunStatus.FAILED
         assert AgentStep.objects.filter(run=run, step_type=AgentStepType.RUN_FAILED).count() == 1
 
+    def test_status_changed_after_batch_query_wins_the_race(self):
+        """Phase 16 Checkpoint 4 (Part I, high-risk coverage): the sibling
+        race to the ``updated_at`` one above — the run reached a *terminal*
+        status (not just fresh progress) between the sweep's batch query
+        and this row's own lock, e.g. a concurrent ``cancel_agent_run`` or
+        genuine completion. The per-row re-check must still see this as a
+        no-op, never overwrite a real terminal outcome with the recovery
+        one."""
+        run = AgentRunFactory(status=AgentRunStatus.RUNNING)
+        _age(run, seconds=10_000)
+        cutoff = timezone.now() - timedelta(seconds=900)
+
+        run.status = AgentRunStatus.SUCCEEDED
+        run.completed_at = timezone.now()
+        run.save()
+
+        recovered = _recover_one_stuck_run(run.id, cutoff=cutoff, now=timezone.now())
+
+        run.refresh_from_db()
+        assert recovered is False
+        assert run.status == AgentRunStatus.SUCCEEDED
+        assert run.failure_code == ""
+
     def test_active_worker_progress_after_batch_query_wins_the_race(self):
         """Simulates the exact race in section 11: the sweep's batch query
         selects a candidate id, then — before the per-row lock is acquired —

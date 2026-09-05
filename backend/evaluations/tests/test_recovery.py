@@ -260,6 +260,41 @@ class TestRecoverStuckEvaluationRuns:
         assert b.status == EvaluationResultStatus.FAILED
         assert run.status == EvaluationRunStatus.FAILED
 
+    def test_run_touched_after_batch_query_wins_the_race(self):
+        """Sibling to the status-changed race above: the run's own
+        ``updated_at`` advanced (a case completed, touching the parent row)
+        between the sweep's batch query and this row's own lock. The
+        per-row re-check on ``updated_at`` must catch this even though the
+        status is still RUNNING."""
+        run = EvaluationRunFactory(status=EvaluationRunStatus.RUNNING, total_cases=1)
+        cutoff = timezone.now() - timedelta(seconds=3600)
+        # The run row is fresh (just created) — never aged — simulating a
+        # concurrent case completion having just touched it.
+
+        recovered = _recover_one_stuck_run(run.pk, cutoff=cutoff, now=timezone.now())
+
+        run.refresh_from_db()
+        assert recovered is False
+        assert run.status == EvaluationRunStatus.RUNNING
+
+    def test_status_changed_after_batch_query_wins_the_race(self):
+        """Phase 16 Checkpoint 4 (Part I, high-risk coverage): the run
+        reached a terminal status (e.g. a concurrent cancel or genuine
+        finalize) between the sweep's batch query and this row's own lock —
+        the per-row re-check must be a no-op, never overwrite the real
+        terminal outcome."""
+        run, (result,) = _make_stuck_run(total_cases=1)
+        cutoff = timezone.now() - timedelta(seconds=3600)
+        EvaluationRun.objects.filter(pk=run.pk).update(status=EvaluationRunStatus.CANCELLED)
+
+        recovered = _recover_one_stuck_run(run.pk, cutoff=cutoff, now=timezone.now())
+
+        run.refresh_from_db()
+        result.refresh_from_db()
+        assert recovered is False
+        assert run.status == EvaluationRunStatus.CANCELLED
+        assert result.status == EvaluationResultStatus.RUNNING
+
     def test_recovery_race_favors_progress_that_lands_before_the_lock(self):
         """Matrix G: simulates the sweep's batch query selecting a run as a
         stale candidate, then — before the per-row lock is acquired — the
