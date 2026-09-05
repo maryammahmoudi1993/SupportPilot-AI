@@ -89,6 +89,25 @@ class ToolRunNotExecutableError(ToolError):
     safe_message = "The agent run is not in a state that allows tool execution."
 
 
+class ToolAmbiguousOutcomeRequiresReconciliationError(ToolError):
+    """Phase 16 Checkpoint 4 (Part A): the prior attempt for this exact
+    idempotency key failed with an outcome the provider itself cannot
+    safely disambiguate on retry (e.g. a timeout after the request may
+    already have been processed), and this tool's ``RetryPolicy`` declares
+    that its provider has no native dedup to make blindly retrying safe
+    (see ``RetryPolicy.ambiguous_outcome_error_codes``). Retrying here
+    would risk generating a duplicate real-world side effect the backend
+    itself cannot detect. Never automatically retried; the caller/operator
+    must reconcile the true provider-side outcome out of band before
+    deciding whether to issue a genuinely new request."""
+
+    code = "tool_ambiguous_outcome_requires_reconciliation"
+    safe_message = (
+        "The previous attempt's outcome could not be confirmed and this action cannot be "
+        "safely retried automatically. Reconciliation is required before retrying."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Phase 8: the deterministic policy gate's outcomes, bridged into the same
 # ToolError taxonomy the rest of execute_tool already raises. Model output is
