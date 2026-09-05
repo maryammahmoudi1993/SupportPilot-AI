@@ -375,9 +375,26 @@ def cancel_agent_run(
 
 
 def _next_sequence_and_create_step(run: AgentRun, **fields: Any) -> AgentStep:
-    last = AgentStep.objects.filter(run=run).order_by("-sequence").first()
-    sequence = (last.sequence + 1) if last else 1
-    return AgentStep.objects.create(run=run, workspace=run.workspace, sequence=sequence, **fields)
+    """Phase 16 final release gate: two callers racing for the *same* run
+    (observed in production-realistic conditions — a resume and a
+    concurrent cancellation) previously computed the same "next sequence"
+    value independently (no lock serialized the read), and separately, two
+    concurrent bare INSERTs into ``agents_agentstep`` both referencing the
+    same ``AgentRun`` via FK could deadlock on PostgreSQL's own internal
+    FOR KEY SHARE multixact resolution for that parent row — reproduced as
+    a genuine, if rare, ``deadlock detected`` error under real threads and
+    real PostgreSQL. Locking the parent ``AgentRun`` row first serializes
+    both the sequence read and the FK-referencing INSERT for concurrent
+    callers on the same run, closing both problems with the one change:
+    the second caller simply waits for the first's transaction to commit,
+    rather than either mis-computing a duplicate sequence or deadlocking."""
+    with transaction.atomic():
+        AgentRun.objects.select_for_update().get(pk=run.pk)
+        last = AgentStep.objects.filter(run=run).order_by("-sequence").first()
+        sequence = (last.sequence + 1) if last else 1
+        return AgentStep.objects.create(
+            run=run, workspace=run.workspace, sequence=sequence, **fields
+        )
 
 
 def _record_step_factory(run: AgentRun):
