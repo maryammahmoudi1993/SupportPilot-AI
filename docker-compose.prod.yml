@@ -67,6 +67,17 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    # Named, not left implicit (Phase 17 Chunk 3, section 23): the
+    # official image declares its own anonymous `/data` volume, which
+    # Compose happens to reuse across `up --force-recreate` — but that
+    # reuse is incidental, not a deliberate persistence guarantee, and
+    # does not survive `docker compose down` (no name to re-attach to).
+    # Naming it makes the same on-restart/on-recreate RDB-snapshot
+    # persistence explicit and equally easy to intentionally discard
+    # (`down -v`) — see docs/operations/deployment.md's Redis role
+    # section for exactly what this can and cannot lose.
+    volumes:
+      - redis_data_prod:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -129,3 +140,4 @@ services:
 
 volumes:
   postgres_data_prod:
+  redis_data_prod:
