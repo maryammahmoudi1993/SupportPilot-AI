@@ -1,10 +1,11 @@
 # SupportPilot AI — Frontend
 
 The frontend for SupportPilot AI: a Next.js (App Router) application that
-consumes the Django/DRF backend in [`../backend`](../backend). This is the
-**Phase 18 foundation** — framework, design system, and typed API transport
-only. Authentication, workspace context, protected routing, and the
-application shell land in the following chunks/phases; see
+consumes the Django/DRF backend in [`../backend`](../backend). This is
+**Phase 18** — through Chunk 2, that's framework, design system, typed API
+transport, and authentication. Workspace context, protected routing beyond
+a single placeholder route, and the real application shell land in the
+following chunks; see
 [`../SupportPilot_AI_Master_Build_Prompt.md`](../SupportPilot_AI_Master_Build_Prompt.md).
 
 ## Stack
@@ -21,10 +22,12 @@ application shell land in the following chunks/phases; see
 | Formatting/linting   | Prettier, ESLint (flat config, `eslint-config-next`) |
 
 No state-management or server-state library (Redux, Zustand, TanStack
-Query, ...) has been introduced yet. Chunk 1 has no server data fetching to
-justify one; the decision for later chunks (workspace context, protected
-data views) is deferred to when that need is concrete, per the "don't add a
-layer for fashion" principle in the build prompt.
+Query, ...) has been introduced. Auth state is one small, mostly-singleton
+tree — a React context (`AuthProvider`) is enough, and none of Chunk 2's
+data fetching (login/logout/me) benefits from a caching layer built for
+lists of server records. Revisit for workspace/business data in a later
+chunk, per the "don't add a layer for fashion" principle in the build
+prompt. `msw` was added, but only as a dev dependency for tests.
 
 ## Directory structure
 
@@ -33,19 +36,23 @@ frontend/
   src/
     app/            App Router routes, layouts, and route-level UI states
     components/ui/  Design-system primitives (Button, Input, Card, ...)
+    features/
+      auth/          Login/logout/me operations, AuthProvider, LoginForm, redirect safety
     lib/            Framework-agnostic code: API transport, config, utils
-      api/           Central HTTP client, error normalization, timeout helper
+      api/           Central HTTP client, token/session/CSRF handling, error normalization
     types/          Generated types only (api.ts) — never hand-edited
     tests/          Vitest specs, mirroring the src/ layout they cover
-  scripts/          One-off Node scripts (API type regeneration)
+      msw/           Request-level mocks for the auth endpoints
+  scripts/          Node scripts (API type generation, drift check)
   openapi.yaml      Generated OpenAPI schema snapshot (see below)
 ```
 
-Feature domains (customers, conversations, tickets, agents, approvals,
-knowledge, integrations, evaluations, settings) get their own directories
-under `src/features/` starting in the phase that implements them — Phase 18
-intentionally has none yet, to avoid scaffolding empty directories no code
-uses.
+Other feature domains (customers, conversations, tickets, agents,
+approvals, knowledge, integrations, evaluations, settings) get their own
+directories under `src/features/` starting in the phase that implements
+them — `auth` is the first, and the pattern it establishes (a feature owns
+its API calls, its own React state, and its own tests; transport-level
+concerns generic across features stay in `lib/api`) is meant to repeat.
 
 ## API contract and type generation
 
@@ -72,13 +79,52 @@ regenerated `openapi.yaml` + `src/types/api.ts` together with the frontend
 change that needed them, so the frontend build never silently depends on an
 undocumented response shape.
 
+To check whether the committed files are stale (e.g. in CI, or before a
+release) without touching them:
+
+```bash
+npm run check:api-types
+```
+
+This regenerates into a throwaway temp directory, diffs against the
+committed `openapi.yaml`/`src/types/api.ts`, and exits non-zero on any
+difference — the working tree is never written to.
+
+**Known schema gaps** (real backend-side gaps, not papered over with `any`
+on the frontend — see `src/lib/api/session.ts` and
+`src/features/auth/types.ts`):
+
+- `POST /api/v1/auth/refresh/`'s 200 response is documented via
+  `OpenApiResponse(description=...)` rather than a response serializer, so
+  drf-spectacular emits `content?: never` for it even though the view really
+  returns `{ access: string }`. `session.ts` defines a small
+  `RefreshResponseBody` interface documenting exactly that gap, with an
+  explicit, commented cast — not a blanket `any`.
+- `Me.workspaces` (the current-user endpoint's workspace-membership summary)
+  is a `SerializerMethodField` drf-spectacular can't resolve, so it's typed
+  as `{ [key: string]: unknown }[]`. Chunk 2 doesn't read this field (no
+  workspace UI yet); Chunk 3 (workspace context) should either add
+  `@extend_schema_field` on the backend serializer or, if that's not
+  practical, define a small typed interface matching the real
+  `WorkspaceMembershipSummarySerializer` output the same way `session.ts`
+  does above.
+
+Neither gap was worked around by changing backend code in Phase 18 — see
+"Backend contract" below.
+
 ## API transport (`src/lib/api`)
 
 - **`client.ts`** — the one `apiClient` instance (`openapi-fetch`, typed
-  against `src/types/api.ts`), bound to `NEXT_PUBLIC_API_BASE_URL`, with
-  `credentials: "include"` so the backend's HttpOnly session/CSRF (and later
-  refresh-token) cookies are sent automatically. No feature code should
-  construct its own `fetch()`/client.
+  against `src/types/api.ts`), bound to `NEXT_PUBLIC_API_BASE_URL` (an
+  **origin only** — the generated paths are already absolute, e.g.
+  `/api/v1/auth/login/`; a base URL that itself included `/api/v1` would
+  double it — see `src/tests/lib/api/client.test.ts`), with
+  `credentials: "include"` so the backend's cookies are sent automatically.
+  `fetch` is resolved dynamically per call (`(...args) => globalThis.fetch(...args)`)
+  rather than captured once at client-creation time — required for MSW to
+  intercept requests in tests, and generally more robust. Registers two
+  request middlewares (Authorization, CSRF — see "Authentication" below). No
+  feature code should construct its own `fetch()`/client.
 - **`errors.ts`** — normalizes the backend's real error envelope
   (`{ "error": { "code", "message", "details"? } }`, see
   `backend/common/exceptions.py`) plus network/timeout/parse failures into
@@ -90,11 +136,8 @@ undocumented response shape.
   an `openapi-fetch` `{ data, error, response }` result into throw-on-failure
   form. Long-running or upload endpoints should pass their own timeout
   rather than inherit the default.
-
-No authentication is wired into the transport yet. When Chunk 2 adds it,
-token attachment and 401/refresh handling are added as `apiClient.use()`
-middleware here — not scattered through feature code — per the build
-prompt's "central transport" requirement.
+- **`token-store.ts` / `csrf.ts` / `session.ts`** — see "Authentication"
+  below.
 
 ## Design system
 
@@ -114,10 +157,10 @@ never suppressed without a replacement.
 
 Primitives in `src/components/ui/` (Button, Input, Label, Card, Badge,
 Alert, Spinner, Skeleton, Separator) are hand-built on native HTML elements
-rather than a component library — Chunk 1's primitive set doesn't yet need
-compound accessibility behavior (a menu, a dialog) that would justify
-pulling in Radix. That's the natural point to introduce it, when the app
-shell (Chunk 3) needs a workspace switcher / user menu.
+rather than a component library — nothing built so far needs compound
+accessibility behavior (a menu, a dialog) that would justify pulling in
+Radix. That's the natural point to introduce it, when the app shell
+(Chunk 3) needs a workspace switcher / user menu.
 
 ## Environment variables
 
@@ -127,13 +170,171 @@ Copy `.env.example` to `.env.local` for local development:
 cp .env.example .env.local
 ```
 
-| Variable                   | Required | Notes                                                                                                                                                            |
-| -------------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `NEXT_PUBLIC_API_BASE_URL` | Yes      | Backend base URL including the version prefix, e.g. `http://localhost:8000/api/v1`. Read and validated (fails fast if missing/malformed) in `src/lib/config.ts`. |
+| Variable                   | Required | Notes                                                                                                                                                                                 |
+| -------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `NEXT_PUBLIC_API_BASE_URL` | Yes      | Backend **origin only** (no `/api/v1` suffix — see "API transport" above), e.g. `http://localhost:8000`. Read and validated (fails fast if missing/malformed) in `src/lib/config.ts`. |
 
 Every variable exposed to the browser is prefixed `NEXT_PUBLIC_`; nothing
 else is read from `process.env` in client code. No backend secret is ever
 read by, or exposed through, the frontend.
+
+## Authentication
+
+Backend contract (`backend/accounts/views.py`, `serializers.py`,
+`services.py`; `backend/common/csrf.py`; `backend/config/settings.py`
+`SIMPLE_JWT`/`AUTH_REFRESH_COOKIE_*`/`CSRF_*`) — inspected directly, not
+assumed:
+
+| Operation    | Method / path                | Auth                                   | CSRF required     |
+| ------------ | ---------------------------- | -------------------------------------- | ----------------- |
+| CSRF prime   | `GET /api/v1/auth/csrf/`     | none                                   | n/a (safe method) |
+| Login        | `POST /api/v1/auth/login/`   | none                                   | yes               |
+| Refresh      | `POST /api/v1/auth/refresh/` | refresh cookie                         | yes               |
+| Logout       | `POST /api/v1/auth/logout/`  | refresh cookie (optional — idempotent) | yes               |
+| Current user | `GET /api/v1/auth/me/`       | `Authorization: Bearer <access>`       | no (safe method)  |
+
+**Credentials:**
+
+- **Access token** — a short-lived (15 min) JWT returned in the JSON body of
+  login/refresh. Held **in memory only**
+  (`src/lib/api/token-store.ts`) — never `localStorage`, `sessionStorage`,
+  or a frontend-set cookie. It does not survive a page reload by design;
+  see "Session bootstrap" below for how a reload re-establishes it.
+- **Refresh token** — a long-lived (7 days), rotated-on-every-use JWT set as
+  an **HttpOnly** cookie (`sp_refresh_token`, path-scoped to
+  `/api/v1/auth/`) directly by the backend
+  (`accounts/services.py:set_refresh_cookie`). Frontend code never reads,
+  writes, or even sees this cookie's value — it's invisible to JavaScript
+  by design, and `apiClient`'s `credentials: "include"` is what makes the
+  browser attach it automatically.
+- **CSRF token** — Django's standard double-submit cookie
+  (`sp_csrftoken`, JS-readable — that's inherent to the double-submit
+  pattern, not a frontend choice). `src/lib/api/csrf.ts`'s
+  `ensureCsrfCookie()` primes it via `GET /auth/csrf/` if not already
+  present, before every login/refresh/logout call; `client.ts`'s request
+  middleware then attaches it as the `X-CSRFToken` header on every
+  non-safe-method request.
+
+**Why login/refresh/logout need CSRF but nothing else does**: they
+authenticate via the refresh cookie (or, for login, no prior auth at all),
+which the browser attaches automatically to any request — including one
+forged by another site. DRF's automatic CSRF exemption only covers its own
+`SessionAuthentication`; these views authenticate a different way, so the
+backend calls `enforce_csrf()` explicitly (see `backend/common/csrf.py`'s
+own doc comment). `GET /auth/me/` doesn't need it: it's a safe method, and
+it authenticates via the `Authorization` header, which — unlike a cookie —
+a forged cross-site request can't attach on the victim's behalf.
+
+### Session bootstrap and reload
+
+There is deliberately no separate "try refresh, then fetch /me/" bootstrap
+sequence. `AuthProvider` (`src/features/auth/auth-provider.tsx`) just calls
+`fetchCurrentUser()` on mount; that goes through
+`withAccessTokenRetry` (`src/lib/api/session.ts`), which is the _same_
+401 → refresh → retry mechanism any protected call uses (see below). On a
+fresh page load there is no in-memory access token, so the first call
+naturally 401s, triggers a refresh via the HttpOnly cookie, and retries —
+succeeding if a valid refresh cookie survived the reload, failing (cleanly,
+to `unauthenticated`) if it didn't or has expired. One mechanism, not two.
+
+`AuthState.status` is `"loading" | "authenticated" | "unauthenticated"` —
+never inferred from `user === null` alone, so "haven't checked yet" and
+"checked, not logged in" can't be confused (a protected page must never
+flash its content, or redirect to `/login`, before bootstrap resolves).
+`AuthState.error` additionally carries the `ApiError` when bootstrap failed
+specifically because the network was unreachable (`network_error`/`timeout`)
+rather than because the session was proven invalid
+(`authentication_failed`) — `status` is still `"unauthenticated"` either
+way (never claim authenticated without proof), but a caller can use `error`
+to offer "Retry" instead of routing straight to the login form.
+
+### Coordinated refresh (`src/lib/api/session.ts`)
+
+`ensureFreshAccessToken()` is a mutex: while a refresh is in flight, every
+concurrent caller awaits the _same_ promise instead of starting its own —
+this is what makes "10 parallel requests get a 401" result in exactly one
+`POST /auth/refresh/` call, not ten (see
+`src/tests/lib/api/session.test.ts`'s parallel-401 test).
+`withAccessTokenRetry(callFactory)` wraps a protected call: on a 401 it
+refreshes once and calls `callFactory()` again from scratch (never a reused
+`Request`/body, so this is safe even for a write, as long as the _first_
+attempt never reached business logic — which a 401 guarantees, since
+`JWTAuthentication` rejects before the view runs) — never a second retry,
+and never a loop. If refresh itself fails, `withAccessTokenRetry` throws
+the _refresh's_ error (not the original request's 401), which is what
+preserves the network-vs-invalid-session distinction end to end.
+
+Login, refresh, and logout themselves (`src/features/auth/api.ts`) call
+`apiClient` directly and a plain `unwrap()` — never `withAccessTokenRetry`.
+That's a structural guarantee, not a URL-based exclusion list: there is no
+code path by which the refresh flow can recurse into itself.
+
+A failed refresh (from _any_ caller, not just bootstrap) clears the
+in-memory access token and calls `notifySessionExpired()`
+(`token-store.ts`), which `AuthProvider` has registered a handler for —
+one owner for "the session just ended" — but only acts if the app was
+actually `"authenticated"` at that moment, so it can't clobber an
+in-flight _first_ bootstrap that's about to commit its own (more specific)
+unauthenticated/error state.
+
+### Logout
+
+`logout()` (`src/features/auth/api.ts`) always clears the in-memory access
+token in a `finally`, even if the server-side `POST /auth/logout/` call
+fails (network outage, already-expired session, ...) — a user must never
+be stuck looking logged in because a network request failed. The server
+call is still attempted first (best-effort revocation of the refresh
+token), its failure is just not allowed to block the local, user-visible
+result.
+
+### Redirect safety
+
+`src/features/auth/redirect.ts`'s `isSafeRedirectTarget`/`resolveRedirectTarget`
+validate the login page's `?next=` param: only a root-relative path
+(`/foo`) is accepted — an absolute URL, a protocol-relative URL (`//evil`),
+a backslash variant some browsers normalize to one (`/\evil`), or any
+target containing whitespace/control characters is rejected in favor of the
+default (`/`). See `src/tests/features/auth/redirect.test.ts`.
+
+### Browser/backend topology
+
+The browser calls the backend **directly** — there is no Next.js
+server-side proxy or route handler in between, and no server-held session
+state. This keeps there being exactly one auth path (browser ↔ backend),
+per the build prompt's "do not accidentally create two incompatible auth
+paths" requirement. It also means Next.js `proxy.ts`
+(the renamed `middleware.ts`) is deliberately **not** used for auth guarding:
+it would have no way to validate the HttpOnly refresh cookie (it's opaque
+to any code that isn't the backend) without either duplicating the
+backend's JWT validation logic or making a round-trip to the backend on
+every navigation — both worse than the client-side check `AuthProvider`
+already does. Route protection here is client-side (see `src/app/page.tsx`
+for the pattern: render nothing privileged while `status !== "authenticated"`,
+redirect once resolved) — a UX behavior, not a security boundary; the
+backend's own 401/403 responses remain the actual authorization enforcement,
+exactly as "Frontend authorization" below states.
+
+- **Local development**: frontend on `localhost:3000`, backend on
+  `localhost:8000` — different origins, but both already present in the
+  backend's default `CORS_ALLOWED_ORIGINS`/`CSRF_TRUSTED_ORIGINS`
+  (`backend/config/settings.py`). Verified against the real backend (not
+  just mocks) during Chunk 2: CSRF priming, login, `/me/`, refresh
+  (rotation confirmed — old and new access tokens differ), and logout
+  (confirmed the refresh cookie stops working afterward) all round-tripped
+  correctly over `curl` against a live `runserver` + the project's Postgres/
+  Redis containers.
+- **Production**: the backend's own `.env.production.example` models a
+  single frontend origin (`CORS_ALLOWED_ORIGINS`/`CSRF_TRUSTED_ORIGINS` =
+  `https://app.example.com`). This works as long as the frontend and
+  backend are deployed as **subdomains of the same registrable domain**
+  (e.g. `app.example.com` / `api.example.com`) — the refresh cookie's
+  `SameSite=Lax` is sent on a cross-_origin_ but same-_site_ request (same
+  eTLD+1), which is what makes that cross-origin-but-same-site setup work
+  without loosening `SameSite` to `None`. If the frontend and backend were
+  ever deployed on genuinely different registrable domains, the refresh
+  cookie would stop being sent on the frontend's requests entirely — that
+  would be a real, load-bearing backend/deployment decision, not a
+  frontend-only fix, and is flagged here rather than silently assumed away.
 
 ## Local development
 
@@ -157,6 +358,7 @@ read by, or exposed through, the frontend.
 | `npm run test:watch`              | Vitest in watch mode                                                  |
 | `npm run format` / `format:check` | Prettier write / check                                                |
 | `npm run generate:api-types`      | Regenerate `openapi.yaml` + `src/types/api.ts` from the local backend |
+| `npm run check:api-types`         | Fail if the committed files are stale vs. the backend (no writes)     |
 
 ## Testing
 
@@ -164,35 +366,91 @@ Vitest + React Testing Library + `jsdom`, configured in
 `vitest.config.mts`. Tests live under `src/tests/`, mirroring the directory
 they cover (`src/tests/lib/api/errors.test.ts` covers `src/lib/api/errors.ts`,
 etc.) rather than living next to source files, so `src/` stays
-implementation-only. `src/tests/setup.ts` registers `jest-dom` matchers,
-explicit RTL cleanup between tests, and a valid fallback
-`NEXT_PUBLIC_API_BASE_URL` so config validation doesn't need per-file
-boilerplate.
+implementation-only. `NEXT_PUBLIC_API_BASE_URL` is set via Vitest's `test.env`
+config (`vitest.config.mts`), not inside `setup.ts` — ESM hoists imports
+ahead of any in-file assignment, and `setup.ts` itself transitively imports
+modules that read that variable at import time (`src/lib/config.ts`'s
+fail-fast validation). `src/tests/setup.ts` registers `jest-dom` matchers,
+explicit RTL cleanup between tests, the MSW server lifecycle
+(`onUnhandledRequest: "error"` — a forgotten mock is a loud test failure,
+not a silent real request), and resets the access token / in-flight-refresh
+/ mock-server state before every test so one test's session never leaks
+into the next.
 
-Chunk 1 coverage: environment config validation (missing/malformed/wrong
-protocol), API error normalization (well-formed envelope, unknown error
-code, non-envelope body, network failure, timeout), the request-timeout
-helper, and the core UI primitives' accessibility semantics (`Button`
-disabled/loading state, `Alert`'s `role="alert"` vs `role="status"`).
-Authentication, workspace-switching, and route-protection test coverage
-lands with those features in later chunks.
+**Request-level mocking (`src/tests/msw/`)**: handlers in `handlers.ts`
+mirror the real backend contract byte-for-byte where it matters (status
+codes, the `{error:{code,message,details?}}` envelope, the CSRF
+requirement on login/refresh/logout). One deliberate simplification,
+documented in that file: Node's `fetch` doesn't wire a mocked response's
+`Set-Cookie` into `document.cookie` the way a real browser would, so the
+JS-readable CSRF cookie is set for real (`document.cookie =` inside the
+handler, exercising `csrf.ts` unmodified) while the HttpOnly refresh
+cookie's presence/validity is tracked as mock server state instead — which
+is actually the accurate abstraction, since real frontend code can't see
+that cookie's value either way.
+
+Coverage: environment config validation; API error normalization
+(well-formed envelope, unknown error code, non-envelope body, network
+failure, timeout); the request-timeout helper; `apiClient`'s URL
+construction and Authorization/CSRF header attachment (client.test.ts, the
+regression test for the base-URL doubling defect below); the core UI
+primitives' accessibility semantics; and the full auth flow — login
+(success, invalid credentials, 429, network failure, duplicate-submission
+guard), session bootstrap (authenticated, unauthenticated, network-error
+classification), coordinated refresh (single refresh for N parallel 401s,
+retry-exactly-once, network-vs-invalid-session distinction), logout
+(including server-failure-still-clears-local-state), redirect-target
+safety, and that no auth secret ends up in `localStorage`/`sessionStorage`/
+a JS-readable cookie. Workspace-switching and full route-protection (beyond
+the single `/` placeholder) land with those features in later chunks.
 
 ## Security notes
 
-- **Token storage**: not yet applicable — Chunk 1 has no authentication.
-  When it lands (Chunk 2), the backend's login endpoint returns a JSON
-  access token plus a separate HttpOnly refresh cookie set by the server
-  (see the generated `src/types/api.ts` — `POST /api/v1/auth/login/`); the
-  access token is held in memory only (never `localStorage`/`sessionStorage`),
-  and the refresh cookie is never read or written by frontend code — the
-  browser sends it automatically because `credentials: "include"` is set on
-  every request.
-- **CSRF**: the backend issues a CSRF-priming endpoint
-  (`GET /api/v1/auth/csrf/`) ahead of state-changing session requests; wiring
-  the resulting header into `apiClient` is part of the Chunk 2 auth work, not
-  Chunk 1.
+See "Authentication" above for the full model (credential storage, refresh
+coordination, CSRF, topology). Summary and explicit non-claims:
+
+- **Token storage**: access token in memory only (`token-store.ts`); refresh
+  token never touched by frontend code (HttpOnly); CSRF cookie is
+  necessarily JS-readable (inherent to the double-submit pattern, not a
+  choice this frontend made). Verified by
+  `src/tests/features/auth/no-token-leak.test.ts` and by manual inspection
+  during the real-backend smoke test (Chunk 2) — no auth secret ever landed
+  in `localStorage`/`sessionStorage`.
+- **CSRF**: implemented per the backend's actual `enforce_csrf()` contract
+  (`src/lib/api/csrf.ts`, `client.ts`'s CSRF middleware) — never disabled,
+  never a wildcard trusted origin (that setting lives in the backend anyway,
+  not something this frontend could weaken).
 - **Frontend authorization**: the frontend never decides what a user is
   allowed to do. Hiding a control based on role/permission is a UX
   convenience only — the backend's own RBAC/tenant-scoping response (403/404)
   is authoritative, and the UI must handle receiving one even when it also
-  hid the control.
+  hid the control. Client-side route "protection" (`src/app/page.tsx`,
+  `src/app/login/page.tsx`) is the same: a UX redirect based on `AuthProvider`
+  state, not a security boundary — see "Browser/backend topology" above for
+  why that's an accurate description and not an oversight.
+- **What this does _not_ claim**: none of the above makes the frontend
+  "XSS-proof" or "CSRF-proof" in an absolute sense, or eliminates token
+  theft risk. An XSS vulnerability elsewhere in the app could still read the
+  in-memory access token (real for the ~15 minutes it's valid) or the
+  CSRF cookie; that's an inherent limit of any browser-based session, not
+  something particular to this implementation. The concrete, verifiable
+  claims are the ones above: no long-lived secret in persistent storage, no
+  secret in a URL, and CSRF enforced per the backend's real contract, not
+  bypassed.
+
+## Known defects fixed during Chunk 2
+
+- **Base URL doubling**: Chunk 1's `.env.example` set
+  `NEXT_PUBLIC_API_BASE_URL` to `http://localhost:8000/api/v1` — but the
+  generated OpenAPI paths (`src/types/api.ts`) are already absolute (e.g.
+  `/api/v1/auth/login/`), and `openapi-fetch` joins `baseUrl` + path with no
+  de-duplication, producing `.../api/v1/api/v1/...`. This was never
+  exercised until the first real request in Chunk 2. Fixed by changing the
+  convention to an origin-only base URL (`.env.example`, `config.ts`
+  doc comments); regression-tested in `src/tests/lib/api/client.test.ts`.
+- **`fetch` captured too early for MSW**: `apiClient` originally passed no
+  explicit `fetch` option to `openapi-fetch`, which defaults to capturing
+  `globalThis.fetch` once at client-creation time (module import) — before
+  MSW's `server.listen()` (a `beforeAll` hook) had a chance to patch it,
+  so every mocked test silently hit the real network instead. Fixed by
+  resolving `fetch` dynamically per call in `client.ts`.
