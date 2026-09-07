@@ -218,7 +218,7 @@ genuine PostgreSQL row lock) — no sleep was added to application code.
   `task_acks_late`/`worker_prefetch_multiplier`/
   `task_reject_on_worker_lost` — Celery's defaults apply
   (`acks_late=False`: a task is acknowledged to the broker **before**
-  execution, not after). **This is never claimed as exactly-once.**
+  execution, not after). **This is never exactly-once.**
 - Hard loss (`SIGKILL` mid-task, simulating a real crash): the killed
   task's message is already gone from the broker (acked pre-execution) —
   it is **not** redelivered. A row that task was updating (e.g. a
@@ -226,9 +226,9 @@ genuine PostgreSQL row lock) — no sleep was added to application code.
   self-healing. This is exactly the scenario the stuck-run recovery
   sweepers exist for: verified restarting the worker and explicitly
   invoking `recover_stuck_agent_runs_task` recovers the abandoned row
-  (`failed`/`stuck_worker_recovered`) exactly once; a second invocation is
-  a safe no-op (0 recovered) — no duplicate side effect, no terminal-state
-  regression.
+  (`failed`/`stuck_worker_recovered`) on the first call; a second invocation
+  is a safe no-op (0 recovered) — no duplicate side effect, no
+  terminal-state regression.
 - Broker (Redis) disappears while the worker is running: Celery's
   built-in consumer retry/backoff logs `Cannot connect to redis://...`
   with increasing backoff, no crash. Once Redis returns, the worker logs
