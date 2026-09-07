@@ -2,10 +2,10 @@
 
 The frontend for SupportPilot AI: a Next.js (App Router) application that
 consumes the Django/DRF backend in [`../backend`](../backend). This is
-**Phase 18** — through Chunk 2, that's framework, design system, typed API
-transport, and authentication. Workspace context, protected routing beyond
-a single placeholder route, and the real application shell land in the
-following chunks; see
+**Phase 18** — through Chunk 3, that's framework, design system, typed API
+transport, authentication, workspace context, protected routing, and the
+application shell. Business-domain feature pages (conversations, customers,
+tickets, ...) land in later phases; see
 [`../SupportPilot_AI_Master_Build_Prompt.md`](../SupportPilot_AI_Master_Build_Prompt.md).
 
 ## Stack
@@ -23,11 +23,23 @@ following chunks; see
 
 No state-management or server-state library (Redux, Zustand, TanStack
 Query, ...) has been introduced. Auth state is one small, mostly-singleton
-tree — a React context (`AuthProvider`) is enough, and none of Chunk 2's
-data fetching (login/logout/me) benefits from a caching layer built for
-lists of server records. Revisit for workspace/business data in a later
-chunk, per the "don't add a layer for fashion" principle in the build
-prompt. `msw` was added, but only as a dev dependency for tests.
+tree — a React context (`AuthProvider`) is enough, and none of the
+login/logout/me data fetching benefits from a caching layer built for lists
+of server records. Workspace state (Chunk 3) is the same shape of problem —
+a small membership list already delivered as part of `/me/`, re-derived
+whenever that changes — so it's a second plain context (`WorkspaceProvider`),
+not a reason to introduce one. Revisit once a later phase's business-domain
+pages have real server-list data (pagination, background refetch,
+cache invalidation across mutations) that actually benefits from TanStack
+Query; `features/workspace`'s doc comments define the workspace-ID-in-query-key
+convention those pages should follow once it's added, per the "don't add a
+layer for fashion" principle in the build prompt. `msw` was added, but only
+as a dev dependency for tests. Two small Radix UI primitives
+(`@radix-ui/react-dropdown-menu`, `@radix-ui/react-dialog`) were added in
+Chunk 3 for the workspace switcher/user menu and the mobile navigation
+drawer — the one place in this codebase where a hand-built component would
+mean re-implementing non-trivial keyboard/focus-trap/dismissal behavior
+rather than styling an existing correct one (see "Design system" below).
 
 ## Directory structure
 
@@ -35,9 +47,15 @@ prompt. `msw` was added, but only as a dev dependency for tests.
 frontend/
   src/
     app/            App Router routes, layouts, and route-level UI states
-    components/ui/  Design-system primitives (Button, Input, Card, ...)
+      (protected)/   Route group for every authenticated route (no URL segment of its own)
+        app/         The real authenticated landing route (/app)
+      login/         The public login route
+    components/
+      ui/           Design-system primitives (Button, Input, Card, DropdownMenu, Sheet, ...)
+      shell/        Application shell chrome (Sidebar, Header, nav config/links, user menu, mobile nav)
     features/
       auth/          Login/logout/me operations, AuthProvider, LoginForm, redirect safety
+      workspace/     Active-workspace state, selection persistence, the workspace switcher
     lib/            Framework-agnostic code: API transport, config, utils
       api/           Central HTTP client, token/session/CSRF handling, error normalization
     types/          Generated types only (api.ts) — never hand-edited
@@ -50,9 +68,11 @@ frontend/
 Other feature domains (customers, conversations, tickets, agents,
 approvals, knowledge, integrations, evaluations, settings) get their own
 directories under `src/features/` starting in the phase that implements
-them — `auth` is the first, and the pattern it establishes (a feature owns
-its API calls, its own React state, and its own tests; transport-level
-concerns generic across features stay in `lib/api`) is meant to repeat.
+them — `auth` and `workspace` are the first two, and the pattern they
+establish (a feature owns its API calls, its own React state, and its own
+tests; transport-level concerns generic across features stay in `lib/api`;
+shell-chrome concerns generic across every authenticated route stay in
+`components/shell`) is meant to repeat.
 
 ## API contract and type generation
 
@@ -102,12 +122,30 @@ on the frontend — see `src/lib/api/session.ts` and
   explicit, commented cast — not a blanket `any`.
 - `Me.workspaces` (the current-user endpoint's workspace-membership summary)
   is a `SerializerMethodField` drf-spectacular can't resolve, so it's typed
-  as `{ [key: string]: unknown }[]`. Chunk 2 doesn't read this field (no
-  workspace UI yet); Chunk 3 (workspace context) should either add
-  `@extend_schema_field` on the backend serializer or, if that's not
-  practical, define a small typed interface matching the real
-  `WorkspaceMembershipSummarySerializer` output the same way `session.ts`
-  does above.
+  as `{ [key: string]: unknown }[]`. Chunk 3 closes this on the frontend
+  side without a backend change: `src/features/workspace/parse.ts`'s
+  `parseWorkspaceMemberships()` narrows the raw array to the real
+  `{ id, name, slug, role }` shape (verified directly against
+  `accounts/serializers.py`'s `WorkspaceMembershipSummarySerializer`, and
+  against a live backend during the Chunk 3 smoke test — see "Workspace
+  context" below), dropping any entry that doesn't match rather than
+  trusting or crash-casting it. This was chosen over adding
+  `@extend_schema_field` to the backend serializer (the other option this
+  chunk considered) because reusing `/me/`'s already-fetched data avoids a
+  second network round trip for the workspace list, and the runtime guard
+  costs a handful of scalar-field checks, not a schema-validation
+  dependency. A dedicated, fully-typed `GET /api/v1/workspaces/` endpoint
+  does exist (`workspaces/views.py`) and was considered as the "prefer a
+  better-typed dedicated endpoint" option — it's used directly for
+  workspace-scoped detail views, but its response omits the caller's `role`
+  in that workspace (only `/me/`'s membership summary carries that), so
+  using it as the _list_ source would still need a second call per
+  workspace to recover the role. `@extend_schema_field` on the backend
+  serializer remains the cleanest long-term fix and is a small, low-risk
+  change a future phase can make; it wasn't done here because Chunk 3 can
+  consume the current contract safely without it (the "don't change the
+  backend unless the current contract makes secure integration actually
+  impossible" constraint).
 
 Neither gap was worked around by changing backend code in Phase 18 — see
 "Backend contract" below.
@@ -432,6 +470,145 @@ backend unless the current contract makes secure integration actually
 impossible" constraint, since the same-hostname path-routing topology
 above already solves it without one.
 
+## Workspace context
+
+`src/features/workspace/workspace-provider.tsx`'s `WorkspaceProvider` (used
+only inside the `(protected)` route group — see "Protected routing" below)
+tracks which of the current user's workspace memberships is active. It is
+a second, deliberately separate context from `AuthProvider`: authentication
+answers "who is this", workspace answers "which tenant are they currently
+looking at", and the build prompt's own rule ("do not leak workspace
+selection state into AuthProvider") is a real architectural boundary, not
+just a style preference — a later phase's business-domain pages depend on
+being able to reason about "is there a session" and "which workspace" as
+independent questions.
+
+**Contract** (discovered from the real backend, not invented):
+
+| Question                                             | Answer                                                                                                                                                                                                                                                                    |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Where does the membership list come from?            | `GET /api/v1/auth/me/`'s `workspaces` field — already fetched by `AuthProvider`'s bootstrap; no second request.                                                                                                                                                           |
+| Membership shape                                     | `{ id: uuid, name, slug, role }` per workspace (`accounts/serializers.py` `WorkspaceMembershipSummarySerializer`) — see the schema-gap note above for how the untyped generated field is narrowed.                                                                        |
+| How is the active workspace conveyed to the backend? | A **URL path parameter** — every workspace-scoped endpoint is `/api/v1/workspaces/<uuid:workspace_id>/...` (`workspaces/urls.py`). There is no header, query parameter, or request-body convention; nothing was invented (no `X-Workspace-ID` header exists).             |
+| What enforces access to a workspace?                 | The backend, on every request, from the database (`workspaces/selectors.py`'s `get_workspace_for_user_or_404`) — a workspace the caller isn't an active member of 404s (never 403 — no existence leakage), regardless of what the frontend's active-workspace state says. |
+
+**State model** — `WorkspaceStatus` is one of `"idle" | "loading" | "error" | "empty" | "ready"`,
+deliberately not fewer: `"idle"` (not authenticated — nothing to load) and
+`"error"` (the session itself couldn't be confirmed — a network/timeout
+failure, see `AuthProvider.error` and `isUncertainSessionError()` in
+`lib/api/errors.ts`) are both distinct from `"empty"` (session confirmed,
+genuinely zero memberships) — collapsing any of these into a shared `null`
+would mean either showing "you have no workspace" during a network outage,
+or the reverse. `WorkspaceGate` (`components/shell/app-shell.tsx`) renders
+a distinct UI for each.
+
+**Selection and persistence**: on becoming authenticated (or whenever the
+membership list changes), the active workspace is chosen by: (1) keep the
+current selection if it's still in the list; (2) otherwise restore a
+previously-persisted selection (`localStorage["sp_active_workspace_id"]`) if
+it's still accessible; (3) otherwise fall back to the first
+server-provided workspace; (4) a persisted ID that resolves to neither is
+discarded, not silently kept. The persisted value is a workspace UUID —
+already treated as a non-secret, security-safe identifier throughout the
+backend (`workspaces/models.py`) — never an authorization decision or a
+credential; switching it changes what the frontend _asks for_, never what
+the backend _permits_ (see "Server is authoritative" — this is restated
+deliberately, since it's the one invariant every other guarantee in this
+section depends on). `localStorage`, not `sessionStorage`, because the
+preference should survive a reload/new tab like any other UI preference;
+it is scoped per browser profile, not per account, so a different account
+signing in on the same browser simply finds it absent from its own
+membership list and falls back per rule (4) above. It is deliberately
+**not** cleared on logout — a returning user on the same browser/account
+gets the same workspace restored, which is exactly the UX benefit this
+preference exists for, and rule (4) already makes it safe for any other
+case.
+
+**Switcher** (`features/workspace/workspace-switcher.tsx`) is a Radix
+dropdown-menu — current workspace name plus role, a list of the caller's
+other accessible workspaces, and the three non-`"ready"` states above each
+rendered explicitly (a loading skeleton, an "unavailable" message, an
+"no workspace available" message) rather than a switcher that silently
+looks broken.
+
+## Protected routing and application shell
+
+**Route groups**: `src/app/(protected)/` is a Next.js route group (its
+folder name doesn't appear in the URL) — every authenticated route lives
+under it and shares its layout; `src/app/login/` stays outside it. The one
+real destination so far is `src/app/(protected)/app/page.tsx` → `/app`.
+
+`src/app/(protected)/layout.tsx` is the actual protection boundary,
+matching `AuthStatus` exactly:
+
+- `"loading"` → render nothing privileged (a bare spinner), not the shell,
+  even briefly.
+- `"unauthenticated"` → `router.replace("/login")`. This is also what fires
+  when a session expires _while the user is already on an authenticated
+  route_: `AuthProvider`'s transition to `"unauthenticated"` unmounts the
+  shell (and, inside it, `WorkspaceProvider` and every child) on the very
+  next render, before this effect even runs — there is no window where
+  stale privileged content stays mounted with an invalid session.
+- `"authenticated"` → render `WorkspaceProvider` wrapping `AppShell`.
+
+As with Chunk 2's `/login` ↔ authenticated redirect, this is a **UX
+convenience, not the security boundary** — see "Browser/backend topology"
+above; nothing here changes that model, it just adds a second protected
+route to it. `src/app/page.tsx` (the bare root route) is a third, minimal
+case: it renders no content of its own, only resolves `auth.status` into a
+redirect to `/app` or `/login`.
+
+**Temporary network failures** (Part 21 of the Chunk 3 spec) are not
+special-cased into a fourth "unsure" UI state: a background refresh
+failure — whether the _cause_ was an invalid session or a network
+hiccup — still resolves through the same `AuthProvider.status` transition
+to `"unauthenticated"` (see `token-store.ts`'s `notifySessionExpired`),
+which sends the user to `/login` exactly once (verified in
+`src/tests/app/protected-layout.test.tsx`, "redirects exactly once ...
+without looping"). This is a deliberate simplification, not an oversight:
+distinguishing "we couldn't refresh because of a network blip" from "we
+couldn't refresh because the session is actually gone" _mid-session_
+(as opposed to during initial bootstrap, where `AuthProvider.error` already
+makes this distinction — see "Workspace context" above) would need
+`notifySessionExpired` to carry error-classification data it currently
+discards by design; that's a larger change to the Chunk 2A refresh
+architecture than this chunk's scope, and the current behavior is
+safe-by-default (it never leaves privileged UI mounted against an
+unconfirmed session) even though it isn't maximally forgiving of a flaky
+network. A future phase revisiting mid-session refresh failures should
+thread that classification through rather than only fixing it here.
+
+**Application shell** (`components/shell/`): `AppShell` owns the app
+landmarks (`<aside>` sidebar, `<header>`, `<main id="main-content">` — the
+`Skip to main content` link's actual target once inside a protected route),
+the mobile navigation drawer, and `WorkspaceGate` (the loading/error/empty/
+ready branch for workspace state — see "Workspace context" above). It owns
+no business-domain content — every child route brings its own, starting
+with `(protected)/app/page.tsx`, the minimal authenticated landing route
+showing only real backend-sourced data (signed-in user, active workspace,
+role, membership count) and explicitly no fabricated product metrics
+(ticket counts, SLA, resolution rate, ...).
+
+**Navigation** (`components/shell/nav-config.ts`) is a small typed array —
+one entry (`Overview` → `/app`) for now. Future business-domain
+destinations get a stable `id`/`path` entry here once their route actually
+ships; the list intentionally does not contain unclickable placeholder
+entries for conversations/customers/tickets/etc. — an unclickable nav item
+is worse than a short sidebar. The active route is marked both visually
+(background fill, left border, font weight — not color alone) and
+accessibly (`aria-current="page"`, `NavLinks` in `components/shell/nav-links.tsx`).
+
+**Client/server boundaries**: `"use client"` is scoped to the pieces that
+actually need browser APIs or React state — `AuthProvider`,
+`WorkspaceProvider`, `ProtectedLayout` (reads `auth.status`), the
+switcher/menu/drawer components (Radix primitives, `useState`), and
+`NavLinks` (`usePathname`). `Sidebar` and `Header` themselves stay plain
+Server-Component-compatible functions (no hook of their own) even though
+they're rendered from a client parent — they just don't need the directive.
+No route under `(protected)` attempts server-side JWT validation or a
+second, Next-held session: see "Browser/backend topology" above, which this
+chunk doesn't change.
+
 ## Local development
 
 1. Start the backend (see `../README.md`) so `NEXT_PUBLIC_API_BASE_URL`
@@ -507,9 +684,24 @@ stale marker; nothing resembling a token ever lands in `localStorage`),
 redirect-target safety, and that no auth _secret_ ends up in
 `localStorage`/`sessionStorage`/a JS-readable cookie (the one thing
 `localStorage` does legitimately hold — the boolean logout-pending flag —
-is asserted to never look like a token). Workspace-switching and full
-route-protection (beyond the single `/` placeholder) land with those
-features in later chunks.
+is asserted to never look like a token).
+
+Added in Chunk 3: `parseWorkspaceMemberships()`'s malformed-payload
+handling (missing/wrong-typed fields, unknown role values — each dropped,
+never crash-cast); the full `WorkspaceProvider` state matrix (idle, ready,
+empty, error-vs-empty distinction, default/persisted/stale-persisted
+selection, switch + persistence, ignoring a switch to a non-member
+workspace, clearing on logout, clearing on a mid-session auth expiry); the
+workspace switcher and user menu (real identity/role display, keyboard
+operation, logout invoking the existing complete/`server_unconfirmed`
+flow); the mobile navigation drawer (open/close, Escape-to-close-and-
+return-focus, closing on navigation); `ProtectedLayout` (no privileged
+flash while loading, redirect when unauthenticated, rendering the shell
+once authenticated, unmounting it on a mid-session expiry, exactly-once
+redirect on a temporary network failure — no loop); the root route and
+login-page redirects for an already-authenticated visitor; and the
+explicit login-supersedes-a-pending-logout-marker regression across a
+full login → reload cycle (`auth-provider.test.tsx`).
 
 ## Security notes
 
@@ -542,9 +734,13 @@ coordination, CSRF, topology). Summary and explicit non-claims:
   convenience only — the backend's own RBAC/tenant-scoping response (403/404)
   is authoritative, and the UI must handle receiving one even when it also
   hid the control. Client-side route "protection" (`src/app/page.tsx`,
-  `src/app/login/page.tsx`) is the same: a UX redirect based on `AuthProvider`
-  state, not a security boundary — see "Browser/backend topology" above for
-  why that's an accurate description and not an oversight.
+  `src/app/login/page.tsx`, `src/app/(protected)/layout.tsx`) is the same: a
+  UX redirect based on `AuthProvider` state, not a security boundary — see
+  "Browser/backend topology" above for why that's an accurate description
+  and not an oversight. The same applies to the active-workspace selector
+  (`WorkspaceProvider`): it's UX state that changes what the frontend
+  _requests_, never what the backend _permits_ — see "Workspace context"
+  above and "Server is authoritative" in the Chunk 3 spec.
 - **What this does _not_ claim**: none of the above makes the frontend
   "XSS-proof" or "CSRF-proof" in an absolute sense, or eliminates token
   theft risk. An XSS vulnerability elsewhere in the app could still read the
@@ -554,6 +750,24 @@ coordination, CSRF, topology). Summary and explicit non-claims:
   claims are the ones above: no long-lived secret in persistent storage, no
   secret in a URL, and CSRF enforced per the backend's real contract, not
   bypassed.
+
+## Known defects fixed during Chunk 3
+
+- **`AuthProvider.error` was set for every unauthenticated outcome, not
+  only an uncertain one**: the doc comment on `AuthState.error` always said
+  it should mean "the network failed, we don't actually know if the
+  session is valid" — but bootstrap's catch block set it for _any_
+  `ApiError`, including an entirely ordinary "no refresh cookie exists"
+  `authentication_failed` 401 on a plain first visit. This was latent and
+  untested in Chunk 2/2A (no existing test asserted `error` was `null` for
+  the plain "no session" case) and surfaced only once `WorkspaceProvider`'s
+  new `"error"` status (which keys off `auth.error`) made a brand-new,
+  never-visited browser incorrectly report "workspace unavailable" instead
+  of the correct "not logged in". Fixed by a new
+  `isUncertainSessionError()` helper (`lib/api/errors.ts`, checking for
+  `network_error`/`timeout` specifically) that both `AuthProvider` and
+  `WorkspaceProvider` key off; regression-tested in `auth-provider.test.tsx`
+  ("does not report an error for an ordinary confirmed-absent session").
 
 ## Known defects fixed during Chunk 2A
 
