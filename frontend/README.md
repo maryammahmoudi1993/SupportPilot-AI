@@ -263,28 +263,65 @@ own doc comment). `GET /auth/me/` doesn't need it: it's a safe method, and
 it authenticates via the `Authorization` header, which — unlike a cookie —
 a forged cross-site request can't attach on the victim's behalf.
 
+### Session state model
+
+`AuthState.status` (`src/features/auth/auth-provider.tsx`) is one of four
+explicit values — never fewer, and never inferred from `user === null` or
+from the incidental presence of an error field:
+
+| Status              | Meaning                                                                                                                                                                                          | Privileged UI | Routes to `/login`? |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------- | ------------------- |
+| `"loading"`         | Bootstrap/revalidate is in flight — nothing is known yet.                                                                                                                                        | No            | No                  |
+| `"authenticated"`   | The backend confirmed a valid session.                                                                                                                                                           | Yes           | No                  |
+| `"unauthenticated"` | The backend gave a **definitive** verdict of no valid session — a real `authentication_failed` 401 from bootstrap/refresh, or an explicit logout.                                                | No            | **Yes**             |
+| `"uncertain"`       | The session could **not be verified** — network failure, timeout, or any backend response that isn't a definitive authentication verdict (`isUncertainSessionError()`, `src/lib/api/errors.ts`). | No            | **No**              |
+
+**Why this needed a fourth state (Phase 18 Chunk 3A):** through Chunk 3, a
+network/timeout failure during bootstrap or a mid-session refresh collapsed
+into `"unauthenticated"` — the same state a real, confirmed-invalid session
+produced — with only an incidental `AuthState.error` field distinguishing
+them, and nothing downstream (`ProtectedLayout`, the root route) actually
+checked it. The practical effect: a temporary network blip while
+determining or refreshing the session redirected the user to `/login` and
+told them, in effect, "you're signed out" — which was never established.
+`"uncertain"` is deliberately its own state, not encoded as
+`status === "unauthenticated" && error !== null`, so no future call site
+can make that mistake again by only checking `status`.
+
+**Classification** (`isUncertainSessionError()`) is deliberately
+conservative in the "uncertain" direction: only a definitive
+`authentication_failed` counts as confirmed-invalid. Every other outcome —
+`network_error`/`timeout` (the request never reached the backend at all),
+but also e.g. `internal_server_error` or `parse_error` (the backend _did_
+respond, but not with an authentication verdict) — is "uncertain": "we
+don't know," never silently folded into "logged out."
+
+**Never claim "signed out" without proof; never claim "signed in" without
+proof either** — the two directions of the same rule this codebase has
+followed since Chunk 2. `"uncertain"` is what makes both hold at once for a
+transport failure: the frontend renders `SessionVerificationError`
+(`components/shell/session-verification-error.tsx` — a heading, an
+explanation, Retry, and an optional Sign out, reusing the existing logout
+flow unchanged) instead of either the protected shell or a login redirect,
+and offers `AuthProvider.revalidate()` ("Retry") as the recovery path back
+to `"authenticated"` or forward to `"unauthenticated"` once the backend can
+actually be asked. See "Protected routing and application shell" below for
+where this is consumed.
+
 ### Session bootstrap and reload
 
 There is deliberately no separate "try refresh, then fetch /me/" bootstrap
-sequence. `AuthProvider` (`src/features/auth/auth-provider.tsx`) just calls
-`fetchCurrentUser()` on mount; that goes through
-`withAccessTokenRetry` (`src/lib/api/session.ts`), which is the _same_
-401 → refresh → retry mechanism any protected call uses (see below). On a
-fresh page load there is no in-memory access token, so the first call
+sequence. `AuthProvider` just calls `fetchCurrentUser()` on mount; that goes
+through `withAccessTokenRetry` (`src/lib/api/session.ts`), which is the
+_same_ 401 → refresh → retry mechanism any protected call uses (see below).
+On a fresh page load there is no in-memory access token, so the first call
 naturally 401s, triggers a refresh via the HttpOnly cookie, and retries —
-succeeding if a valid refresh cookie survived the reload, failing (cleanly,
-to `unauthenticated`) if it didn't or has expired. One mechanism, not two.
-
-`AuthState.status` is `"loading" | "authenticated" | "unauthenticated"` —
-never inferred from `user === null` alone, so "haven't checked yet" and
-"checked, not logged in" can't be confused (a protected page must never
-flash its content, or redirect to `/login`, before bootstrap resolves).
-`AuthState.error` additionally carries the `ApiError` when bootstrap failed
-specifically because the network was unreachable (`network_error`/`timeout`)
-rather than because the session was proven invalid
-(`authentication_failed`) — `status` is still `"unauthenticated"` either
-way (never claim authenticated without proof), but a caller can use `error`
-to offer "Retry" instead of routing straight to the login form.
+resolving to `"authenticated"` if a valid refresh cookie survived the
+reload, to `"unauthenticated"` if the backend definitively says it didn't
+(or has expired), or to `"uncertain"` if the refresh attempt itself
+couldn't be completed (network/timeout/unexpected response) — never to
+`"unauthenticated"` for that last case. One bootstrap mechanism, not two,
+and one classification the mid-session refresh path (below) reuses exactly.
 
 ### Coordinated refresh (`src/lib/api/session.ts`)
 
@@ -308,12 +345,20 @@ That's a structural guarantee, not a URL-based exclusion list: there is no
 code path by which the refresh flow can recurse into itself.
 
 A failed refresh (from _any_ caller, not just bootstrap) clears the
-in-memory access token and calls `notifySessionExpired()`
-(`token-store.ts`), which `AuthProvider` has registered a handler for —
-one owner for "the session just ended" — but only acts if the app was
-actually `"authenticated"` at that moment, so it can't clobber an
-in-flight _first_ bootstrap that's about to commit its own (more specific)
-unauthenticated/error state.
+in-memory access token and calls `notifySessionExpired(error)`
+(`token-store.ts`), passing the classified `ApiError` through — which
+`AuthProvider` has registered a handler for, one owner for "something about
+the session just changed," transitioning to `"unauthenticated"` for a
+definitive `authentication_failed` or to `"uncertain"` for anything else
+(the exact same classification bootstrap's own catch block uses). It only
+acts if the app was actually `"authenticated"` at that moment, so it can't
+clobber an in-flight _first_ bootstrap that's about to commit its own
+classification. Also wired in Chunk 3A: the refresh request itself now
+carries a real timeout (`withTimeout(DEFAULT_TIMEOUT_MS)`,
+`lib/api/timeout.ts`) — previously unused infrastructure — so a refresh
+that never gets a response doesn't leave `AuthProvider` stuck in
+`"loading"` forever; the resulting `AbortError` is exactly what
+`normalizeTransportError` maps to the `"timeout"` code above.
 
 ### Logout
 
@@ -493,13 +538,15 @@ independent questions.
 | What enforces access to a workspace?                 | The backend, on every request, from the database (`workspaces/selectors.py`'s `get_workspace_for_user_or_404`) — a workspace the caller isn't an active member of 404s (never 403 — no existence leakage), regardless of what the frontend's active-workspace state says. |
 
 **State model** — `WorkspaceStatus` is one of `"idle" | "loading" | "error" | "empty" | "ready"`,
-deliberately not fewer: `"idle"` (not authenticated — nothing to load) and
-`"error"` (the session itself couldn't be confirmed — a network/timeout
-failure, see `AuthProvider.error` and `isUncertainSessionError()` in
-`lib/api/errors.ts`) are both distinct from `"empty"` (session confirmed,
-genuinely zero memberships) — collapsing any of these into a shared `null`
-would mean either showing "you have no workspace" during a network outage,
-or the reverse. `WorkspaceGate` (`components/shell/app-shell.tsx`) renders
+deliberately not fewer: `"idle"` (confirmed unauthenticated — nothing to
+load) and `"error"` (`AuthStatus === "uncertain"`: the session itself
+couldn't be _verified_ — see "Session state model" above) are both
+distinct from `"empty"` (session confirmed, genuinely zero memberships) —
+collapsing any of these into a shared `null` would mean either showing "you
+have no workspace" during a network outage, or the reverse. `"error"` is
+keyed off `auth.status` directly, not merely `auth.error` being non-null —
+see "Known defects" below for the bug this replaced.
+`WorkspaceGate` (`components/shell/app-shell.tsx`) renders
 a distinct UI for each.
 
 **Selection and persistence**: on becoming authenticated (or whenever the
@@ -539,50 +586,63 @@ under it and shares its layout; `src/app/login/` stays outside it. The one
 real destination so far is `src/app/(protected)/app/page.tsx` → `/app`.
 
 `src/app/(protected)/layout.tsx` is the actual protection boundary,
-matching `AuthStatus` exactly:
+matching `AuthStatus` exactly — all four states, not three:
 
 - `"loading"` → render nothing privileged (a bare spinner), not the shell,
   even briefly.
-- `"unauthenticated"` → `router.replace("/login")`. This is also what fires
-  when a session expires _while the user is already on an authenticated
-  route_: `AuthProvider`'s transition to `"unauthenticated"` unmounts the
-  shell (and, inside it, `WorkspaceProvider` and every child) on the very
-  next render, before this effect even runs — there is no window where
-  stale privileged content stays mounted with an invalid session.
+- `"unauthenticated"` → `router.replace("/login")`. A **definitive** backend
+  verdict of no valid session — this also covers that verdict arriving
+  _while the user is already on an authenticated route_ (a real
+  `authentication_failed` from a mid-session refresh): `AuthProvider`'s
+  transition to `"unauthenticated"` unmounts the shell (and, inside it,
+  `WorkspaceProvider` and every child) on the very next render, before this
+  effect even runs — there is no window where stale privileged content
+  stays mounted with a confirmed-invalid session.
+- `"uncertain"` → render `SessionVerificationError`
+  (`components/shell/session-verification-error.tsx`), **not** a redirect
+  to `/login` and **not** the shell. See "Session state model" above —
+  network/timeout/an unexpected response is never treated as proof the
+  session is invalid, whether it happens during initial bootstrap or mid-app
+  (a corrected model as of Phase 18 Chunk 3A — see "Known defects" below
+  for what this replaces). This still removes all privileged content (it
+  isn't `"authenticated"` either), just without claiming the user is signed
+  out, and without redirecting off a transport failure.
 - `"authenticated"` → render `WorkspaceProvider` wrapping `AppShell`.
 
 As with Chunk 2's `/login` ↔ authenticated redirect, this is a **UX
 convenience, not the security boundary** — see "Browser/backend topology"
-above; nothing here changes that model, it just adds a second protected
-route to it. `src/app/page.tsx` (the bare root route) is a third, minimal
-case: it renders no content of its own, only resolves `auth.status` into a
-redirect to `/app` or `/login`.
+above; nothing here changes that model, it just adds routing for a third
+outcome (transport uncertainty) alongside the original two.
+`src/app/page.tsx` (the bare root route) mirrors the same three-way split:
+`"authenticated"` → `/app`, `"unauthenticated"` → `/login`,
+`"uncertain"` → the same `SessionVerificationError` screen (an earlier
+version of this route left `"uncertain"` on an unrecoverable infinite
+spinner — fixed alongside `ProtectedLayout`, see "Known defects" below).
+Neither route ever redirects on `"uncertain"`, so there is no bounce
+between `/app` and `/login` off a transport failure.
 
-**Temporary network failures** (Part 21 of the Chunk 3 spec) are not
-special-cased into a fourth "unsure" UI state: a background refresh
-failure — whether the _cause_ was an invalid session or a network
-hiccup — still resolves through the same `AuthProvider.status` transition
-to `"unauthenticated"` (see `token-store.ts`'s `notifySessionExpired`),
-which sends the user to `/login` exactly once (verified in
-`src/tests/app/protected-layout.test.tsx`, "redirects exactly once ...
-without looping"). This is a deliberate simplification, not an oversight:
-distinguishing "we couldn't refresh because of a network blip" from "we
-couldn't refresh because the session is actually gone" _mid-session_
-(as opposed to during initial bootstrap, where `AuthProvider.error` already
-makes this distinction — see "Workspace context" above) would need
-`notifySessionExpired` to carry error-classification data it currently
-discards by design; that's a larger change to the Chunk 2A refresh
-architecture than this chunk's scope, and the current behavior is
-safe-by-default (it never leaves privileged UI mounted against an
-unconfirmed session) even though it isn't maximally forgiving of a flaky
-network. A future phase revisiting mid-session refresh failures should
-thread that classification through rather than only fixing it here.
+**Recovery**: `SessionVerificationError`'s Retry button calls
+`AuthProvider.revalidate()` — the same bootstrap function used on mount,
+re-run on demand. A successful retry resolves to `"authenticated"` (the
+shell/`WorkspaceProvider` remount cleanly — no duplicate providers, since
+`ProtectedLayout` only ever renders one tree per status) or to
+`"unauthenticated"` (routes to `/login`) depending on what the backend
+actually says this time; a retry that fails the same way leaves the status
+at `"uncertain"` with no redirect and no loop. The screen also offers an
+optional "Sign out," reusing the existing `logout()` flow unchanged
+(including the `complete`/`server_unconfirmed` distinction from Chunk 2A —
+there is no second logout implementation for this state).
 
 **Application shell** (`components/shell/`): `AppShell` owns the app
 landmarks (`<aside>` sidebar, `<header>`, `<main id="main-content">` — the
 `Skip to main content` link's actual target once inside a protected route),
 the mobile navigation drawer, and `WorkspaceGate` (the loading/error/empty/
-ready branch for workspace state — see "Workspace context" above). It owns
+ready branch for workspace state, `error` keyed off `AuthStatus === "uncertain"`
+— see "Workspace context" above). In practice `ProtectedLayout` never
+renders `AppShell` at all while `"uncertain"` (see above), so this branch is
+defense in depth rather than the primary mechanism — kept because
+`WorkspaceProvider`/`AppShell` stay correct on their own terms regardless of
+how they're mounted. It owns
 no business-domain content — every child route brings its own, starting
 with `(protected)/app/page.tsx`, the minimal authenticated landing route
 showing only real backend-sourced data (signed-in user, active workspace,
@@ -696,12 +756,31 @@ workspace switcher and user menu (real identity/role display, keyboard
 operation, logout invoking the existing complete/`server_unconfirmed`
 flow); the mobile navigation drawer (open/close, Escape-to-close-and-
 return-focus, closing on navigation); `ProtectedLayout` (no privileged
-flash while loading, redirect when unauthenticated, rendering the shell
-once authenticated, unmounting it on a mid-session expiry, exactly-once
-redirect on a temporary network failure — no loop); the root route and
-login-page redirects for an already-authenticated visitor; and the
-explicit login-supersedes-a-pending-logout-marker regression across a
-full login → reload cycle (`auth-provider.test.tsx`).
+flash while loading, redirect only on a _confirmed_ unauthenticated
+verdict, rendering the shell once authenticated, unmounting it on a
+confirmed mid-session expiry, exactly-once redirect with no loop); the
+root route and login-page redirects for an already-authenticated visitor;
+and the explicit login-supersedes-a-pending-logout-marker regression across
+a full login → reload cycle (`auth-provider.test.tsx`).
+
+Added in Chunk 3A: the full session-uncertainty matrix — initial-bootstrap
+network failure and (real, abort-driven, not simulated) timeout both
+resolving to `"uncertain"`, never `"unauthenticated"`
+(`auth-provider.test.tsx`); a real 401 still resolving to confirmed
+`"unauthenticated"` (unchanged from Chunk 3, re-verified alongside the new
+cases so the two can't silently collapse into each other again);
+`ProtectedLayout` rendering `SessionVerificationError` (not a redirect, not
+the shell) for both an initial-bootstrap and a mid-session network failure;
+Retry from `"uncertain"` resolving to `"authenticated"` (shell restored),
+to `"unauthenticated"` (redirected), or remaining `"uncertain"` (network
+still down, no loop) depending on what the backend actually says
+(`protected-layout.test.tsx`); `SessionVerificationError`'s own
+accessibility (semantic heading, Retry keyboard-reachable and
+Enter-activatable, Sign-out reusing the existing logout flow —
+`session-verification-error.test.tsx`); and that
+`WorkspaceProvider`/parallel-refresh-dedup/logout-pending/redirect-safety
+all remain green under the new state model (re-run, not just assumed
+unaffected).
 
 ## Security notes
 
@@ -768,6 +847,54 @@ coordination, CSRF, topology). Summary and explicit non-claims:
   `network_error`/`timeout` specifically) that both `AuthProvider` and
   `WorkspaceProvider` key off; regression-tested in `auth-provider.test.tsx`
   ("does not report an error for an ordinary confirmed-absent session").
+
+## Known defects fixed during Chunk 3A
+
+- **A network/timeout failure while determining or refreshing the session
+  was treated the same as a confirmed logout**: `AuthStatus` had only three
+  values, so a transport failure — during initial bootstrap or mid-app —
+  had to collapse into `"unauthenticated"`. `ProtectedLayout` (and, worse,
+  the bare root route, which didn't even redirect — an unrecoverable
+  infinite spinner) then routed the user straight to `/login`, an
+  unqualified "you are signed out" the frontend had no actual proof of, on
+  nothing more than a dropped connection. Fixed by adding a fourth explicit
+  state, `"uncertain"` (see "Session state model" above), classified the
+  same conservative way in both the initial-bootstrap and mid-session paths
+  (`isUncertainSessionError()`, widened in this same chunk — see below —
+  and now the sole authority `notifySessionExpired(error)` and bootstrap's
+  own catch block both defer to); `ProtectedLayout` and the root route both
+  render a dedicated recoverable `SessionVerificationError` screen instead
+  of redirecting. Regression-tested extensively: initial bootstrap
+  network/timeout failure (`auth-provider.test.tsx`, `protected-layout.test.tsx`),
+  mid-session network failure, Retry succeeding/failing/still-uncertain
+  (`protected-layout.test.tsx`), and that neither `/app` nor `/login` ever
+  redirects off `"uncertain"` (no bounce).
+- **`isUncertainSessionError()` itself was still too narrow**: introduced in
+  Chunk 3 to fix the previous defect above, it only recognized
+  `network_error`/`timeout` as uncertain — meaning an unexpected non-auth
+  backend response (e.g. `internal_server_error`, `parse_error`) during
+  bootstrap/refresh would still have been misclassified as a confirmed
+  invalid session, the same category of bug one level down. Corrected to
+  the inverse, more conservative rule: only a definitive
+  `authentication_failed` counts as confirmed-invalid; everything else is
+  uncertain. No dedicated regression test targets `internal_server_error`
+  specifically (the existing MSW mocks don't simulate one on
+  bootstrap/refresh), but the network/timeout tests exercise the same code
+  path and the classifier itself is a one-line, directly-reviewable
+  inversion.
+- **No request timeout was ever actually wired into the transport**:
+  `lib/api/timeout.ts`'s `withTimeout`/`withRequestTimeout` and
+  `client.ts`'s `DEFAULT_TIMEOUT_MS` existed since Chunk 2 but were never
+  attached to a real request — meaning a hung `POST /auth/refresh/` (a
+  backend stall, a proxy silently dropping the response, ...) would have
+  left `AuthProvider` in `"loading"` forever, with no failure to ever
+  classify as `"uncertain"` in the first place. Fixed by wiring
+  `withTimeout(DEFAULT_TIMEOUT_MS)` into `ensureFreshAccessToken()`'s
+  refresh call (`session.ts`); verified against a real abort (not a
+  simulated error) in `auth-provider.test.tsx`'s "B. initial bootstrap
+  timeout" test, using a test-only timeout override
+  (`__setRefreshTimeoutMsForTests`) rather than waiting out the real 15s in
+  every test run.
 
 ## Known defects fixed during Chunk 2A
 
