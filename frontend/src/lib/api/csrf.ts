@@ -13,6 +13,7 @@
 import { apiClient, CSRF_COOKIE_NAME } from "@/lib/api/client";
 import { ApiError } from "@/lib/api/errors";
 import { unwrap } from "@/lib/api/request";
+import { assertCsrfHostnameCompatible } from "@/lib/api/topology";
 import { getCookie } from "@/lib/cookies";
 
 /**
@@ -21,6 +22,8 @@ import { getCookie } from "@/lib/cookies";
  * network-wise once the cookie already exists.
  */
 export async function ensureCsrfCookie(): Promise<string> {
+  assertCsrfHostnameCompatible();
+
   const existing = getCookie(CSRF_COOKIE_NAME);
   if (existing) {
     return existing;
