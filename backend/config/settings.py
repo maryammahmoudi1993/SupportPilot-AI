@@ -207,6 +207,18 @@ env = environ.Env(
     AGENTS_STUCK_RUN_PENDING_STALE_SECONDS=(int, 120),
     EVALUATIONS_STUCK_RUN_PENDING_STALE_SECONDS=(int, 120),
     EVALUATIONS_STUCK_CASE_PENDING_STALE_SECONDS=(int, 120),
+    # Phase 17 final acceptance gate (Part B, second pass): a fourth gap of
+    # the same "lost initial dispatch" shape as the three above — a
+    # decision (approve/reject/expire) dispatches
+    # ``resume_approved_action_task`` via its own ``transaction.on_commit``;
+    # if that publish is lost, the AgentRun stays WAITING_FOR_APPROVAL
+    # forever even though the gating ApprovalRequest already reached a
+    # terminal decision, with no manual API path to re-decide it. Measured
+    # from the approval's own ``resolved_at`` (when the decision was made),
+    # not from run staleness — safe at a short threshold for the same
+    # reason as the other PENDING-dispatch thresholds above: redispatch is
+    # a resume-claim no-op if it already succeeded. See agents/recovery.py.
+    AGENTS_STUCK_RUN_WAITING_FOR_APPROVAL_STALE_SECONDS=(int, 120),
     # Phase 17: Celery Beat cadence for the two sweeps above — how often we
     # *inspect*, deliberately separate from ``*_STUCK_RUN_STALE_SECONDS``
     # (how old a run must be before recovery). Mirrors
@@ -701,6 +713,9 @@ EVALUATIONS_STUCK_RUN_SWEEP_INTERVAL_SECONDS = env("EVALUATIONS_STUCK_RUN_SWEEP_
 AGENTS_STUCK_RUN_PENDING_STALE_SECONDS = env("AGENTS_STUCK_RUN_PENDING_STALE_SECONDS")
 EVALUATIONS_STUCK_RUN_PENDING_STALE_SECONDS = env("EVALUATIONS_STUCK_RUN_PENDING_STALE_SECONDS")
 EVALUATIONS_STUCK_CASE_PENDING_STALE_SECONDS = env("EVALUATIONS_STUCK_CASE_PENDING_STALE_SECONDS")
+AGENTS_STUCK_RUN_WAITING_FOR_APPROVAL_STALE_SECONDS = env(
+    "AGENTS_STUCK_RUN_WAITING_FOR_APPROVAL_STALE_SECONDS"
+)
 
 if AGENTS_STUCK_RUN_SWEEP_INTERVAL_SECONDS <= 0:
     raise ValueError("AGENTS_STUCK_RUN_SWEEP_INTERVAL_SECONDS must be positive")
@@ -712,6 +727,8 @@ if EVALUATIONS_STUCK_RUN_PENDING_STALE_SECONDS <= 0:
     raise ValueError("EVALUATIONS_STUCK_RUN_PENDING_STALE_SECONDS must be positive")
 if EVALUATIONS_STUCK_CASE_PENDING_STALE_SECONDS <= 0:
     raise ValueError("EVALUATIONS_STUCK_CASE_PENDING_STALE_SECONDS must be positive")
+if AGENTS_STUCK_RUN_WAITING_FOR_APPROVAL_STALE_SECONDS <= 0:
+    raise ValueError("AGENTS_STUCK_RUN_WAITING_FOR_APPROVAL_STALE_SECONDS must be positive")
 
 # Phase 16 Checkpoint 2A (Part C, section 14/16): a hard-coded, documented
 # floor derived from AgentVersion's own serializer ceilings

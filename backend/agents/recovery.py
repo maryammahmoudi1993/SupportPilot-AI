@@ -56,9 +56,12 @@ logger = logging.getLogger("supportpilot")
 
 def recover_stuck_agent_runs(*, batch_size: int | None = None, now=None) -> int:
     """Fail ``AgentRun`` rows left ``RUNNING`` past the staleness threshold,
-    and re-publish rows left ``PENDING`` past a much shorter threshold (Phase
-    17 final acceptance gate, Part B — see ``_redispatch_stuck_pending_runs``
-    for why that second case is a distinct, and distinctly safer, recovery).
+    re-publish rows left ``PENDING`` past a much shorter threshold, and
+    re-publish rows left ``WAITING_FOR_APPROVAL`` whose gating approval is
+    already decided (Phase 17 final acceptance gate, Part B — see
+    ``_redispatch_stuck_pending_runs``/``_redispatch_stuck_waiting_for_approval_runs``
+    for why these are distinct, and distinctly safer, recoveries than the
+    RUNNING case).
 
     Returns the number of runs actually recovered/re-published. Safe to call
     repeatedly and from multiple concurrent workers/schedulers: each
@@ -86,7 +89,60 @@ def recover_stuck_agent_runs(*, batch_size: int | None = None, now=None) -> int:
         )
         observe_stuck_run_recovery(domain="agent", count=recovered)
     recovered += _redispatch_stuck_pending_runs(batch_size=batch_size, now=now)
+    recovered += _redispatch_stuck_waiting_for_approval_runs(batch_size=batch_size, now=now)
     return recovered
+
+
+def _redispatch_stuck_waiting_for_approval_runs(*, batch_size: int, now) -> int:
+    """A decision (approve/reject/expire) dispatches
+    ``resume_approved_action_task`` via its own ``transaction.on_commit`` —
+    if that single publish is lost, the ``AgentRun`` stays
+    ``WAITING_FOR_APPROVAL`` forever even though the gating
+    ``ApprovalRequest`` already reached a terminal decision, and no manual
+    API path exists to re-decide an already-resolved approval. Re-publishing
+    is safe: ``agents.services._claim_run_for_resume`` makes a
+    second/redelivered resume call a no-op (see
+    ``approvals/tasks.py``'s docstring). Deliberately excludes ``cancelled``
+    approvals — those are the terminal outcome of the *run itself* already
+    being cancelled through a different path (``cancel_approval_for_execution``
+    never dispatches a resume), so there is nothing to redispatch for one.
+    """
+    from approvals.models import ApprovalStatus
+
+    pending_cutoff = now - timedelta(
+        seconds=settings.AGENTS_STUCK_RUN_WAITING_FOR_APPROVAL_STALE_SECONDS
+    )
+    candidates = list(
+        AgentRun.objects.filter(
+            status=AgentRunStatus.WAITING_FOR_APPROVAL,
+            tool_executions__approval_request__status__in=(
+                ApprovalStatus.APPROVED,
+                ApprovalStatus.REJECTED,
+                ApprovalStatus.EXPIRED,
+            ),
+            tool_executions__approval_request__resolved_at__lte=pending_cutoff,
+        )
+        .order_by("updated_at")
+        .values_list("tool_executions__approval_request__id", flat=True)[:batch_size]
+    )
+    for approval_id in candidates:
+        _redispatch_resume(approval_id)
+    if candidates:
+        logger.info(
+            "agents_stuck_waiting_for_approval_run_redispatched",
+            extra={
+                "event": "agents_stuck_waiting_for_approval_run_redispatched",
+                "count": len(candidates),
+            },
+        )
+        observe_stuck_run_recovery(domain="agent_approval_resume_dispatch", count=len(candidates))
+    return len(candidates)
+
+
+def _redispatch_resume(approval_id) -> None:
+    from approvals.services import _dispatch_resume
+
+    _dispatch_resume(approval_id)
 
 
 def _redispatch_stuck_pending_runs(*, batch_size: int, now) -> int:

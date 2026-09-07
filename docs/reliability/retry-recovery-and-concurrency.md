@@ -215,6 +215,27 @@ lock, exactly like `process_claimed_delivery`. New Beat schedule entry:
 `recover-stuck-knowledge-ingestion-jobs`
 (`knowledge.tasks.recover_stuck_ingestion_jobs_task`).
 
+**A fourth gap of the same "lost initial dispatch" shape as the PENDING
+cases above, one level further into the approval flow:** a decision
+(approve/reject/expire) dispatches `resume_approved_action_task` via its
+own `transaction.on_commit` (`approvals.services._dispatch_resume`) — if
+that single publish is lost, the `AgentRun` stays `WAITING_FOR_APPROVAL`
+forever even though its gating `ApprovalRequest` already reached a terminal
+decision, and no manual API path exists to re-decide an already-resolved
+approval (`decide_approval` only accepts a `PENDING` row). Closed the same
+way: `agents.recovery._redispatch_stuck_waiting_for_approval_runs` finds
+`AgentRun` rows `WAITING_FOR_APPROVAL` whose gating approval is `approved`/
+`rejected`/`expired` (deliberately excluding `cancelled` — that outcome
+means the run itself was already cancelled through a different path, which
+never dispatches a resume) and past `resolved_at` +
+`AGENTS_STUCK_RUN_WAITING_FOR_APPROVAL_STALE_SECONDS` (120s default),
+re-publishing the resume via the same `_dispatch_resume` boundary — safe
+because `agents.services._claim_run_for_resume` makes a second/redelivered
+resume call a no-op. Also folded into the existing
+`recover_stuck_agent_runs()` entry point and Beat schedule — no new
+scheduled task needed. See
+`agents/tests/test_recovery.py::TestRedispatchStuckWaitingForApprovalRuns`.
+
 **External side-effect window (Phase 16 Checkpoint 2A, section 15) — read
 carefully, this is a real, named gap, not a solved problem.** What the
 lock-then-recheck fencing above actually proves is narrower than "recovery
