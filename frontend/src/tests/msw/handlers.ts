@@ -29,6 +29,21 @@ export const FIXTURE_USER = {
   workspaces: [] as unknown[],
 };
 
+/** A well-formed `/me/.workspaces` entry (accounts/serializers.py `WorkspaceMembershipSummarySerializer`). */
+export const FIXTURE_WORKSPACE_ACME = {
+  id: "5c4d0c9e-6c0a-4b0a-9f0e-1234567890ab",
+  name: "Acme Support",
+  slug: "acme-support",
+  role: "support_agent",
+};
+
+export const FIXTURE_WORKSPACE_GLOBEX = {
+  id: "9f3b2a11-7d5e-4c9a-8b21-abcdef012345",
+  name: "Globex Support",
+  slug: "globex-support",
+  role: "admin",
+};
+
 /** Mutable mock server state, reset between tests via `resetAuthMockState()`. */
 export const mockState = {
   refreshCookieValid: false,
@@ -51,6 +66,7 @@ export const mockState = {
 };
 
 export function resetAuthMockState(): void {
+  FIXTURE_USER.workspaces = [];
   mockState.refreshCookieValid = false;
   mockState.currentAccessToken = null;
   mockState.refreshCallCount = 0;
