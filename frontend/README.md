@@ -136,8 +136,8 @@ Neither gap was worked around by changing backend code in Phase 18 — see
   an `openapi-fetch` `{ data, error, response }` result into throw-on-failure
   form. Long-running or upload endpoints should pass their own timeout
   rather than inherit the default.
-- **`token-store.ts` / `csrf.ts` / `session.ts`** — see "Authentication"
-  below.
+- **`token-store.ts` / `csrf.ts` / `session.ts` / `topology.ts` /
+  `logout-intent.ts`** — see "Authentication" below.
 
 ## Design system
 
@@ -170,9 +170,9 @@ Copy `.env.example` to `.env.local` for local development:
 cp .env.example .env.local
 ```
 
-| Variable                   | Required | Notes                                                                                                                                                                                 |
-| -------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `NEXT_PUBLIC_API_BASE_URL` | Yes      | Backend **origin only** (no `/api/v1` suffix — see "API transport" above), e.g. `http://localhost:8000`. Read and validated (fails fast if missing/malformed) in `src/lib/config.ts`. |
+| Variable                   | Required | Notes                                                                                                                                                                                                                                                                                                                      |
+| -------------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `NEXT_PUBLIC_API_BASE_URL` | Yes      | Backend **origin only** (no `/api/v1` suffix — see "API transport" above), e.g. `http://localhost:8000`. Must share the browser's hostname (see "Cookie semantics" in "Authentication") — a runtime guard throws a clear error if it doesn't. Read and validated (fails fast if missing/malformed) in `src/lib/config.ts`. |
 
 Every variable exposed to the browser is prefixed `NEXT_PUBLIC_`; nothing
 else is read from `process.env` in client code. No backend secret is ever
@@ -279,13 +279,39 @@ unauthenticated/error state.
 
 ### Logout
 
-`logout()` (`src/features/auth/api.ts`) always clears the in-memory access
-token in a `finally`, even if the server-side `POST /auth/logout/` call
-fails (network outage, already-expired session, ...) — a user must never
-be stuck looking logged in because a network request failed. The server
-call is still attempted first (best-effort revocation of the refresh
-token), its failure is just not allowed to block the local, user-visible
-result.
+`logout()` (`src/features/auth/api.ts`) clears the in-memory access token
+as its very first statement — before the network call even starts — so
+privileged UI disappears immediately regardless of what happens next. It
+does **not** claim the server session is definitely gone: `logout()`
+returns `"complete"` only if `POST /auth/logout/` actually succeeded, or
+`"server_unconfirmed"` if that request failed (network outage, CSRF
+hiccup, server error, ...). **The frontend never states "you are signed
+out" as an unqualified fact when the server call failed** — the refresh
+cookie may still be valid server-side until it naturally expires (7 days)
+or a later attempt succeeds.
+
+On `"server_unconfirmed"`, a non-secret boolean marker
+(`src/lib/api/logout-intent.ts`, `localStorage["sp_logout_pending"]` — a
+flag, never a credential) is set. `AuthProvider`'s `logoutPending` field
+surfaces it, and the login page shows an explicit "sign-out not fully
+confirmed" notice rather than silently pretending the session ended. The
+marker also changes what the _next_ bootstrap does: instead of going
+straight to `fetchCurrentUser()` (which would happily re-authenticate
+using the still-technically-valid refresh cookie), `AuthProvider` retries
+`logout()` first. Only once that retry actually succeeds does bootstrap
+fall through to the normal authenticated/unauthenticated check — a reload
+can never silently undo a logout the user asked for, even if the first
+attempt's network call failed. The marker clears on that later success,
+or immediately if the user chooses to log back in instead (a fresh login
+supersedes the old session it replaces).
+
+`localStorage` (not `sessionStorage`) was chosen deliberately: the
+marker's entire purpose is to survive a reload and be visible to other
+tabs, which is exactly what `sessionStorage`'s per-tab scoping would
+defeat. No `storage` event listener was added for live cross-tab
+push — each tab re-checks the marker at its own next bootstrap, which
+closes the actual gap (reload silently re-authenticating) without the
+complexity of real-time synchronization.
 
 ### Redirect safety
 
@@ -295,6 +321,41 @@ validate the login page's `?next=` param: only a root-relative path
 a backslash variant some browsers normalize to one (`/\evil`), or any
 target containing whitespace/control characters is rejected in favor of the
 default (`/`). See `src/tests/features/auth/redirect.test.ts`.
+
+### Cookie semantics
+
+Three different things get conflated in casual discussion of cookies, and
+this codebase must not conflate them either — each governs something
+different, and only one of them actually matters for this frontend's CSRF
+design:
+
+| Term                  | Governs                                                        | Scope                                                                                                         |
+| --------------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| **Origin**            | Which requests count as "cross-origin" for CORS                | scheme + host + port                                                                                          |
+| **Site** (`SameSite`) | Whether the browser **sends** a cookie on a given request      | registrable domain (eTLD+1), ignoring scheme/port                                                             |
+| **Cookie `Domain`**   | Whether **JavaScript can read** a cookie via `document.cookie` | exact hostname match, unless the cookie explicitly sets a shared parent `Domain` (e.g. `Domain=.example.com`) |
+
+This frontend's CSRF flow needs the **third** one: `client.ts`'s request
+middleware reads the `sp_csrftoken` cookie's value out of `document.cookie`
+to send as the `X-CSRFToken` header (see "Authentication" above). The
+backend sets that cookie with **no explicit `CSRF_COOKIE_DOMAIN`**
+(confirmed directly in `backend/config/settings.py` — grepped, not
+assumed), making it a **host-only** cookie, readable only by JavaScript
+running on the exact host that received it. The refresh cookie is the
+same way (no `Domain` in `accounts/services.py:set_refresh_cookie`) —
+though since the frontend never reads it, only "site" (for `SameSite`)
+matters for that one, not hostname.
+
+**Consequence**: an `app.example.com` frontend calling an
+`api.example.com` backend is same-_site_ (fine for `SameSite=Lax` cookie
+_sending_) but a **different hostname** — frontend JavaScript on
+`app.example.com` cannot read a cookie `api.example.com` set with no
+`Domain`. An earlier draft of this document called sibling subdomains
+sufficient for production; that was wrong, conflating "same site" with
+"cookie readable here", and has been corrected below.
+`localhost:3000`/`localhost:8000` work in local dev for an unrelated
+reason: cookie scoping ignores port entirely, and both share the literal
+hostname `localhost` — not because they're "the same site".
 
 ### Browser/backend topology
 
@@ -314,27 +375,62 @@ redirect once resolved) — a UX behavior, not a security boundary; the
 backend's own 401/403 responses remain the actual authorization enforcement,
 exactly as "Frontend authorization" below states.
 
-- **Local development**: frontend on `localhost:3000`, backend on
-  `localhost:8000` — different origins, but both already present in the
-  backend's default `CORS_ALLOWED_ORIGINS`/`CSRF_TRUSTED_ORIGINS`
-  (`backend/config/settings.py`). Verified against the real backend (not
-  just mocks) during Chunk 2: CSRF priming, login, `/me/`, refresh
-  (rotation confirmed — old and new access tokens differ), and logout
-  (confirmed the refresh cookie stops working afterward) all round-tripped
-  correctly over `curl` against a live `runserver` + the project's Postgres/
-  Redis containers.
-- **Production**: the backend's own `.env.production.example` models a
-  single frontend origin (`CORS_ALLOWED_ORIGINS`/`CSRF_TRUSTED_ORIGINS` =
-  `https://app.example.com`). This works as long as the frontend and
-  backend are deployed as **subdomains of the same registrable domain**
-  (e.g. `app.example.com` / `api.example.com`) — the refresh cookie's
-  `SameSite=Lax` is sent on a cross-_origin_ but same-_site_ request (same
-  eTLD+1), which is what makes that cross-origin-but-same-site setup work
-  without loosening `SameSite` to `None`. If the frontend and backend were
-  ever deployed on genuinely different registrable domains, the refresh
-  cookie would stop being sent on the frontend's requests entirely — that
-  would be a real, load-bearing backend/deployment decision, not a
-  frontend-only fix, and is flagged here rather than silently assumed away.
+`src/lib/api/topology.ts`'s `assertCsrfHostnameCompatible()` enforces the
+hostname-match invariant above at runtime, in the browser only (a no-op
+during SSR/build, where there's no `window.location` yet and nothing
+CSRF-dependent has run either): before priming/reading the CSRF cookie, it
+compares `NEXT_PUBLIC_API_BASE_URL`'s hostname against
+`window.location.hostname` (hostname only — ports may legitimately differ
+locally) and throws a clear, specific error if they don't match, rather
+than letting the CSRF flow fail with an opaque "unable to establish a
+secure session" deep in a network call. See
+`src/tests/lib/api/topology.test.ts`.
+
+**Local development** (this repo's default): frontend
+`http://localhost:3000`, backend `http://localhost:8000` — different
+_origins_ (different ports) but the **same hostname** (`localhost`), which
+is what actually makes the CSRF cookie readable. Both origins are already
+present in the backend's default `CORS_ALLOWED_ORIGINS`/`CSRF_TRUSTED_ORIGINS`
+(`backend/config/settings.py`). Verified against the real backend (not
+just mocks) during Chunk 2: CSRF priming, login, `/me/`, refresh (rotation
+confirmed — old and new access tokens differ), and logout (confirmed the
+refresh cookie stops working afterward) all round-tripped correctly over
+`curl` against a live `runserver` + the project's Postgres/Redis
+containers.
+
+**Production**: the preferred, backend-change-free topology is **same
+browser-facing hostname**, split by path via an external reverse
+proxy/load balancer this repository doesn't own or package (consistent
+with the Phase 17 deployment boundary — the repo doesn't ship the public
+TLS proxy, and forwarding headers must be sanitized by whatever does):
+
+```text
+https://supportpilot.example.com/            → frontend
+https://supportpilot.example.com/api/v1/     → Django backend
+```
+
+(`supportpilot.example.com` is a documentation-only illustration — never
+put a real domain in committed config.) With this topology,
+`NEXT_PUBLIC_API_BASE_URL` is simply the one shared hostname
+(`https://supportpilot.example.com`); the generated OpenAPI paths are
+already absolute (`/api/v1/...`), so the final request URL is
+`https://supportpilot.example.com/api/v1/...` — no doubled prefix, no
+extra configuration. The backend's `CORS_ALLOWED_ORIGINS`/
+`CSRF_TRUSTED_ORIGINS` need only that one origin.
+
+A sibling-subdomain deployment (`app.example.com` frontend,
+`api.example.com` backend — what the backend's own
+`.env.production.example` origin illustration might suggest at a glance)
+is **not** viable with the backend's current cookie configuration: it's
+same-_site_ (the refresh cookie would still be _sent_ correctly), but the
+CSRF cookie would not be _readable_ by the frontend's JavaScript (see
+"Cookie semantics" above), and every login/refresh/logout attempt would
+fail CSRF validation. Making that topology work would require a real
+backend change (`CSRF_COOKIE_DOMAIN=".example.com"` and equivalent on the
+refresh cookie) — out of scope here per this chunk's "don't change the
+backend unless the current contract makes secure integration actually
+impossible" constraint, since the same-hostname path-routing topology
+above already solves it without one.
 
 ## Local development
 
@@ -391,18 +487,29 @@ that cookie's value either way.
 
 Coverage: environment config validation; API error normalization
 (well-formed envelope, unknown error code, non-envelope body, network
-failure, timeout); the request-timeout helper; `apiClient`'s URL
-construction and Authorization/CSRF header attachment (client.test.ts, the
-regression test for the base-URL doubling defect below); the core UI
-primitives' accessibility semantics; and the full auth flow — login
-(success, invalid credentials, 429, network failure, duplicate-submission
-guard), session bootstrap (authenticated, unauthenticated, network-error
-classification), coordinated refresh (single refresh for N parallel 401s,
-retry-exactly-once, network-vs-invalid-session distinction), logout
-(including server-failure-still-clears-local-state), redirect-target
-safety, and that no auth secret ends up in `localStorage`/`sessionStorage`/
-a JS-readable cookie. Workspace-switching and full route-protection (beyond
-the single `/` placeholder) land with those features in later chunks.
+failure, timeout, and — added in Chunk 2A — that a `204 No Content`
+success is never mistaken for a parse error); the request-timeout helper;
+`apiClient`'s URL construction and Authorization/CSRF header attachment
+(client.test.ts, the regression test for the base-URL doubling defect
+below); the core UI primitives' accessibility semantics; the CSRF
+hostname-compatibility guard (`topology.test.ts` — matching hostname
+allowed for both local-dev and same-host-production shapes, mismatched
+hostnames rejected); and the full auth flow — login (success, invalid
+credentials, 429, network failure, duplicate-submission guard), session
+bootstrap (authenticated, unauthenticated, network-error classification),
+coordinated refresh (single refresh for N parallel 401s, retry-exactly-once,
+network-vs-invalid-session distinction), the full logout failure matrix
+(success; network failure clears local state immediately; network failure
+reports `"server_unconfirmed"` and sets the pending marker; a reload while
+still pending retries revocation instead of silently re-authenticating; a
+later successful attempt clears the marker; a fresh login also clears a
+stale marker; nothing resembling a token ever lands in `localStorage`),
+redirect-target safety, and that no auth _secret_ ends up in
+`localStorage`/`sessionStorage`/a JS-readable cookie (the one thing
+`localStorage` does legitimately hold — the boolean logout-pending flag —
+is asserted to never look like a token). Workspace-switching and full
+route-protection (beyond the single `/` placeholder) land with those
+features in later chunks.
 
 ## Security notes
 
@@ -412,14 +519,24 @@ coordination, CSRF, topology). Summary and explicit non-claims:
 - **Token storage**: access token in memory only (`token-store.ts`); refresh
   token never touched by frontend code (HttpOnly); CSRF cookie is
   necessarily JS-readable (inherent to the double-submit pattern, not a
-  choice this frontend made). Verified by
-  `src/tests/features/auth/no-token-leak.test.ts` and by manual inspection
-  during the real-backend smoke test (Chunk 2) — no auth secret ever landed
+  choice this frontend made). `localStorage` holds exactly one
+  auth-related value, and it is not a credential: a boolean
+  logout-confirmation marker (`logout-intent.ts`) that carries no token,
+  user identity, or other secret. Verified by
+  `src/tests/features/auth/no-token-leak.test.ts` (including that the
+  marker itself never resembles a token) and by manual inspection during
+  the real-backend smoke test (Chunk 2) — no auth _secret_ has ever landed
   in `localStorage`/`sessionStorage`.
 - **CSRF**: implemented per the backend's actual `enforce_csrf()` contract
   (`src/lib/api/csrf.ts`, `client.ts`'s CSRF middleware) — never disabled,
   never a wildcard trusted origin (that setting lives in the backend anyway,
-  not something this frontend could weaken).
+  not something this frontend could weaken). Its one real topology
+  requirement (frontend/backend must share a hostname — see "Cookie
+  semantics") is enforced at runtime (`topology.ts`), not just documented.
+- **Logout**: never stated as an unqualified guarantee — see "Logout"
+  above. The frontend distinguishes, and represents to the user, "signed
+  out locally" from "server revocation confirmed"; it does not claim the
+  stronger of the two when only the weaker is true.
 - **Frontend authorization**: the frontend never decides what a user is
   allowed to do. Hiding a control based on role/permission is a UX
   convenience only — the backend's own RBAC/tenant-scoping response (403/404)
@@ -437,6 +554,34 @@ coordination, CSRF, topology). Summary and explicit non-claims:
   claims are the ones above: no long-lived secret in persistent storage, no
   secret in a URL, and CSRF enforced per the backend's real contract, not
   bypassed.
+
+## Known defects fixed during Chunk 2A
+
+- **`unwrap()` treated a legitimate `204 No Content` as an error**: every
+  logout call was silently ending up in the `"server_unconfirmed"` branch
+  — including genuinely successful ones — because `unwrap()`
+  (`src/lib/api/request.ts`) treated _any_ response with no parsed `data`
+  as a parse failure. A `204` (what `POST /auth/logout/` actually returns)
+  legitimately has no body per HTTP semantics; Chunk 2's own logout tests
+  didn't catch this because they only asserted `status === "unauthenticated"`,
+  which was true either way (local state is cleared regardless of the
+  server outcome) — they never checked whether the server call itself had
+  actually succeeded. Fixed by special-casing `204`/`304`; regression-tested
+  in `src/tests/lib/api/request.test.ts` and the full logout matrix in
+  `src/tests/features/auth/logout.test.ts`.
+- **Sibling-subdomain production topology was documented as sufficient —
+  it isn't**: Chunk 2's README claimed `app.example.com` (frontend) /
+  `api.example.com` (backend) would work because they're same-_site_
+  (`SameSite=Lax` cookie sending). That's true but irrelevant to the
+  actual failure mode: the CSRF cookie's _readability_ by frontend
+  JavaScript is governed by its `Domain` attribute against the exact
+  hostname, not by site/SameSite — and the backend sets no `Domain`, so a
+  sibling-subdomain frontend could never read it, and every
+  login/refresh/logout would fail CSRF validation in that topology. See
+  "Cookie semantics" above for the corrected documentation, and
+  `assertCsrfHostnameCompatible()` (`topology.ts`) for the runtime guard
+  that now catches this class of misconfiguration explicitly instead of
+  letting it fail as an opaque CSRF error.
 
 ## Known defects fixed during Chunk 2
 
