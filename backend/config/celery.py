@@ -59,6 +59,18 @@ def _channel_ingress_sweep_interval_seconds() -> float:
     return float(settings.CHANNELS_INBOUND_SWEEP_INTERVAL_SECONDS)
 
 
+def _agents_stuck_run_sweep_interval_seconds() -> float:
+    from django.conf import settings
+
+    return float(settings.AGENTS_STUCK_RUN_SWEEP_INTERVAL_SECONDS)
+
+
+def _evaluations_stuck_run_sweep_interval_seconds() -> float:
+    from django.conf import settings
+
+    return float(settings.EVALUATIONS_STUCK_RUN_SWEEP_INTERVAL_SECONDS)
+
+
 # Phase 8 (section 45): a periodic sweep for approval requests whose
 # expires_at has passed while nobody decided them. Deliberately coarse —
 # expiry is also enforced synchronously on read/decide/resume (section 44),
@@ -92,5 +104,22 @@ app.conf.beat_schedule = {
     "recover-stuck-inbound-channel-events": {
         "task": "channel_ingress.tasks.recover_stuck_inbound_events_task",
         "schedule": _channel_ingress_sweep_interval_seconds(),
+    },
+    # Phase 17: stuck-worker recovery for AgentRun/EvaluationRun (Phase 16
+    # Checkpoint 2 Part C left wiring these to Phase 17 — see
+    # ``agents/recovery.py`` and ``evaluations/recovery.py``). Cadence is
+    # server-owned and configurable, independent of the staleness threshold
+    # each sweep applies (section 18: how often we inspect is not how old
+    # something must be before recovery) — both tasks recover by failing,
+    # never by re-executing, so running them from more than one Beat
+    # instance is safe (each candidate row is only ever recovered once
+    # under its own row lock).
+    "recover-stuck-agent-runs": {
+        "task": "agents.tasks.recover_stuck_agent_runs_task",
+        "schedule": _agents_stuck_run_sweep_interval_seconds(),
+    },
+    "recover-stuck-evaluation-runs": {
+        "task": "evaluations.tasks.recover_stuck_evaluation_runs_task",
+        "schedule": _evaluations_stuck_run_sweep_interval_seconds(),
     },
 }

@@ -189,6 +189,13 @@ env = environ.Env(
     AGENTS_STUCK_RUN_SWEEP_BATCH_SIZE=(int, 100),
     EVALUATIONS_STUCK_RUN_STALE_SECONDS=(int, 3600),
     EVALUATIONS_STUCK_RUN_SWEEP_BATCH_SIZE=(int, 100),
+    # Phase 17: Celery Beat cadence for the two sweeps above — how often we
+    # *inspect*, deliberately separate from ``*_STUCK_RUN_STALE_SECONDS``
+    # (how old a run must be before recovery). Mirrors
+    # ``DELIVERY_SWEEP_INTERVAL_SECONDS``'s pattern; a default well under the
+    # 1800s safe floor on staleness so the sweep can never redefine it.
+    AGENTS_STUCK_RUN_SWEEP_INTERVAL_SECONDS=(float, 300.0),
+    EVALUATIONS_STUCK_RUN_SWEEP_INTERVAL_SECONDS=(float, 300.0),
     # Phase 14 (Section 3): the public message-history poll has no page
     # parameter of its own (the `after` cursor already bounds incremental
     # polling) — this caps a single call so a widget re-opening a very long
@@ -635,13 +642,20 @@ CHANNELS_INBOUND_SWEEP_STALE_SECONDS = env("CHANNELS_INBOUND_SWEEP_STALE_SECONDS
 CHANNELS_INBOUND_SWEEP_INTERVAL_SECONDS = env("CHANNELS_INBOUND_SWEEP_INTERVAL_SECONDS")
 
 # Stuck-worker recovery (Phase 16 Checkpoint 2 Part C) — see
-# ``agents/recovery.py`` and ``evaluations/recovery.py``. No Celery Beat
-# schedule is wired for these yet (Phase 17 packaging concern); the settings
-# exist so the sweep functions themselves are correct and testable now.
+# ``agents/recovery.py`` and ``evaluations/recovery.py``. Phase 17 wires a
+# Celery Beat schedule for both (``config/celery.py``'s ``beat_schedule``)
+# using the interval settings below.
 AGENTS_STUCK_RUN_STALE_SECONDS = env("AGENTS_STUCK_RUN_STALE_SECONDS")
 AGENTS_STUCK_RUN_SWEEP_BATCH_SIZE = env("AGENTS_STUCK_RUN_SWEEP_BATCH_SIZE")
+AGENTS_STUCK_RUN_SWEEP_INTERVAL_SECONDS = env("AGENTS_STUCK_RUN_SWEEP_INTERVAL_SECONDS")
 EVALUATIONS_STUCK_RUN_STALE_SECONDS = env("EVALUATIONS_STUCK_RUN_STALE_SECONDS")
 EVALUATIONS_STUCK_RUN_SWEEP_BATCH_SIZE = env("EVALUATIONS_STUCK_RUN_SWEEP_BATCH_SIZE")
+EVALUATIONS_STUCK_RUN_SWEEP_INTERVAL_SECONDS = env("EVALUATIONS_STUCK_RUN_SWEEP_INTERVAL_SECONDS")
+
+if AGENTS_STUCK_RUN_SWEEP_INTERVAL_SECONDS <= 0:
+    raise ValueError("AGENTS_STUCK_RUN_SWEEP_INTERVAL_SECONDS must be positive")
+if EVALUATIONS_STUCK_RUN_SWEEP_INTERVAL_SECONDS <= 0:
+    raise ValueError("EVALUATIONS_STUCK_RUN_SWEEP_INTERVAL_SECONDS must be positive")
 
 # Phase 16 Checkpoint 2A (Part C, section 14/16): a hard-coded, documented
 # floor derived from AgentVersion's own serializer ceilings

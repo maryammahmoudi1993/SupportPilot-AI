@@ -6,9 +6,10 @@ Checkpoint 1 documented a real gap in
 left ``RUNNING`` by a worker that crashed mid-execution — with
 ``CELERY_TASK_ACKS_LATE`` unset and the task's ``max_retries=3`` inert (see
 that doc's Retry model section), such a row is stuck forever with no
-automated recovery path. This module closes the *logic* gap; wiring a
-periodic Celery Beat schedule to call it is deliberately left to Phase 17
-(see settings comment above ``AGENTS_STUCK_RUN_STALE_SECONDS``).
+automated recovery path. This module holds the recovery *logic*; the
+periodic Celery Beat schedule that calls it lives in
+``agents.tasks.recover_stuck_agent_runs_task`` and
+``config/celery.py``'s ``beat_schedule`` (Phase 17).
 
 Design choice — recover by failing, never by re-executing: a ``RUNNING``
 row's worker may already have called a tool with real-world side effects

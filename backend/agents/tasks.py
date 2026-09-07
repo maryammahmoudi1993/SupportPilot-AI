@@ -21,3 +21,15 @@ def execute_agent_run_task(self, run_id: str, correlation_id: str | None = None)
     # declared here so Celery's argument validation accepts it at dispatch
     # time (``_dispatch_run`` always passes it as a task kwarg).
     return execute_support_agent_run(run_id).status
+
+
+@shared_task(bind=True, base=CorrelatedTask, max_retries=0)
+def recover_stuck_agent_runs_task(self) -> int:
+    """Celery Beat wrapper (Phase 17) around ``agents.recovery
+    .recover_stuck_agent_runs`` — carries zero recovery logic of its own.
+    Safe to run from more than one Beat scheduler at once (each candidate
+    row is only ever recovered once under its own row lock; see that
+    module's docstring) and safe to invoke manually/out-of-band."""
+    from .recovery import recover_stuck_agent_runs
+
+    return recover_stuck_agent_runs()

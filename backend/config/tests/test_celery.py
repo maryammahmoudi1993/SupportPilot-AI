@@ -63,3 +63,65 @@ def test_recovery_sweeper_tasks_are_importable_and_registered_with_celery():
         recover_expired_delivery_claims_task.name
         == "notifications.tasks.recover_expired_delivery_claims_task"
     )
+
+
+# ---------------------------------------------------------------------------
+# Stuck-worker recovery sweepers (Phase 17): AgentRun/EvaluationRun recovery
+# logic was built in Phase 16 (agents/recovery.py, evaluations/recovery.py)
+# but deliberately left unscheduled — this closes that packaging gap.
+# ---------------------------------------------------------------------------
+
+
+def test_stuck_run_recovery_tasks_are_registered_in_beat_schedule():
+    schedule = app.conf.beat_schedule
+    assert (
+        schedule["recover-stuck-agent-runs"]["task"] == "agents.tasks.recover_stuck_agent_runs_task"
+    )
+    assert (
+        schedule["recover-stuck-evaluation-runs"]["task"]
+        == "evaluations.tasks.recover_stuck_evaluation_runs_task"
+    )
+
+
+def test_stuck_run_recovery_schedule_is_not_sub_second():
+    schedule = app.conf.beat_schedule
+    assert schedule["recover-stuck-agent-runs"]["schedule"] >= 1.0
+    assert schedule["recover-stuck-evaluation-runs"]["schedule"] >= 1.0
+
+
+def test_stuck_run_recovery_schedule_matches_the_configured_interval_setting(settings):
+    schedule = app.conf.beat_schedule
+    assert schedule["recover-stuck-agent-runs"]["schedule"] == float(
+        settings.AGENTS_STUCK_RUN_SWEEP_INTERVAL_SECONDS
+    )
+    assert schedule["recover-stuck-evaluation-runs"]["schedule"] == float(
+        settings.EVALUATIONS_STUCK_RUN_SWEEP_INTERVAL_SECONDS
+    )
+
+
+def test_stuck_run_sweep_interval_helpers_read_the_setting_live(settings):
+    from config.celery import (
+        _agents_stuck_run_sweep_interval_seconds,
+        _evaluations_stuck_run_sweep_interval_seconds,
+    )
+
+    settings.AGENTS_STUCK_RUN_SWEEP_INTERVAL_SECONDS = 45
+    assert _agents_stuck_run_sweep_interval_seconds() == 45.0
+    settings.AGENTS_STUCK_RUN_SWEEP_INTERVAL_SECONDS = 90
+    assert _agents_stuck_run_sweep_interval_seconds() == 90.0
+
+    settings.EVALUATIONS_STUCK_RUN_SWEEP_INTERVAL_SECONDS = 45
+    assert _evaluations_stuck_run_sweep_interval_seconds() == 45.0
+    settings.EVALUATIONS_STUCK_RUN_SWEEP_INTERVAL_SECONDS = 90
+    assert _evaluations_stuck_run_sweep_interval_seconds() == 90.0
+
+
+def test_stuck_run_recovery_tasks_are_importable_and_registered_with_celery():
+    from agents.tasks import recover_stuck_agent_runs_task
+    from evaluations.tasks import recover_stuck_evaluation_runs_task
+
+    assert recover_stuck_agent_runs_task.name == "agents.tasks.recover_stuck_agent_runs_task"
+    assert (
+        recover_stuck_evaluation_runs_task.name
+        == "evaluations.tasks.recover_stuck_evaluation_runs_task"
+    )

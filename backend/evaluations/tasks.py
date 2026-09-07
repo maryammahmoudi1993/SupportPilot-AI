@@ -28,3 +28,15 @@ def start_evaluation_run_task(self, run_id: str, correlation_id: str | None = No
 @shared_task(bind=True, base=CorrelatedTask, max_retries=3)
 def execute_evaluation_case_task(self, result_id: str, correlation_id: str | None = None):
     return execute_evaluation_case(result_id).status
+
+
+@shared_task(bind=True, base=CorrelatedTask, max_retries=0)
+def recover_stuck_evaluation_runs_task(self) -> int:
+    """Celery Beat wrapper (Phase 17) around ``evaluations.recovery
+    .recover_stuck_evaluation_runs`` — carries zero recovery logic of its
+    own. Safe to run from more than one Beat scheduler at once (each
+    candidate run is only ever recovered once under its own row lock; see
+    that module's docstring) and safe to invoke manually/out-of-band."""
+    from .recovery import recover_stuck_evaluation_runs
+
+    return recover_stuck_evaluation_runs()
