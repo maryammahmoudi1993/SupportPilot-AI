@@ -59,6 +59,10 @@ staticfiles/
 media/
 local_settings.py
 
+# Celery Beat (default database scheduler's runtime state file)
+celerybeat-schedule
+celerybeat.pid
+
 # Logs
 *.log
 logs/

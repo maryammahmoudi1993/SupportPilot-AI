@@ -65,5 +65,30 @@ services:
       redis:
         condition: service_healthy
 
+  celery_beat:
+    build:
+      context: ./backend
+    # Beat is a distinct process from the worker (never run inside it) so
+    # scheduling survives independently of worker restarts/scaling. Only
+    # one Beat instance should normally run per deployment (see
+    # docs/operations/deployment.md); every scheduled task it dispatches is
+    # itself idempotent, so an accidental second instance creates
+    # unnecessary load rather than data corruption.
+    command: celery -A config beat -l info
+    volumes:
+      - ./backend:/app
+    environment:
+      DEBUG: "True"
+      SECRET_KEY: dev-key-change-in-production
+      ALLOWED_HOSTS: localhost,127.0.0.1
+      DATABASE_URL: postgres://postgres:postgres@db:5432/supportpilot
+      REDIS_URL: redis://redis:6379/0
+      CACHE_URL: redis://redis:6379/1
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
 volumes:
   postgres_data:
