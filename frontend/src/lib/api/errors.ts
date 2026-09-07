@@ -102,16 +102,28 @@ export function normalizeHttpError(status: number, body: unknown): ApiError {
 }
 
 /**
- * True for a failure that means "we couldn't find out" (network unreachable,
- * timed out) as opposed to one that means "we found out, and the session is
- * genuinely invalid" (e.g. `authentication_failed` for a missing/expired
- * refresh token). Callers that need to tell "please retry" from "please log
- * in" — AuthProvider's bootstrap, WorkspaceProvider's derived status — key
- * off this rather than "is there an ApiError at all", since an ordinary
- * "no session yet" bootstrap also produces an ApiError.
+ * True for a failure that means "we couldn't find out whether the session is
+ * valid" (network unreachable, timed out, a malformed/unexpected response, a
+ * backend error unrelated to authentication, ...) as opposed to one that
+ * means "the backend told us, definitively, that there is no valid session"
+ * (`authentication_failed` — the one code `TokenRefreshCookieView`/JWT
+ * authentication actually returns for a missing/expired/invalid refresh
+ * token, per `accounts/views.py`).
+ *
+ * Deliberately conservative in the "uncertain" direction: only a definitive
+ * `authentication_failed` counts as confirmed-invalid. Every other outcome —
+ * `network_error`/`timeout` (the failure never reached the backend at all),
+ * but also e.g. `internal_server_error` or `parse_error` (the backend *did*
+ * respond, but not with an authentication verdict) — is treated the same
+ * way: "we don't know", never silently folded into "logged out". Callers
+ * that need to tell "please retry" from "please log in" — AuthProvider's
+ * bootstrap/mid-session-expiry handling, WorkspaceProvider's derived status —
+ * key off this rather than "is there an ApiError at all", since an ordinary
+ * "no session yet" bootstrap also produces an ApiError (with code
+ * `authentication_failed`, which correctly does NOT count as uncertain here).
  */
 export function isUncertainSessionError(error: ApiError): boolean {
-  return error.code === "network_error" || error.code === "timeout";
+  return error.code !== "authentication_failed";
 }
 
 /** Build an ApiError for a request that never got an HTTP response at all. */

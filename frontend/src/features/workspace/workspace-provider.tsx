@@ -14,13 +14,17 @@ import type { WorkspaceMembershipSummary } from "@/features/workspace/types";
 import type { ApiError } from "@/lib/api/errors";
 
 /**
- * "idle" — not authenticated (or auth hasn't resolved that far yet): there
- * is nothing to load, and this is distinct from "loading" or "error" so a
- * consumer never has to infer "not logged in" from an empty array.
- * "error" — the *session itself* couldn't be confirmed (a network/timeout
- * failure surfaced by AuthProvider — see its `error` field), so the
+ * "idle" — confirmed unauthenticated (or auth hasn't resolved that far
+ * yet): there is nothing to load, and this is distinct from "loading" or
+ * "error" so a consumer never has to infer "not logged in" from an empty
+ * array.
+ * "error" — `AuthStatus` is "uncertain": the session itself couldn't be
+ * *verified* (network/timeout/unexpected response — see
+ * `AuthStatus`'s doc comment in features/auth/auth-provider.tsx), so the
  * workspace list is unknown, not empty; never render "you have no
- * workspaces" for this case (see Part 34 of the Chunk 3 spec).
+ * workspaces" for this case (see Part 34 of the Chunk 3 spec, and Chunk 3A
+ * for why this must key off `auth.status`, not merely `auth.error` being
+ * non-null).
  * "empty" — the session is confirmed and the user genuinely has zero active
  * workspace memberships.
  * "ready" — at least one workspace is available; `activeWorkspace` is set.
@@ -101,10 +105,16 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const activeWorkspace =
     workspaces.find((workspace) => workspace.id === activeWorkspaceId) ?? null;
 
+  // Keyed off `auth.status` directly, not the incidental presence of
+  // `auth.error` — `AuthStatus` now has an explicit "uncertain" state for
+  // exactly this ("the session couldn't be verified") case, and routing
+  // workspace-load semantics through anything less direct than that is
+  // exactly the fragility Phase 18 Chunk 3A closed (see
+  // frontend/README.md, "Session state model").
   let status: WorkspaceStatus;
   if (auth.status === "loading") {
     status = "loading";
-  } else if (auth.error) {
+  } else if (auth.status === "uncertain") {
     status = "error";
   } else if (auth.status !== "authenticated") {
     status = "idle";

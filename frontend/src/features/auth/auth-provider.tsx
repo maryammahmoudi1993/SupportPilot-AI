@@ -17,21 +17,40 @@ import {
   logout as logoutRequest,
 } from "@/features/auth/api";
 import type { CurrentUser, LoginCredentials } from "@/features/auth/types";
-import { ApiError, isUncertainSessionError } from "@/lib/api/errors";
+import { ApiError, isUncertainSessionError, normalizeTransportError } from "@/lib/api/errors";
 import { isLogoutPending } from "@/lib/api/logout-intent";
 import { setSessionExpiredHandler } from "@/lib/api/token-store";
 
-export type AuthStatus = "loading" | "authenticated" | "unauthenticated";
+/**
+ * Four explicit states — not three plus an incidental error field. See
+ * README.md, "Session state model", for the full rationale; in short:
+ *
+ * - "loading": bootstrap/revalidate is in flight; render nothing privileged.
+ * - "authenticated": the backend confirmed a valid session.
+ * - "unauthenticated": the backend gave a *definitive* verdict of no valid
+ *   session (`authentication_failed` from bootstrap/refresh) — safe to
+ *   clear all privileged state and route to `/login`.
+ * - "uncertain": the session could not be *verified* — network failure,
+ *   timeout, or any backend response that isn't a definitive
+ *   authentication verdict (see `isUncertainSessionError` in
+ *   `lib/api/errors.ts`). This is NEVER treated as logged out: no redirect
+ *   to `/login`, no clearing of workspace state as if the account had zero
+ *   memberships. It is its own recoverable state with a `revalidate()`
+ *   ("Retry") path back to `"authenticated"` or forward to
+ *   `"unauthenticated"` once the backend can actually be asked.
+ */
+export type AuthStatus = "loading" | "authenticated" | "unauthenticated" | "uncertain";
 
 export interface AuthState {
   status: AuthStatus;
   user: CurrentUser | null;
   /**
-   * Set when the most recent bootstrap/revalidate attempt failed because
-   * the network was unreachable or timed out, rather than because the
-   * session was proven invalid — `status` is still "unauthenticated" (the
-   * safe default: never claim authenticated without proof), but a caller
-   * that wants to offer "Retry" instead of "please log in" can check this.
+   * Set only when `status === "uncertain"`, carrying the classified failure
+   * (network/timeout/unexpected-response/non-auth backend error) that made
+   * verification impossible — a caller rendering the uncertain-state UI can
+   * use it for a more specific message, but must never use its mere
+   * presence to imply "logged out" (that's what `status` is for). Always
+   * `null` for every other status.
    */
   error: ApiError | null;
   /**
@@ -97,31 +116,48 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (id !== requestId.current) {
         return;
       }
-      // Only an *uncertain* failure (network/timeout) is surfaced as
-      // `error` — an ordinary confirmed-invalid session (e.g. no refresh
-      // cookie at all, `authentication_failed`) is just "not logged in",
-      // not something to offer a "Retry" action for.
-      const apiError = err instanceof ApiError && isUncertainSessionError(err) ? err : null;
-      setState({ status: "unauthenticated", user: null, error: apiError, logoutPending: false });
+      // `unwrap()`/`session.ts` always normalize into an ApiError before it
+      // gets here — the `instanceof` fallback is defensive, not expected to
+      // ever take the `else` branch — but on the off chance it doesn't,
+      // "we don't know" (uncertain) is the safe default, never "logged out".
+      if (!(err instanceof ApiError) || isUncertainSessionError(err)) {
+        const apiError = err instanceof ApiError ? err : normalizeTransportError(err);
+        setState({ status: "uncertain", user: null, error: apiError, logoutPending: false });
+        return;
+      }
+      // A *definitive* backend verdict of no valid session (authentication_failed) —
+      // safe to treat as confirmed "not logged in".
+      setState({ status: "unauthenticated", user: null, error: null, logoutPending: false });
     }
   }, []);
 
   useEffect(() => {
     // A failed refresh discovered anywhere (e.g. mid-session, from a
-    // protected call other than /me/) drives the same transition bootstrap
-    // uses on an invalid session — one owner for "the session just ended".
+    // protected call other than /me/) drives the same authenticated ->
+    // uncertain/unauthenticated transition bootstrap's own catch block
+    // uses — one owner for "something about the session just changed",
+    // classifying the *same* way bootstrap does (see isUncertainSessionError):
+    // a definitive authentication_failed clears everything and this is a
+    // real logout; anything else (network/timeout/unexpected response) is
+    // "uncertain" — privileged content still comes down (this is not
+    // "authenticated" anymore, so ProtectedLayout unmounts the shell), but
+    // the user is never told they're logged out on the strength of a
+    // transport failure. See README.md, "Session state model".
     //
     // Only acts when we were actually authenticated: `ensureFreshAccessToken`
     // also fires this on the very first bootstrap's own refresh attempt (no
     // session ever existed yet), and clobbering that in-flight bootstrap's
-    // request id here would erase the network-vs-invalid-session
-    // classification it's about to commit itself.
-    setSessionExpiredHandler(() => {
+    // request id here would erase the classification it's about to commit
+    // itself.
+    setSessionExpiredHandler((error) => {
       setState((prev) => {
         if (prev.status !== "authenticated") {
           return prev;
         }
         requestId.current += 1; // invalidate any in-flight bootstrap/revalidate
+        if (isUncertainSessionError(error)) {
+          return { status: "uncertain", user: null, error, logoutPending: false };
+        }
         return { status: "unauthenticated", user: null, error: null, logoutPending: false };
       });
     });
