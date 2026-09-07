@@ -9,6 +9,7 @@ a crashed worker) rather than sleeping in real time, per the checkpoint's
 from __future__ import annotations
 
 from datetime import timedelta
+from unittest.mock import patch
 
 import pytest
 from django.utils import timezone
@@ -248,3 +249,53 @@ class TestRecoverStuckAgentRuns:
             AgentRun.objects.filter(pk__in=[r.pk for r in runs]).values_list("status", flat=True)
         )
         assert statuses == {AgentRunStatus.RUNNING, AgentRunStatus.FAILED}
+
+
+def _age_created(run: AgentRun, seconds: int) -> None:
+    AgentRun.objects.filter(pk=run.pk).update(
+        created_at=timezone.now() - timedelta(seconds=seconds)
+    )
+
+
+class TestRedispatchStuckPendingAgentRuns:
+    """Phase 17 final acceptance gate (Part B): a lost *initial* dispatch
+    message leaves a run PENDING forever, invisible to the RUNNING-only
+    sweep above — closed by re-publishing it, which is safe because nothing
+    has executed yet (unlike recovering a RUNNING row)."""
+
+    def test_fresh_pending_run_is_untouched(self):
+        run = AgentRunFactory(status=AgentRunStatus.PENDING)
+        _age_created(run, seconds=1)  # well under the default 120s threshold
+
+        with patch("agents.recovery._redispatch_run") as redispatch:
+            recovered = recover_stuck_agent_runs()
+
+        assert recovered == 0
+        redispatch.assert_not_called()
+        run.refresh_from_db()
+        assert run.status == AgentRunStatus.PENDING
+
+    def test_stale_pending_run_is_redispatched_not_failed(self):
+        run = AgentRunFactory(status=AgentRunStatus.PENDING)
+        _age_created(run, seconds=121)
+
+        with patch("agents.recovery._redispatch_run") as redispatch:
+            recovered = recover_stuck_agent_runs()
+
+        assert recovered == 1
+        redispatch.assert_called_once_with(run.id)
+        run.refresh_from_db()
+        # Never transitioned/failed by the sweep itself — only re-published;
+        # the real claim boundary (claim_agent_run) is what moves it.
+        assert run.status == AgentRunStatus.PENDING
+
+    def test_redispatch_calls_the_real_dispatch_boundary(self):
+        run = AgentRunFactory(status=AgentRunStatus.PENDING)
+        _age_created(run, seconds=121)
+
+        with patch("agents.tasks.execute_agent_run_task") as task:
+            recovered = recover_stuck_agent_runs()
+
+        assert recovered == 1
+        task.delay.assert_called_once()
+        assert task.delay.call_args.args[0] == str(run.id)

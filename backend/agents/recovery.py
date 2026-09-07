@@ -55,11 +55,15 @@ logger = logging.getLogger("supportpilot")
 
 
 def recover_stuck_agent_runs(*, batch_size: int | None = None, now=None) -> int:
-    """Fail ``AgentRun`` rows left ``RUNNING`` past the staleness threshold.
+    """Fail ``AgentRun`` rows left ``RUNNING`` past the staleness threshold,
+    and re-publish rows left ``PENDING`` past a much shorter threshold (Phase
+    17 final acceptance gate, Part B — see ``_redispatch_stuck_pending_runs``
+    for why that second case is a distinct, and distinctly safer, recovery).
 
-    Returns the number of runs actually recovered. Safe to call repeatedly
-    and from multiple concurrent workers/schedulers: each candidate row is
-    only ever recovered once (section 11 idempotency, race-safety below).
+    Returns the number of runs actually recovered/re-published. Safe to call
+    repeatedly and from multiple concurrent workers/schedulers: each
+    candidate row is only ever recovered once (section 11 idempotency,
+    race-safety below).
     """
     now = now or timezone.now()
     cutoff = now - timedelta(seconds=settings.AGENTS_STUCK_RUN_STALE_SECONDS)
@@ -81,7 +85,42 @@ def recover_stuck_agent_runs(*, batch_size: int | None = None, now=None) -> int:
             extra={"event": "agents_stuck_run_recovered", "count": recovered},
         )
         observe_stuck_run_recovery(domain="agent", count=recovered)
+    recovered += _redispatch_stuck_pending_runs(batch_size=batch_size, now=now)
     return recovered
+
+
+def _redispatch_stuck_pending_runs(*, batch_size: int, now) -> int:
+    """A run's *only* initial publish is the ``transaction.on_commit``
+    ``.delay()`` call in ``create_agent_run`` — if that message never
+    reaches a worker (broker outage at that exact moment), the row stays
+    ``PENDING`` forever: the RUNNING-only sweep above can never see it, since
+    it never reaches RUNNING without a worker claiming it first. Re-publishing
+    is exactly as safe as the first publish: ``claim_agent_run`` only ever
+    transitions a row out of PENDING once, under its own row lock, so no
+    side effect has happened yet — this never risks duplicating one, unlike
+    recovering a RUNNING row.
+    """
+    pending_cutoff = now - timedelta(seconds=settings.AGENTS_STUCK_RUN_PENDING_STALE_SECONDS)
+    run_ids = list(
+        AgentRun.objects.filter(status=AgentRunStatus.PENDING, created_at__lte=pending_cutoff)
+        .order_by("created_at")
+        .values_list("id", flat=True)[:batch_size]
+    )
+    for run_id in run_ids:
+        _redispatch_run(run_id)
+    if run_ids:
+        logger.info(
+            "agents_stuck_pending_run_redispatched",
+            extra={"event": "agents_stuck_pending_run_redispatched", "count": len(run_ids)},
+        )
+        observe_stuck_run_recovery(domain="agent_pending_dispatch", count=len(run_ids))
+    return len(run_ids)
+
+
+def _redispatch_run(run_id) -> None:
+    from .services import _dispatch_run
+
+    _dispatch_run(run_id)
 
 
 def _recover_one_stuck_run(run_id, *, cutoff, now) -> bool:

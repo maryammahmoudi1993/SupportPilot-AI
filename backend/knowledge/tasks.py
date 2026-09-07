@@ -22,3 +22,14 @@ def ingest_knowledge_document(self, job_id: str, correlation_id: str | None = No
             fail_ingestion(job_id, exc)
             return {"job_id": job_id, "status": "failed", "chunk_count": 0}
         raise self.retry(exc=exc, countdown=min(60, 2**self.request.retries)) from exc
+
+
+@shared_task(bind=True, base=CorrelatedTask, max_retries=0)
+def recover_stuck_ingestion_jobs_task(self) -> int:
+    """Celery Beat wrapper (Phase 17 final acceptance gate) around
+    ``knowledge.recovery.recover_stuck_ingestion_jobs`` — carries zero
+    recovery logic of its own, mirroring ``agents.tasks
+    .recover_stuck_agent_runs_task``."""
+    from .recovery import recover_stuck_ingestion_jobs
+
+    return recover_stuck_ingestion_jobs()

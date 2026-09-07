@@ -71,6 +71,12 @@ def _evaluations_stuck_run_sweep_interval_seconds() -> float:
     return float(settings.EVALUATIONS_STUCK_RUN_SWEEP_INTERVAL_SECONDS)
 
 
+def _knowledge_stuck_job_sweep_interval_seconds() -> float:
+    from django.conf import settings
+
+    return float(settings.KNOWLEDGE_STUCK_JOB_SWEEP_INTERVAL_SECONDS)
+
+
 # Phase 8 (section 45): a periodic sweep for approval requests whose
 # expires_at has passed while nobody decided them. Deliberately coarse —
 # expiry is also enforced synchronously on read/decide/resume (section 44),
@@ -121,5 +127,13 @@ app.conf.beat_schedule = {
     "recover-stuck-evaluation-runs": {
         "task": "evaluations.tasks.recover_stuck_evaluation_runs_task",
         "schedule": _evaluations_stuck_run_sweep_interval_seconds(),
+    },
+    # Phase 17 final acceptance gate (Part B): the task-durability inventory
+    # found KnowledgeIngestionJob was the one critical async workflow with a
+    # durable row but no periodic recovery path — see
+    # ``knowledge/recovery.py`` for why re-publishing is safe.
+    "recover-stuck-knowledge-ingestion-jobs": {
+        "task": "knowledge.tasks.recover_stuck_ingestion_jobs_task",
+        "schedule": _knowledge_stuck_job_sweep_interval_seconds(),
     },
 }

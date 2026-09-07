@@ -189,6 +189,24 @@ env = environ.Env(
     AGENTS_STUCK_RUN_SWEEP_BATCH_SIZE=(int, 100),
     EVALUATIONS_STUCK_RUN_STALE_SECONDS=(int, 3600),
     EVALUATIONS_STUCK_RUN_SWEEP_BATCH_SIZE=(int, 100),
+    # Phase 17 final acceptance gate (Part B): the task-durability inventory
+    # found a second, distinct gap alongside the crashed-RUNNING-worker case
+    # above — a run/case's *initial* dispatch (the ``transaction.on_commit``
+    # ``.delay()`` call made once, at creation, while still ``PENDING``) can
+    # itself be lost (broker outage at that exact moment), leaving a row
+    # that never reaches RUNNING and that the RUNNING-only sweep above can
+    # never see. Unlike recovering a RUNNING row (which must never silently
+    # re-execute — a crashed worker may have already caused a side effect),
+    # re-publishing a still-PENDING row's task is exactly as safe as its
+    # first publish: ``claim_agent_run``/``claim_evaluation_run`` only ever
+    # transition out of PENDING once, under a row lock, so no side effect
+    # has run yet. No 1800s floor applies here for that reason — claiming
+    # normally happens within milliseconds of dispatch, so a much shorter
+    # threshold is both safe and desirable for a customer waiting on a
+    # response. See agents/recovery.py, evaluations/recovery.py.
+    AGENTS_STUCK_RUN_PENDING_STALE_SECONDS=(int, 120),
+    EVALUATIONS_STUCK_RUN_PENDING_STALE_SECONDS=(int, 120),
+    EVALUATIONS_STUCK_CASE_PENDING_STALE_SECONDS=(int, 120),
     # Phase 17: Celery Beat cadence for the two sweeps above — how often we
     # *inspect*, deliberately separate from ``*_STUCK_RUN_STALE_SECONDS``
     # (how old a run must be before recovery). Mirrors
@@ -196,6 +214,19 @@ env = environ.Env(
     # 1800s safe floor on staleness so the sweep can never redefine it.
     AGENTS_STUCK_RUN_SWEEP_INTERVAL_SECONDS=(float, 300.0),
     EVALUATIONS_STUCK_RUN_SWEEP_INTERVAL_SECONDS=(float, 300.0),
+    # Phase 17 Chunk 4 (final acceptance gate, Part B): the final Celery
+    # task-durability inventory found ``KnowledgeIngestionJob`` was the one
+    # critical async workflow with a durable PostgreSQL row but no periodic
+    # recovery path — unlike agents/evaluations/channel_ingress/
+    # notifications, nothing ever re-publishes a job left ``queued`` (broker
+    # message lost before a worker ever claimed it) or ``processing`` past a
+    # crashed worker. ``run_ingestion`` (knowledge/services.py) already
+    # short-circuits on ``SUCCEEDED``, so re-dispatching a stuck job's id is
+    # exactly as safe as the notifications sweep's re-publish of a delivery
+    # id — see ``knowledge/recovery.py``.
+    KNOWLEDGE_STUCK_JOB_STALE_SECONDS=(int, 600),
+    KNOWLEDGE_STUCK_JOB_SWEEP_BATCH_SIZE=(int, 100),
+    KNOWLEDGE_STUCK_JOB_SWEEP_INTERVAL_SECONDS=(float, 300.0),
     # Phase 14 (Section 3): the public message-history poll has no page
     # parameter of its own (the `after` cursor already bounds incremental
     # polling) — this caps a single call so a widget re-opening a very long
@@ -247,16 +278,20 @@ SECRET_KEY = env("SECRET_KEY")
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = env("DEBUG")
 
-# Phase 17 Chunk 3 (section 31): the dev-only placeholder above must never
-# reach a real deployment. Outside DEBUG this is the same fail-fast pattern
-# as OBSERVABILITY_METRICS_TOKEN below — refuse to boot rather than sign
-# sessions/tokens with a publicly-known key.
+# Phase 17 Chunk 3/4 (section 31 / PHASE17-C4-01): the dev-only placeholder
+# above must never reach a real deployment, and neither must an empty value
+# (env("SECRET_KEY") returns "" for an explicitly-blank var — that is a
+# distinct case from "unset", which falls back to the dev default above).
+# Outside DEBUG this is the same fail-fast pattern as
+# OBSERVABILITY_METRICS_TOKEN below — refuse to boot rather than sign
+# sessions/tokens with a publicly-known or empty key.
 _DEV_ONLY_SECRET_KEY = "dev-key-change-in-production"
-if not DEBUG and SECRET_KEY == _DEV_ONLY_SECRET_KEY:
+if not DEBUG and (not SECRET_KEY or SECRET_KEY == _DEV_ONLY_SECRET_KEY):
     raise ValueError(
-        "SECRET_KEY must be set to a real, unique value outside DEBUG — the "
-        "dev-only default placeholder is publicly known and unsafe in any "
-        "real deployment."
+        "SECRET_KEY must be set to a real, unique value outside DEBUG — it "
+        "is currently unset/blank or left at the dev-only default "
+        "placeholder, which is publicly known and unsafe in any real "
+        "deployment."
     )
 
 ALLOWED_HOSTS = env("ALLOWED_HOSTS")
@@ -663,11 +698,20 @@ AGENTS_STUCK_RUN_SWEEP_INTERVAL_SECONDS = env("AGENTS_STUCK_RUN_SWEEP_INTERVAL_S
 EVALUATIONS_STUCK_RUN_STALE_SECONDS = env("EVALUATIONS_STUCK_RUN_STALE_SECONDS")
 EVALUATIONS_STUCK_RUN_SWEEP_BATCH_SIZE = env("EVALUATIONS_STUCK_RUN_SWEEP_BATCH_SIZE")
 EVALUATIONS_STUCK_RUN_SWEEP_INTERVAL_SECONDS = env("EVALUATIONS_STUCK_RUN_SWEEP_INTERVAL_SECONDS")
+AGENTS_STUCK_RUN_PENDING_STALE_SECONDS = env("AGENTS_STUCK_RUN_PENDING_STALE_SECONDS")
+EVALUATIONS_STUCK_RUN_PENDING_STALE_SECONDS = env("EVALUATIONS_STUCK_RUN_PENDING_STALE_SECONDS")
+EVALUATIONS_STUCK_CASE_PENDING_STALE_SECONDS = env("EVALUATIONS_STUCK_CASE_PENDING_STALE_SECONDS")
 
 if AGENTS_STUCK_RUN_SWEEP_INTERVAL_SECONDS <= 0:
     raise ValueError("AGENTS_STUCK_RUN_SWEEP_INTERVAL_SECONDS must be positive")
 if EVALUATIONS_STUCK_RUN_SWEEP_INTERVAL_SECONDS <= 0:
     raise ValueError("EVALUATIONS_STUCK_RUN_SWEEP_INTERVAL_SECONDS must be positive")
+if AGENTS_STUCK_RUN_PENDING_STALE_SECONDS <= 0:
+    raise ValueError("AGENTS_STUCK_RUN_PENDING_STALE_SECONDS must be positive")
+if EVALUATIONS_STUCK_RUN_PENDING_STALE_SECONDS <= 0:
+    raise ValueError("EVALUATIONS_STUCK_RUN_PENDING_STALE_SECONDS must be positive")
+if EVALUATIONS_STUCK_CASE_PENDING_STALE_SECONDS <= 0:
+    raise ValueError("EVALUATIONS_STUCK_CASE_PENDING_STALE_SECONDS must be positive")
 
 # Phase 16 Checkpoint 2A (Part C, section 14/16): a hard-coded, documented
 # floor derived from AgentVersion's own serializer ceilings
@@ -694,6 +738,15 @@ if EVALUATIONS_STUCK_RUN_STALE_SECONDS < _AGENT_RUN_STUCK_RECOVERY_SAFE_FLOOR_SE
         "through the same agent run-loop budgets as a normal AgentRun (see "
         "AGENTS_STUCK_RUN_STALE_SECONDS above)."
     )
+
+KNOWLEDGE_STUCK_JOB_STALE_SECONDS = env("KNOWLEDGE_STUCK_JOB_STALE_SECONDS")
+KNOWLEDGE_STUCK_JOB_SWEEP_BATCH_SIZE = env("KNOWLEDGE_STUCK_JOB_SWEEP_BATCH_SIZE")
+KNOWLEDGE_STUCK_JOB_SWEEP_INTERVAL_SECONDS = env("KNOWLEDGE_STUCK_JOB_SWEEP_INTERVAL_SECONDS")
+
+if KNOWLEDGE_STUCK_JOB_SWEEP_INTERVAL_SECONDS <= 0:
+    raise ValueError("KNOWLEDGE_STUCK_JOB_SWEEP_INTERVAL_SECONDS must be positive")
+if KNOWLEDGE_STUCK_JOB_STALE_SECONDS <= 0:
+    raise ValueError("KNOWLEDGE_STUCK_JOB_STALE_SECONDS must be positive")
 
 # Production observability (Phase 11 Block 1) — see ``observability/metrics.py``
 # and ``observability/views.py``. The metrics endpoint is deployment
