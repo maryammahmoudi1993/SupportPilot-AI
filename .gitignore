@@ -47,6 +47,7 @@ dmypy.json
 .env
 .env.local
 .env.*.local
+.env.production
 
 # Database
 *.db

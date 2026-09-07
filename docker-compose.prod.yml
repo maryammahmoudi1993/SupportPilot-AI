@@ -1,0 +1,131 @@
+# Production-like backend topology (Phase 17).
+#
+# This is a SEPARATE stack from the top-level docker-compose.yml, which
+# remains the development stack (runserver, bind-mounted source, DEBUG=True,
+# host-exposed PostgreSQL/Redis). This file never bind-mounts source, always
+# runs Gunicorn/Celery against the built image, keeps PostgreSQL/Redis off
+# the host network, and separates web/worker/beat/migrate into distinct
+# services/processes — never combined into one container.
+#
+# Usage (see docs/operations/deployment.md for the full runbook):
+#
+#   cp .env.production.example .env.production   # fill in real values
+#   docker compose -p supportpilot-prod --env-file .env.production \
+#     -f docker-compose.prod.yml build
+#   docker compose -p supportpilot-prod --env-file .env.production \
+#     -f docker-compose.prod.yml up -d db redis
+#   docker compose -p supportpilot-prod --env-file .env.production \
+#     -f docker-compose.prod.yml run --rm migrate
+#   docker compose -p supportpilot-prod --env-file .env.production \
+#     -f docker-compose.prod.yml up -d web worker beat
+#
+# A distinct project name (-p) keeps this stack's containers, network, and
+# volume fully separate from the development stack even when both are
+# launched from this same directory. `--env-file .env.production` serves
+# two purposes at once: it is the source Compose interpolates `${VAR}`
+# references in this file from, AND (via each service's own `env_file:`
+# below) the environment injected into each container — the same file
+# backs both, deliberately, so there is exactly one place to configure a
+# deployment.
+
+x-app-image: &app-image
+  build:
+    context: ./backend
+  image: supportpilot-backend:${IMAGE_TAG:-latest}
+
+x-app-env: &app-env
+  env_file:
+    - .env.production
+
+x-app-depends-on-migrated-stack: &app-depends-on-migrated-stack
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+    db:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    volumes:
+      - postgres_data_prod:/var/lib/postgresql/data
+    healthcheck:
+      # -U only names the role, never the password (section 9 — no
+      # credential in probe output/logs).
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    # No `ports:` — internal Compose network only (section 11). Publish a
+    # host port only for a deliberate, documented local-only override.
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    # No `ports:` — internal Compose network only (section 12).
+
+  # One-shot migration job (section 6-8): the single, explicit migration
+  # owner. web/worker/beat all depend on this exiting 0 first
+  # (`service_completed_successfully`) and never run migrations themselves
+  # — see backend/entrypoint.sh's own comment on why.
+  migrate:
+    <<: [*app-image, *app-env]
+    command: ["python", "manage.py", "migrate", "--noinput"]
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: "no"
+
+  web:
+    <<: [*app-image, *app-env, *app-depends-on-migrated-stack]
+    command:
+      [
+        "gunicorn",
+        "config.wsgi:application",
+        "--config",
+        "config/gunicorn_conf.py",
+        "--bind",
+        "0.0.0.0:8000",
+      ]
+    ports:
+      - "${WEB_PORT:-8000}:8000"
+    restart: unless-stopped
+
+  worker:
+    <<: [*app-image, *app-env, *app-depends-on-migrated-stack]
+    command:
+      [
+        "celery",
+        "-A",
+        "config",
+        "worker",
+        "-l",
+        "info",
+        "--concurrency=${CELERY_WORKER_CONCURRENCY:-2}",
+      ]
+    restart: unless-stopped
+
+  beat:
+    <<: [*app-image, *app-env, *app-depends-on-migrated-stack]
+    # Distinct long-lived process from worker (never run inside it) — see
+    # docker-compose.yml's celery_beat comment. Only one Beat instance
+    # should normally run per deployment; every scheduled task it
+    # dispatches is itself idempotent (see config/celery.py), so an
+    # accidental second instance creates unnecessary load, not corruption.
+    command: ["celery", "-A", "config", "beat", "-l", "info"]
+    restart: unless-stopped
+
+volumes:
+  postgres_data_prod:
