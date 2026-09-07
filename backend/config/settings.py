@@ -247,6 +247,18 @@ SECRET_KEY = env("SECRET_KEY")
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = env("DEBUG")
 
+# Phase 17 Chunk 3 (section 31): the dev-only placeholder above must never
+# reach a real deployment. Outside DEBUG this is the same fail-fast pattern
+# as OBSERVABILITY_METRICS_TOKEN below — refuse to boot rather than sign
+# sessions/tokens with a publicly-known key.
+_DEV_ONLY_SECRET_KEY = "dev-key-change-in-production"
+if not DEBUG and SECRET_KEY == _DEV_ONLY_SECRET_KEY:
+    raise ValueError(
+        "SECRET_KEY must be set to a real, unique value outside DEBUG — the "
+        "dev-only default placeholder is publicly known and unsafe in any "
+        "real deployment."
+    )
+
 ALLOWED_HOSTS = env("ALLOWED_HOSTS")
 
 # Application definition
