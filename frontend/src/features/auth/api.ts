@@ -9,17 +9,25 @@
 import { apiClient } from "@/lib/api/client";
 import { ensureCsrfCookie } from "@/lib/api/csrf";
 import { clearLogoutPending, markLogoutPending } from "@/lib/api/logout-intent";
-import { unwrap } from "@/lib/api/request";
+import { requestWithTimeout, withRequestTimeout } from "@/lib/api/request";
 import { withAccessTokenRetry } from "@/lib/api/session";
 import { setAccessToken } from "@/lib/api/token-store";
 
 import type { CurrentUser, LoginCredentials } from "@/features/auth/types";
 
+/**
+ * Every request here is bounded by `requestWithTimeout` (`lib/api/request.ts`)
+ * — a hung login/logout/`/me/` request must never leave the UI stuck
+ * indefinitely (a permanently-disabled submit button, an infinite spinner)
+ * just because the server never responds (see frontend/README.md, "Auth
+ * request timeout policy").
+ */
 export async function login(credentials: LoginCredentials): Promise<CurrentUser> {
   await ensureCsrfCookie();
-  const body = await unwrap(
+  const body = await requestWithTimeout((signal) =>
     apiClient.POST("/api/v1/auth/login/", {
       body: credentials,
+      signal,
     }),
   );
   setAccessToken(body.access);
@@ -52,16 +60,32 @@ export async function logout(): Promise<LogoutResult> {
   setAccessToken(null);
   try {
     await ensureCsrfCookie();
-    await unwrap(apiClient.POST("/api/v1/auth/logout/"));
+    await requestWithTimeout((signal) => apiClient.POST("/api/v1/auth/logout/", { signal }));
     clearLogoutPending();
     return "complete";
   } catch {
+    // A timeout lands here exactly like a network failure or a real server
+    // error: local state is already cleared (above, before any await), the
+    // server call's outcome is unknown, and that's precisely what
+    // "server_unconfirmed" means — no indefinite wait, and no separate
+    // timeout-specific branch needed.
     markLogoutPending();
     return "server_unconfirmed";
   }
 }
 
-/** Protected — goes through the coordinated refresh-and-retry-once flow. */
+/**
+ * Protected — goes through the coordinated refresh-and-retry-once flow.
+ * `withAccessTokenRetry` owns the `unwrap()` call (it needs the raw
+ * `{data,error,response}` shape to detect a 401 and retry), so this uses
+ * `withRequestTimeout` — the bounding half of `requestWithTimeout` without
+ * the unwrapping — rather than double-unwrapping. `callFactory` is invoked
+ * up to twice by `withAccessTokenRetry` (once, then once more after a
+ * refresh); each invocation gets its own bounded timeout window, not one
+ * shared budget across both attempts.
+ */
 export function fetchCurrentUser(): Promise<CurrentUser> {
-  return withAccessTokenRetry(() => apiClient.GET("/api/v1/auth/me/"));
+  return withAccessTokenRetry(() =>
+    withRequestTimeout((signal) => apiClient.GET("/api/v1/auth/me/", { signal })),
+  );
 }

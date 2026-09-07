@@ -48,6 +48,18 @@ export async function unwrap<T>(resultPromise: Promise<OpenApiFetchResult<T>>): 
 }
 
 /**
+ * Test-only: force every subsequent `withRequestTimeout`/`requestWithTimeout`
+ * call to use this timeout instead of whatever the caller requested — the
+ * one place a test shrinks a real request timeout, rather than each call
+ * site inventing its own override (see Phase 18 Chunk 3B's "centralize, don't
+ * copy timeout code"). `null` clears the override (the default).
+ */
+let timeoutOverrideMs: number | null = null;
+export function __setTimeoutOverrideForTests(ms: number | null): void {
+  timeoutOverrideMs = ms;
+}
+
+/**
  * Run `fn` with an AbortSignal that fires after `timeoutMs`, optionally
  * chained to a caller-provided signal (e.g. from a React Query cancellation
  * or a component unmount). Always cleans up its timer/listener afterwards.
@@ -57,10 +69,25 @@ export async function withRequestTimeout<T>(
   timeoutMs: number = DEFAULT_TIMEOUT_MS,
   callerSignal?: AbortSignal,
 ): Promise<T> {
-  const { signal, dispose } = withTimeout(timeoutMs, callerSignal);
+  const { signal, dispose } = withTimeout(timeoutOverrideMs ?? timeoutMs, callerSignal);
   try {
     return await fn(signal);
   } finally {
     dispose();
   }
+}
+
+/**
+ * The one request path every auth-critical call (login, refresh, logout,
+ * `/me/`, CSRF priming) goes through: a bounded, abortable request, unwrapped
+ * into throw-on-failure form. Centralizing `unwrap(withRequestTimeout(...))`
+ * here — rather than each call site composing the two — is what keeps the
+ * timeout wiring from being copy-pasted four times (see
+ * frontend/README.md, "Auth request timeout policy").
+ */
+export function requestWithTimeout<T>(
+  fn: (signal: AbortSignal) => Promise<OpenApiFetchResult<T>>,
+  timeoutMs?: number,
+): Promise<T> {
+  return unwrap(withRequestTimeout(fn, timeoutMs));
 }

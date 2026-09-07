@@ -12,14 +12,19 @@
  */
 import { apiClient, CSRF_COOKIE_NAME } from "@/lib/api/client";
 import { ApiError } from "@/lib/api/errors";
-import { unwrap } from "@/lib/api/request";
+import { requestWithTimeout } from "@/lib/api/request";
 import { assertCsrfHostnameCompatible } from "@/lib/api/topology";
 import { getCookie } from "@/lib/cookies";
 
 /**
  * Ensure the CSRF cookie is present, priming it via `GET /auth/csrf/` if
  * not. Safe to call before every login/refresh/logout request — a no-op
- * network-wise once the cookie already exists.
+ * network-wise once the cookie already exists. Bounded by the same request
+ * timeout as every other auth call (`requestWithTimeout`) — this used to be
+ * a hidden, unbounded pre-request every login/refresh/logout made, capable
+ * of hanging the whole flow even after refresh itself got a timeout (Phase
+ * 18 Chunk 3B). Centralized here, once, rather than each of login/refresh/
+ * logout needing to remember to bound their own CSRF-priming call.
  */
 export async function ensureCsrfCookie(): Promise<string> {
   assertCsrfHostnameCompatible();
@@ -29,7 +34,7 @@ export async function ensureCsrfCookie(): Promise<string> {
     return existing;
   }
 
-  await unwrap(apiClient.GET("/api/v1/auth/csrf/"));
+  await requestWithTimeout((signal) => apiClient.GET("/api/v1/auth/csrf/", { signal }));
 
   const primed = getCookie(CSRF_COOKIE_NAME);
   if (!primed) {

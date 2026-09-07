@@ -3,6 +3,7 @@ import "@testing-library/jest-dom/vitest";
 import { cleanup } from "@testing-library/react";
 import { afterAll, afterEach, beforeAll, beforeEach } from "vitest";
 
+import { __setTimeoutOverrideForTests } from "@/lib/api/request";
 import { __resetSessionForTests } from "@/lib/api/session";
 import { __resetTokenStoreForTests } from "@/lib/api/token-store";
 import { resetAuthMockState } from "@/tests/msw/handlers";
@@ -30,6 +31,7 @@ afterAll(() => server.close());
 beforeEach(() => {
   __resetTokenStoreForTests();
   __resetSessionForTests();
+  __setTimeoutOverrideForTests(null);
   resetAuthMockState();
   localStorage.clear();
   sessionStorage.clear();

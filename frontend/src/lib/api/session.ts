@@ -7,12 +7,11 @@
  * every caller while a refresh is already in flight awaits the same
  * promise instead of starting its own.
  */
-import { DEFAULT_TIMEOUT_MS, apiClient } from "@/lib/api/client";
+import { apiClient } from "@/lib/api/client";
 import { ensureCsrfCookie } from "@/lib/api/csrf";
 import { ApiError, normalizeTransportError } from "@/lib/api/errors";
-import { unwrap } from "@/lib/api/request";
+import { requestWithTimeout, unwrap } from "@/lib/api/request";
 import { notifySessionExpired, setAccessToken } from "@/lib/api/token-store";
-import { withTimeout } from "@/lib/api/timeout";
 
 /**
  * The backend's schema for `POST /api/v1/auth/refresh/` documents only the
@@ -32,12 +31,6 @@ export type RefreshResult = { ok: true } | { ok: false; error: ApiError };
 
 let refreshInFlight: Promise<RefreshResult> | null = null;
 
-/** Test-only: shrink the refresh timeout so a timeout can be exercised without a 15s real/fake-timer wait. */
-let refreshTimeoutMs: number = DEFAULT_TIMEOUT_MS;
-export function __setRefreshTimeoutMsForTests(ms: number): void {
-  refreshTimeoutMs = ms;
-}
-
 /**
  * Refresh the access token via the HttpOnly refresh cookie, coordinating
  * concurrent callers onto a single in-flight request. On success, updates
@@ -55,26 +48,29 @@ export function ensureFreshAccessToken(): Promise<RefreshResult> {
   }
 
   refreshInFlight = (async (): Promise<RefreshResult> => {
-    // Without this, a refresh request that never gets a response (the
-    // backend hangs, a proxy silently drops it, ...) leaves AuthProvider
-    // stuck in "loading" indefinitely — there would be no failure to
-    // classify as "uncertain" at all. `withTimeout`/`DEFAULT_TIMEOUT_MS`
-    // already existed for exactly this (see timeout.ts) but weren't wired
-    // into any real call before Phase 18 Chunk 3A; the resulting
-    // `AbortError` is what `normalizeTransportError` maps to a "timeout"
-    // ApiError, which `isUncertainSessionError` treats the same as a plain
-    // network failure — never as a confirmed invalid session.
-    const { signal, dispose } = withTimeout(refreshTimeoutMs);
     try {
+      // `ensureCsrfCookie()` bounds its own priming request internally
+      // (see csrf.ts) — this refresh call gets its own separate bounded
+      // window via `requestWithTimeout` below, the same central mechanism
+      // every other auth-critical request uses (see frontend/README.md,
+      // "Auth request timeout policy"). Without this, a refresh request
+      // that never gets a response (the backend hangs, a proxy silently
+      // drops it, ...) would leave AuthProvider stuck in "loading"
+      // indefinitely — there would be no failure to classify as
+      // "uncertain" at all. The resulting `AbortError` on timeout is what
+      // `normalizeTransportError` maps to a "timeout" ApiError, which
+      // `isUncertainSessionError` treats the same as a plain network
+      // failure — never as a confirmed invalid session.
       await ensureCsrfCookie();
-      const body = await unwrap<RefreshResponseBody>(
-        // Cast documented in the interface above: the generated response
-        // type is `content?: never`, which doesn't reflect the real body.
-        apiClient.POST("/api/v1/auth/refresh/", { signal }) as unknown as Promise<{
-          data?: RefreshResponseBody;
-          error?: unknown;
-          response: Response;
-        }>,
+      const body = await requestWithTimeout<RefreshResponseBody>(
+        (signal) =>
+          // Cast documented in the interface above: the generated response
+          // type is `content?: never`, which doesn't reflect the real body.
+          apiClient.POST("/api/v1/auth/refresh/", { signal }) as unknown as Promise<{
+            data?: RefreshResponseBody;
+            error?: unknown;
+            response: Response;
+          }>,
       );
       setAccessToken(body.access);
       return { ok: true };
@@ -84,7 +80,6 @@ export function ensureFreshAccessToken(): Promise<RefreshResult> {
       notifySessionExpired(apiError);
       return { ok: false, error: apiError };
     } finally {
-      dispose();
       refreshInFlight = null;
     }
   })();
@@ -132,8 +127,7 @@ export async function withAccessTokenRetry<T>(
   }
 }
 
-/** Test-only: reset in-flight refresh state (and any timeout override) between tests. */
+/** Test-only: reset in-flight refresh state between tests. */
 export function __resetSessionForTests(): void {
   refreshInFlight = null;
-  refreshTimeoutMs = DEFAULT_TIMEOUT_MS;
 }
