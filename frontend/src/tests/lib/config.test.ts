@@ -9,9 +9,9 @@ describe("config", () => {
   });
 
   it("exposes a normalized apiBaseUrl when the env var is a valid URL", async () => {
-    process.env.NEXT_PUBLIC_API_BASE_URL = "http://localhost:8000/api/v1/";
+    process.env.NEXT_PUBLIC_API_BASE_URL = "http://localhost:8000/";
     const { config } = await import("@/lib/config");
-    expect(config.apiBaseUrl).toBe("http://localhost:8000/api/v1");
+    expect(config.apiBaseUrl).toBe("http://localhost:8000");
   });
 
   it("throws a clear error when the env var is missing", async () => {
