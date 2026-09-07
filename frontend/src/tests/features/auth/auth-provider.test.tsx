@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
 import { AuthProvider, useAuth } from "@/features/auth/auth-provider";
-import { withAccessTokenRetry } from "@/lib/api/session";
+import { __setRefreshTimeoutMsForTests, withAccessTokenRetry } from "@/lib/api/session";
 import { apiClient } from "@/lib/api/client";
 import { FIXTURE_USER, mockState } from "@/tests/msw/handlers";
 
@@ -44,10 +44,10 @@ describe("AuthProvider bootstrap", () => {
     expect(screen.getByTestId("user")).toHaveTextContent("none");
   });
 
-  it("does not report an error for an ordinary confirmed-absent session (no refresh cookie)", async () => {
+  it("C. a real 401 (no session at all) resolves to confirmed unauthenticated, not uncertain", async () => {
     // No mockState.refreshCookieValid set — the backend genuinely has no
-    // session to offer, a 401 "authentication_failed", not a network
-    // problem. `error` must stay null: this is "not logged in", not
+    // session to offer, a definitive 401 "authentication_failed", not a
+    // network problem. `error` must stay null: this is "not logged in", not
     // something a caller should offer a Retry action for.
     renderWithAuth();
 
@@ -66,13 +66,24 @@ describe("AuthProvider bootstrap", () => {
     expect(screen.getByTestId("user")).toHaveTextContent(FIXTURE_USER.email);
   });
 
-  it("surfaces a network-error classification without claiming authenticated", async () => {
+  it("A. initial bootstrap network error resolves to uncertain, never unauthenticated", async () => {
     mockState.refreshNetworkError = true;
 
     renderWithAuth();
 
-    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("unauthenticated"));
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("uncertain"));
     expect(screen.getByTestId("error")).toHaveTextContent("network_error");
+    expect(screen.getByTestId("user")).toHaveTextContent("none");
+  });
+
+  it("B. initial bootstrap timeout resolves to uncertain", async () => {
+    __setRefreshTimeoutMsForTests(50);
+    mockState.refreshTimeout = true;
+
+    renderWithAuth();
+
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("uncertain"));
+    expect(screen.getByTestId("error")).toHaveTextContent("timeout");
   });
 });
 

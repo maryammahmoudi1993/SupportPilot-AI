@@ -15,7 +15,7 @@
  * (`refreshCookieValid`), which is the accurate abstraction: from the
  * frontend's point of view that cookie is opaque either way.
  */
-import { HttpResponse, http } from "msw";
+import { HttpResponse, delay, http } from "msw";
 
 const BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 const CSRF_COOKIE_NAME = "sp_csrftoken";
@@ -57,6 +57,8 @@ export const mockState = {
   meAlwaysUnauthorized: false,
   /** When set, /refresh/ fails regardless of cookie state (simulates network outage vs invalid session). */
   refreshNetworkError: false,
+  /** When set, /refresh/ simulates a timed-out/aborted request (distinct from a plain network error — see errors.ts's normalizeTransportError). */
+  refreshTimeout: false,
   /** When set, /login/ always 429s (rate-limit simulation). */
   loginRateLimited: false,
   /** When set, /login/ simulates a network failure (no response at all). */
@@ -75,6 +77,7 @@ export function resetAuthMockState(): void {
   mockState.forceMeUnauthorized = false;
   mockState.meAlwaysUnauthorized = false;
   mockState.refreshNetworkError = false;
+  mockState.refreshTimeout = false;
   mockState.loginRateLimited = false;
   mockState.loginNetworkError = false;
   mockState.logoutNetworkError = false;
@@ -158,6 +161,14 @@ export const authHandlers = [
 
     if (mockState.refreshNetworkError) {
       return HttpResponse.error();
+    }
+
+    if (mockState.refreshTimeout) {
+      // Never resolves — pairs with the real client-side timeout
+      // (session.ts's `withTimeout(DEFAULT_TIMEOUT_MS)`) actually aborting
+      // the request, so the test can advance fake timers to produce a
+      // genuine `AbortError` -> "timeout" ApiError, not a simulated one.
+      await delay("infinite");
     }
 
     const csrfRejection = requireCsrf(request);
