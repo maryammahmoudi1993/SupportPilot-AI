@@ -1,0 +1,131 @@
+"use client";
+
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import type { ReactNode } from "react";
+
+import {
+  fetchCurrentUser,
+  login as loginRequest,
+  logout as logoutRequest,
+} from "@/features/auth/api";
+import type { CurrentUser, LoginCredentials } from "@/features/auth/types";
+import { ApiError } from "@/lib/api/errors";
+import { setSessionExpiredHandler } from "@/lib/api/token-store";
+
+export type AuthStatus = "loading" | "authenticated" | "unauthenticated";
+
+export interface AuthState {
+  status: AuthStatus;
+  user: CurrentUser | null;
+  /**
+   * Set when the most recent bootstrap/revalidate attempt failed because
+   * the network was unreachable or timed out, rather than because the
+   * session was proven invalid — `status` is still "unauthenticated" (the
+   * safe default: never claim authenticated without proof), but a caller
+   * that wants to offer "Retry" instead of "please log in" can check this.
+   */
+  error: ApiError | null;
+}
+
+export interface AuthContextValue extends AuthState {
+  login: (credentials: LoginCredentials) => Promise<void>;
+  logout: () => Promise<void>;
+  /** Re-run session bootstrap (e.g. after a "Retry" action on a network error). */
+  revalidate: () => Promise<void>;
+}
+
+const AuthContext = createContext<AuthContextValue | null>(null);
+
+export function AuthProvider({ children }: { children: ReactNode }) {
+  const [state, setState] = useState<AuthState>({
+    status: "loading",
+    user: null,
+    error: null,
+  });
+
+  // Bootstrap/revalidate calls race if e.g. a mount-time bootstrap is still
+  // in flight when something else calls revalidate(); only the latest call
+  // is allowed to commit state.
+  const requestId = useRef(0);
+
+  const bootstrap = useCallback(async () => {
+    const id = ++requestId.current;
+    setState((prev) => ({ ...prev, status: "loading" }));
+    try {
+      const user = await fetchCurrentUser();
+      if (id === requestId.current) {
+        setState({ status: "authenticated", user, error: null });
+      }
+    } catch (err) {
+      if (id !== requestId.current) {
+        return;
+      }
+      const apiError = err instanceof ApiError ? err : null;
+      setState({ status: "unauthenticated", user: null, error: apiError });
+    }
+  }, []);
+
+  useEffect(() => {
+    // A failed refresh discovered anywhere (e.g. mid-session, from a
+    // protected call other than /me/) drives the same transition bootstrap
+    // uses on an invalid session — one owner for "the session just ended".
+    //
+    // Only acts when we were actually authenticated: `ensureFreshAccessToken`
+    // also fires this on the very first bootstrap's own refresh attempt (no
+    // session ever existed yet), and clobbering that in-flight bootstrap's
+    // request id here would erase the network-vs-invalid-session
+    // classification it's about to commit itself.
+    setSessionExpiredHandler(() => {
+      setState((prev) => {
+        if (prev.status !== "authenticated") {
+          return prev;
+        }
+        requestId.current += 1; // invalidate any in-flight bootstrap/revalidate
+        return { status: "unauthenticated", user: null, error: null };
+      });
+    });
+    // bootstrap() only calls setState from inside its own `await`
+    // continuation (an async network round trip), never synchronously
+    // during this effect's body — the standard "subscribe to an external
+    // system on mount" pattern the rule's own description calls out as
+    // fine; the linter just can't see through the indirection to
+    // fetchCurrentUser's await.
+    void bootstrap(); // eslint-disable-line react-hooks/set-state-in-effect
+    return () => setSessionExpiredHandler(null);
+  }, [bootstrap]);
+
+  const login = useCallback(async (credentials: LoginCredentials) => {
+    const user = await loginRequest(credentials);
+    requestId.current += 1;
+    setState({ status: "authenticated", user, error: null });
+  }, []);
+
+  const logout = useCallback(async () => {
+    await logoutRequest();
+    requestId.current += 1;
+    setState({ status: "unauthenticated", user: null, error: null });
+  }, []);
+
+  const value = useMemo<AuthContextValue>(
+    () => ({ ...state, login, logout, revalidate: bootstrap }),
+    [state, login, logout, bootstrap],
+  );
+
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
+}
+
+export function useAuth(): AuthContextValue {
+  const ctx = useContext(AuthContext);
+  if (!ctx) {
+    throw new Error("useAuth() must be used within an <AuthProvider>.");
+  }
+  return ctx;
+}
