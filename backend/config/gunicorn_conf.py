@@ -35,6 +35,12 @@ there is no background export thread whose fork-safety would need managing
 the way ``PROMETHEUS_MULTIPROC_DIR`` needs to be set before fork. Each
 worker process that ends up calling into tracing builds its own provider
 independently, after it is already running as a distinct process.
+
+Worker count and timeouts (Phase 17): configurable via environment, never
+derived from the build/dev-host CPU count — a container's host may have far
+more cores than the deployment should actually spend on one web replica.
+Defaults are conservative, matching the ``--workers 3`` this file used to
+hardcode via the Dockerfile CMD before these became env-driven.
 """
 
 from __future__ import annotations
@@ -47,6 +53,21 @@ import shutil
 #: on every master start regardless of prior contents, so a fixed path is
 #: both simpler and sufficient.
 _DEFAULT_MULTIPROC_DIR = "/tmp/supportpilot-prometheus-multiproc"
+
+# Conservative, explicitly-documented defaults — never a workstation/build-host
+# CPU-derived count (section 39). Raise via environment for a real deployment
+# sized to its own traffic/hardware.
+workers = int(os.environ.get("WEB_CONCURRENCY", "3"))
+timeout = int(os.environ.get("WEB_TIMEOUT_SECONDS", "30"))
+# Bounded grace period for in-flight requests to finish after SIGTERM before
+# Gunicorn escalates to SIGKILL (section 11: graceful shutdown must not
+# require SIGKILL under normal operation).
+graceful_timeout = int(os.environ.get("WEB_GRACEFUL_TIMEOUT_SECONDS", "30"))
+keepalive = int(os.environ.get("WEB_KEEPALIVE_SECONDS", "5"))
+# Explicit stdout/stderr logging — container runtimes capture these directly;
+# no local log file is ever required for this process to operate.
+accesslog = "-"
+errorlog = "-"
 
 
 def on_starting(server):  # noqa: ARG001 - required Gunicorn hook signature
