@@ -1,0 +1,131 @@
+@import "tailwindcss";
+
+/*
+ * Design tokens — SupportPilot AI.
+ *
+ * Light theme only, by intentional decision (see frontend/README.md,
+ * "Design system"): a calm, high-trust B2B operations surface, not a toggle
+ * added for its own sake. Every color/spacing/radius value feature code
+ * needs should come from a token here or a primitive in src/components/ui —
+ * never a one-off hex/px value in a feature component.
+ */
+:root {
+  /* Neutral surface scale (slate). */
+  --color-surface-0: #ffffff; /* page background */
+  --color-surface-1: #f8fafc; /* sunken / app shell background */
+  --color-surface-2: #f1f5f9; /* card / panel background */
+  --color-surface-3: #e2e8f0; /* hover surface, subtle fills */
+
+  /* Borders. */
+  --color-border-subtle: #e2e8f0;
+  --color-border-default: #cbd5e1;
+  --color-border-strong: #94a3b8;
+
+  /* Text. */
+  --color-text-primary: #0f172a;
+  --color-text-secondary: #475569;
+  --color-text-muted: #64748b;
+  --color-text-inverse: #f8fafc;
+  --color-text-disabled: #94a3b8;
+
+  /* Brand / primary accent (indigo) — actions, links, focus, active nav. */
+  --color-primary-50: #eef2ff;
+  --color-primary-100: #e0e7ff;
+  --color-primary-500: #4f46e5;
+  --color-primary-600: #4338ca;
+  --color-primary-700: #3730a3;
+
+  /* Semantic status colors. */
+  --color-success-50: #f0fdf4;
+  --color-success-500: #16a34a;
+  --color-success-700: #15803d;
+
+  --color-warning-50: #fffbeb;
+  --color-warning-500: #d97706;
+  --color-warning-700: #b45309;
+
+  --color-danger-50: #fef2f2;
+  --color-danger-500: #dc2626;
+  --color-danger-700: #b91c1c;
+
+  --color-info-50: #eff6ff;
+  --color-info-500: #2563eb;
+  --color-info-700: #1d4ed8;
+
+  /* Focus ring — always visible, never suppressed. */
+  --color-focus-ring: #4f46e5;
+
+  /* Radius scale. */
+  --radius-sm: 0.25rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.75rem;
+  --radius-full: 9999px;
+
+  /* Spacing used by shell chrome (sidebar/header) beyond Tailwind's default scale. */
+  --shell-header-height: 3.5rem;
+  --shell-sidebar-width: 16rem;
+  --shell-sidebar-width-collapsed: 4rem;
+}
+
+@theme inline {
+  --color-surface-0: var(--color-surface-0);
+  --color-surface-1: var(--color-surface-1);
+  --color-surface-2: var(--color-surface-2);
+  --color-surface-3: var(--color-surface-3);
+
+  --color-border-subtle: var(--color-border-subtle);
+  --color-border-default: var(--color-border-default);
+  --color-border-strong: var(--color-border-strong);
+
+  --color-text-primary: var(--color-text-primary);
+  --color-text-secondary: var(--color-text-secondary);
+  --color-text-muted: var(--color-text-muted);
+  --color-text-inverse: var(--color-text-inverse);
+  --color-text-disabled: var(--color-text-disabled);
+
+  --color-primary-50: var(--color-primary-50);
+  --color-primary-100: var(--color-primary-100);
+  --color-primary-500: var(--color-primary-500);
+  --color-primary-600: var(--color-primary-600);
+  --color-primary-700: var(--color-primary-700);
+
+  --color-success-50: var(--color-success-50);
+  --color-success-500: var(--color-success-500);
+  --color-success-700: var(--color-success-700);
+  --color-warning-50: var(--color-warning-50);
+  --color-warning-500: var(--color-warning-500);
+  --color-warning-700: var(--color-warning-700);
+  --color-danger-50: var(--color-danger-50);
+  --color-danger-500: var(--color-danger-500);
+  --color-danger-700: var(--color-danger-700);
+  --color-info-50: var(--color-info-50);
+  --color-info-500: var(--color-info-500);
+  --color-info-700: var(--color-info-700);
+
+  --color-focus-ring: var(--color-focus-ring);
+
+  --radius-sm: var(--radius-sm);
+  --radius-md: var(--radius-md);
+  --radius-lg: var(--radius-lg);
+  --radius-full: var(--radius-full);
+
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--color-surface-1);
+  color: var(--color-text-primary);
+}
+
+/* A visible, consistent focus style everywhere — never `outline: none` without replacement. */
+:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+::selection {
+  background: var(--color-primary-100);
+  color: var(--color-primary-700);
+}
