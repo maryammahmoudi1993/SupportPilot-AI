@@ -133,13 +133,27 @@ Beat is a distinct, long-lived process — never run inside `web` or
 | `dispatch-due-deliveries` | `notifications.tasks.dispatch_due_deliveries_task` | `DELIVERY_SWEEP_INTERVAL_SECONDS` (30s default) | Yes |
 | `recover-expired-delivery-claims` | `notifications.tasks.recover_expired_delivery_claims_task` | `DELIVERY_SWEEP_INTERVAL_SECONDS` (30s default) | Yes |
 | `recover-stuck-inbound-channel-events` | `channel_ingress.tasks.recover_stuck_inbound_events_task` | `CHANNELS_INBOUND_SWEEP_INTERVAL_SECONDS` (30s default) | Yes |
-| `recover-stuck-agent-runs` | `agents.tasks.recover_stuck_agent_runs_task` | `AGENTS_STUCK_RUN_SWEEP_INTERVAL_SECONDS` (300s default) | Yes — vs. `AGENTS_STUCK_RUN_STALE_SECONDS` (3600s default, 1800s floor) |
-| `recover-stuck-evaluation-runs` | `evaluations.tasks.recover_stuck_evaluation_runs_task` | `EVALUATIONS_STUCK_RUN_SWEEP_INTERVAL_SECONDS` (300s default) | Yes — vs. `EVALUATIONS_STUCK_RUN_STALE_SECONDS` (3600s default, 1800s floor) |
+| `recover-stuck-agent-runs` | `agents.tasks.recover_stuck_agent_runs_task` | `AGENTS_STUCK_RUN_SWEEP_INTERVAL_SECONDS` (300s default) | Yes — vs. `AGENTS_STUCK_RUN_STALE_SECONDS` (3600s default, 1800s floor) and `AGENTS_STUCK_RUN_PENDING_STALE_SECONDS` (120s default, no floor) |
+| `recover-stuck-evaluation-runs` | `evaluations.tasks.recover_stuck_evaluation_runs_task` | `EVALUATIONS_STUCK_RUN_SWEEP_INTERVAL_SECONDS` (300s default) | Yes — vs. `EVALUATIONS_STUCK_RUN_STALE_SECONDS` (3600s default, 1800s floor), `EVALUATIONS_STUCK_RUN_PENDING_STALE_SECONDS`, and `EVALUATIONS_STUCK_CASE_PENDING_STALE_SECONDS` (120s default each, no floor) |
+| `recover-stuck-knowledge-ingestion-jobs` | `knowledge.tasks.recover_stuck_ingestion_jobs_task` | `KNOWLEDGE_STUCK_JOB_SWEEP_INTERVAL_SECONDS` (300s default) | Yes — vs. `KNOWLEDGE_STUCK_JOB_STALE_SECONDS` (600s default) |
 
-The last two (Phase 17) close a gap Phase 16 deliberately left open: the
-recovery *logic* for stuck `AgentRun`/`EvaluationRun` rows existed
+The `recover-stuck-agent-runs`/`recover-stuck-evaluation-runs` entries
+(Phase 17 Chunk 1) close a gap Phase 16 deliberately left open: the recovery
+*logic* for stuck `AgentRun`/`EvaluationRun` rows existed
 (`agents/recovery.py`, `evaluations/recovery.py`) with no Celery task
-wrapper or schedule entry until now.
+wrapper or schedule entry until then.
+
+**The final backend acceptance gate (Phase 17 Chunk 4) found and closed a
+second, distinct gap in the same two sweeps, plus a third gap in a third
+domain — see `docs/reliability/retry-recovery-and-concurrency.md` for the
+full analysis.** In short: a row's crash while `RUNNING` was already
+covered, but a lost *initial* dispatch (leaving a row `PENDING` forever,
+invisible to a RUNNING-only sweep) was not — `recover-stuck-agent-runs` and
+`recover-stuck-evaluation-runs` each now also re-publish stale-`PENDING`
+rows/cases (safe, since nothing has executed yet, unlike recovering a
+RUNNING row). `recover-stuck-knowledge-ingestion-jobs` is an entirely new
+Beat entry closing the third gap: `KnowledgeIngestionJob` had a durable row
+but no periodic recovery path of any kind before this gate.
 
 **How often we inspect is a separate setting from how old something must
 be before recovery, by design** — raising a sweep interval only slows
