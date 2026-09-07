@@ -1,0 +1,5 @@
+node_modules
+.next
+coverage
+src/types/api.ts
+openapi.yaml
