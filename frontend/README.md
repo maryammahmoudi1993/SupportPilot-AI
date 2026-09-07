@@ -168,12 +168,15 @@ Neither gap was worked around by changing backend code in Phase 18 — see
   `backend/common/exceptions.py`) plus network/timeout/parse failures into
   one typed `ApiError`, so UI code branches on `error.code` rather than
   parsing raw responses.
-- **`timeout.ts` / `request.ts`** — `withRequestTimeout` applies a default
-  15s timeout (`DEFAULT_TIMEOUT_MS`) to a request, combinable with a
-  caller-supplied `AbortSignal` (e.g. component unmount); `unwrap` converts
-  an `openapi-fetch` `{ data, error, response }` result into throw-on-failure
-  form. Long-running or upload endpoints should pass their own timeout
-  rather than inherit the default.
+- **`timeout.ts` / `request.ts`** — see "Auth request timeout policy" below
+  for the full policy; in short, `withRequestTimeout` applies a default 15s
+  timeout (`DEFAULT_TIMEOUT_MS`) to a request, combinable with a
+  caller-supplied `AbortSignal` (e.g. component unmount); `requestWithTimeout`
+  composes that with `unwrap` (which converts an `openapi-fetch`
+  `{ data, error, response }` result into throw-on-failure form) into the one
+  request path every auth-critical call actually uses. Long-running or
+  upload endpoints should pass their own timeout rather than inherit the
+  default.
 - **`token-store.ts` / `csrf.ts` / `session.ts` / `topology.ts` /
   `logout-intent.ts`** — see "Authentication" below.
 
@@ -353,12 +356,60 @@ definitive `authentication_failed` or to `"uncertain"` for anything else
 (the exact same classification bootstrap's own catch block uses). It only
 acts if the app was actually `"authenticated"` at that moment, so it can't
 clobber an in-flight _first_ bootstrap that's about to commit its own
-classification. Also wired in Chunk 3A: the refresh request itself now
-carries a real timeout (`withTimeout(DEFAULT_TIMEOUT_MS)`,
-`lib/api/timeout.ts`) — previously unused infrastructure — so a refresh
-that never gets a response doesn't leave `AuthProvider` stuck in
-`"loading"` forever; the resulting `AbortError` is exactly what
-`normalizeTransportError` maps to the `"timeout"` code above.
+classification. The refresh request itself is bounded by the same central
+timeout mechanism every other auth call uses — see "Auth request timeout
+policy" below — so a refresh that never gets a response doesn't leave
+`AuthProvider` stuck in `"loading"` forever; the resulting `AbortError` is
+exactly what `normalizeTransportError` maps to the `"timeout"` code above.
+
+### Auth request timeout policy
+
+Every auth-critical request is bounded — none of login, refresh, `/me/`,
+logout, or CSRF priming can hang the UI indefinitely just because the
+server never responds. This wasn't true through Phase 18 Chunk 3A: only
+`refresh` had a real timeout wired in, which meant a hung `/me/` request
+during bootstrap (arguably the single most common auth-critical call,
+firing on every page load) could still leave `AuthProvider` stuck in
+`"loading"` forever. Closed in Chunk 3B by routing every one of these calls
+through the same central mechanism instead of copying timeout logic into
+each:
+
+| Request    | Function                                          | Timeout                          | Notes                                                                                                                                                            |
+| ---------- | ------------------------------------------------- | -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| CSRF prime | `ensureCsrfCookie()` (`lib/api/csrf.ts`)          | `DEFAULT_TIMEOUT_MS` (15s)       | Bounded once, here — every caller (login/refresh/logout) inherits this automatically, rather than each needing to remember to bound their own CSRF-priming call. |
+| Login      | `login()` (`features/auth/api.ts`)                | `DEFAULT_TIMEOUT_MS`             | A hung login no longer leaves the submit button permanently disabled — see "Login" below.                                                                        |
+| Refresh    | `ensureFreshAccessToken()` (`lib/api/session.ts`) | `DEFAULT_TIMEOUT_MS`             | Its own window, separate from CSRF-priming's.                                                                                                                    |
+| `/me/`     | `fetchCurrentUser()` (`features/auth/api.ts`)     | `DEFAULT_TIMEOUT_MS` per attempt | Invoked up to twice by `withAccessTokenRetry` (initial + retry-after-refresh) — each attempt gets its own bounded window, not one shared budget across both.     |
+| Logout     | `logout()` (`features/auth/api.ts`)               | `DEFAULT_TIMEOUT_MS`             | A timeout here is indistinguishable from any other server-revocation failure — see "Logout" below; local state is already cleared before this call even starts.  |
+
+**Mechanism**: `lib/api/timeout.ts`'s `withTimeout(timeoutMs, callerSignal?)`
+is the low-level primitive (an `AbortController` that fires after
+`timeoutMs`, optionally chained to a caller-supplied signal). `lib/api/request.ts`'s
+`withRequestTimeout(fn, timeoutMs?, callerSignal?)` wraps that into
+"run `fn` with a bounded signal, always dispose the timer" — the single
+reusable combinator every call site above uses, rather than each inventing
+its own `setTimeout`/`AbortController` pair. `requestWithTimeout(fn, timeoutMs?)`
+further composes that with `unwrap()` for call sites that own their own
+`unwrap()` call (login, logout, CSRF priming, refresh); `/me/` uses
+`withRequestTimeout` directly instead, since `withAccessTokenRetry` needs
+the raw `{data, error, response}` shape itself to detect a 401 and retry.
+
+**Default and override**: every call site above uses the same
+`DEFAULT_TIMEOUT_MS` (15s, `client.ts`) — there is currently no per-call
+override in real use, though `withRequestTimeout`'s signature supports one
+for a future call site that needs a different budget (e.g. a
+longer-running upload endpoint in a later phase; this codebase does not
+claim every future endpoint will share this timeout, only that these five
+auth-critical ones currently do). Tests shrink the effective timeout via a
+single test-only override (`__setTimeoutOverrideForTests(ms)`,
+`request.ts`) rather than waiting out 15 real seconds per test or each call
+site needing its own override hook — reset to `null` (no override) in
+`src/tests/setup.ts`'s global `beforeEach`.
+
+**What a timeout produces**: an `AbortError` → `normalizeTransportError()`
+→ a `"timeout"`-coded `ApiError`, classified by `isUncertainSessionError()`
+exactly like a plain network failure (see "Session state model" above) —
+never as proof the session or credentials are invalid.
 
 ### Logout
 
@@ -371,7 +422,11 @@ returns `"complete"` only if `POST /auth/logout/` actually succeeded, or
 hiccup, server error, ...). **The frontend never states "you are signed
 out" as an unqualified fact when the server call failed** — the refresh
 cookie may still be valid server-side until it naturally expires (7 days)
-or a later attempt succeeds.
+or a later attempt succeeds. A timeout is just one more way that server
+call can fail — bounded by the same central mechanism as every other auth
+request (see "Auth request timeout policy" above) — and is handled
+identically to a network outage: `"server_unconfirmed"`, pending marker
+set, no indefinite wait for a response that's never coming.
 
 On `"server_unconfirmed"`, a non-secret boolean marker
 (`src/lib/api/logout-intent.ts`, `localStorage["sp_logout_pending"]` — a
@@ -782,6 +837,21 @@ Enter-activatable, Sign-out reusing the existing logout flow —
 all remain green under the new state model (re-run, not just assumed
 unaffected).
 
+Added in Chunk 3B: a hung `/me/` after a successful refresh resolving to
+`"uncertain"` (not an infinite spinner) and Retry recovering to
+`"authenticated"` once `/me/` actually answers (`auth-provider.test.tsx`
+"3B.A", `protected-layout.test.tsx` "H"); a hung login leaving the form
+usable again with a "took too long" message, not a permanently-disabled
+button (`login-form.test.tsx` "B"); a hung logout still reporting
+`server_unconfirmed` with local state already cleared
+(`logout.test.ts` "C"); a hung CSRF-priming request bounded on its own
+(`csrf.test.ts` "D" — this module's first dedicated test file); the
+conservative classification rule locked in against `internal_server_error`
+and a genuinely malformed/empty response, not just network/timeout
+(`auth-provider.test.tsx` "E"/"F"); and the root route's own `"uncertain"`
+rendering, closing a gap the Chunk 3A report itself flagged as untested
+(`root-page.test.tsx` "G").
+
 ## Security notes
 
 See "Authentication" above for the full model (credential storage, refresh
@@ -894,7 +964,44 @@ coordination, CSRF, topology). Summary and explicit non-claims:
   simulated error) in `auth-provider.test.tsx`'s "B. initial bootstrap
   timeout" test, using a test-only timeout override
   (`__setRefreshTimeoutMsForTests`) rather than waiting out the real 15s in
-  every test run.
+  every test run. This fixed `refresh` specifically, but not `/me/`, login,
+  logout, or CSRF priming — closed for all of them in Chunk 3B below, which
+  also replaced this local per-function override with a single shared one
+  (`__setTimeoutOverrideForTests`, `request.ts`) once four call sites needed
+  the same kind of override.
+
+## Known defects fixed during Chunk 3B
+
+- **Only `refresh` had a real request timeout — `/me/`, login, logout, and
+  CSRF priming did not**: Chunk 3A's fix (above) closed the timeout gap for
+  exactly one of five auth-critical requests. `/me/` was the most exposed:
+  it fires on every bootstrap (every page load), so a hang there was at
+  least as likely as one on `refresh` — and CSRF priming was doubly exposed,
+  since it's a hidden prerequisite _inside_ `refresh`'s own flow that
+  wasn't covered by `refresh`'s new timeout either (the timeout signal was
+  only ever passed to the refresh `POST`, not to `ensureCsrfCookie()`'s GET
+  that runs first). Fixed by centralizing: `ensureCsrfCookie()` now bounds
+  its own request internally (so every caller — login, refresh, logout —
+  inherits it automatically), and `login()`/`logout()`/`fetchCurrentUser()`
+  each route their main request through the same `requestWithTimeout`/
+  `withRequestTimeout` mechanism `refresh` already used, rather than four
+  independent `setTimeout`/`AbortController` implementations. See "Auth
+  request timeout policy" above for the resulting per-call table.
+  Regression-tested per call site: `auth-provider.test.tsx` ("3B.A", a hung
+  `/me/` after a successful refresh), `login-form.test.tsx` ("B", a hung
+  login leaves the form usable again), `logout.test.ts` ("C", a hung
+  logout still reports `server_unconfirmed`), `csrf.test.ts` ("D", a hung
+  CSRF prime is bounded on its own).
+- **`isUncertainSessionError()`'s conservative-rule fix (Chunk 3A) had no
+  regression test locking it in** — only reviewed, not tested, per that
+  chunk's own report. Closed with `auth-provider.test.tsx` "E"
+  (`internal_server_error` during bootstrap → `"uncertain"`) and "F" (a
+  malformed/empty response during bootstrap → `"uncertain"`, exercising
+  `unwrap()`'s real `parse_error` path via a genuinely empty 200 response
+  rather than a synthetic one).
+- **The root route's `"uncertain"` handling (Chunk 3A) had no dedicated
+  test** — also noted, not closed, in that chunk's own report (D2). Closed
+  with `root-page.test.tsx` "G".
 
 ## Known defects fixed during Chunk 2A
 
