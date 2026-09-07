@@ -17,7 +17,7 @@ import {
   logout as logoutRequest,
 } from "@/features/auth/api";
 import type { CurrentUser, LoginCredentials } from "@/features/auth/types";
-import { ApiError } from "@/lib/api/errors";
+import { ApiError, isUncertainSessionError } from "@/lib/api/errors";
 import { isLogoutPending } from "@/lib/api/logout-intent";
 import { setSessionExpiredHandler } from "@/lib/api/token-store";
 
@@ -97,7 +97,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (id !== requestId.current) {
         return;
       }
-      const apiError = err instanceof ApiError ? err : null;
+      // Only an *uncertain* failure (network/timeout) is surfaced as
+      // `error` — an ordinary confirmed-invalid session (e.g. no refresh
+      // cookie at all, `authentication_failed`) is just "not logged in",
+      // not something to offer a "Retry" action for.
+      const apiError = err instanceof ApiError && isUncertainSessionError(err) ? err : null;
       setState({ status: "unauthenticated", user: null, error: apiError, logoutPending: false });
     }
   }, []);

@@ -101,6 +101,19 @@ export function normalizeHttpError(status: number, body: unknown): ApiError {
   });
 }
 
+/**
+ * True for a failure that means "we couldn't find out" (network unreachable,
+ * timed out) as opposed to one that means "we found out, and the session is
+ * genuinely invalid" (e.g. `authentication_failed` for a missing/expired
+ * refresh token). Callers that need to tell "please retry" from "please log
+ * in" — AuthProvider's bootstrap, WorkspaceProvider's derived status — key
+ * off this rather than "is there an ApiError at all", since an ordinary
+ * "no session yet" bootstrap also produces an ApiError.
+ */
+export function isUncertainSessionError(error: ApiError): boolean {
+  return error.code === "network_error" || error.code === "timeout";
+}
+
 /** Build an ApiError for a request that never got an HTTP response at all. */
 export function normalizeTransportError(cause: unknown): ApiError {
   if (cause instanceof DOMException && cause.name === "AbortError") {

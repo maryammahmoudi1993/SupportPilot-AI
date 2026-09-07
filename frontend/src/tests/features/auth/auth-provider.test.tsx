@@ -44,6 +44,17 @@ describe("AuthProvider bootstrap", () => {
     expect(screen.getByTestId("user")).toHaveTextContent("none");
   });
 
+  it("does not report an error for an ordinary confirmed-absent session (no refresh cookie)", async () => {
+    // No mockState.refreshCookieValid set — the backend genuinely has no
+    // session to offer, a 401 "authentication_failed", not a network
+    // problem. `error` must stay null: this is "not logged in", not
+    // something a caller should offer a Retry action for.
+    renderWithAuth();
+
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("unauthenticated"));
+    expect(screen.getByTestId("error")).toHaveTextContent("none");
+  });
+
   it("resolves to authenticated when a valid refresh session already exists", async () => {
     // Simulate an existing valid refresh cookie from a prior session, as if
     // the page were reloaded after a successful login.
@@ -142,6 +153,36 @@ describe("AuthProvider login/logout", () => {
     const third = renderWithAuth();
     await waitFor(() => expect(third.getByTestId("logoutPending")).toHaveTextContent("false"));
     expect(third.getByTestId("status")).toHaveTextContent("unauthenticated");
+  });
+
+  it("clears a stale pending-logout marker on a fresh explicit login, and a reload stays authenticated (not re-triggered into revocation)", async () => {
+    // Set up: a prior logout's revocation was never confirmed.
+    mockState.refreshCookieValid = true;
+    mockState.logoutNetworkError = true;
+    const first = renderWithAuth();
+    await waitFor(() => expect(first.getByTestId("status")).toHaveTextContent("authenticated"));
+    await userEvent.setup().click(first.getByRole("button", { name: "Logout" }));
+    await waitFor(() => expect(first.getByTestId("logoutPending")).toHaveTextContent("true"));
+    first.unmount();
+
+    // The user deliberately logs in again — a new, intentional session that
+    // supersedes the old one's unconfirmed logout. Network recovers for this
+    // fresh login (it isn't the earlier logout attempt).
+    mockState.logoutNetworkError = false;
+    const second = renderWithAuth();
+    await waitFor(() => expect(second.getByTestId("status")).toHaveTextContent("unauthenticated"));
+    await userEvent.setup().click(second.getByRole("button", { name: "Login" }));
+    await waitFor(() => expect(second.getByTestId("status")).toHaveTextContent("authenticated"));
+    expect(second.getByTestId("logoutPending")).toHaveTextContent("false");
+    second.unmount();
+
+    // Reload: the stale marker must not survive to retrigger a revocation
+    // attempt against the brand-new session — bootstrap goes straight to the
+    // normal authenticated path.
+    const third = renderWithAuth();
+    await waitFor(() => expect(third.getByTestId("status")).toHaveTextContent("authenticated"));
+    expect(third.getByTestId("logoutPending")).toHaveTextContent("false");
+    expect(third.getByTestId("user")).toHaveTextContent(FIXTURE_USER.email);
   });
 
   it("transitions to unauthenticated when a background refresh fails mid-session", async () => {
