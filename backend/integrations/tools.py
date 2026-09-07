@@ -35,7 +35,7 @@ from tools.contracts import (
     ToolExecutionContext,
     ToolSpec,
 )
-from tools.errors import ToolError
+from tools.errors import ToolError, ToolTimeoutError
 from tools.models import ToolExecution
 from workspaces.models import Workspace
 
@@ -45,8 +45,10 @@ from .errors import (
     CustomerNotFoundError,
     IntegrationError,
     IntegrationInvalidRequestError,
+    IntegrationMalformedResponseError,
     IntegrationRateLimitedError,
     IntegrationTemporarilyUnavailableError,
+    IntegrationTimeoutError,
     TicketNotFoundError,
 )
 from .schemas import EmailAddress
@@ -79,6 +81,32 @@ WRITE_RETRYABLE_CODES = frozenset(
     {IntegrationRateLimitedError.code, IntegrationTemporarilyUnavailableError.code}
 )
 READ_RETRYABLE_CODES = RETRYABLE_INTEGRATION_CODES
+
+#: Phase 16 Checkpoint 4 (Part A): error codes meaning the provider's own
+#: commit outcome is genuinely unknown — the request may have already
+#: succeeded before the client observed the failure. Safe to leave out of
+#: ``WRITE_RETRYABLE_CODES`` (never auto-retried in-process) is not enough
+#: on its own: ``tools.execution._resolve_existing`` still lets a *manual*
+#: same-idempotency-key retry reset an ordinary terminal failure back to
+#: ``PENDING`` and call the handler again. For ``payment.refund`` that is
+#: safe because Stripe deduplicates by the reused idempotency key
+#: server-side; ``calendar.create_booking`` has no such provider-side
+#: dedup (see ``integrations/providers/google_calendar.py``), so a second
+#: call for the same logical booking is a second real event. This set is
+#: assigned to that tool's ``RetryPolicy.ambiguous_outcome_error_codes`` to
+#: refuse *any* retry (automatic or manual) of a call left in this state,
+#: rather than silently risking a duplicate. Includes ``ToolTimeoutError``
+#: (``tools.execution``'s own wall-clock enforcement cutting the handler
+#: off) alongside the two provider-reported codes — that cutoff is exactly
+#: as ambiguous as a provider-reported timeout: the request may already
+#: have reached and been committed by Google before the deadline expired.
+CALENDAR_AMBIGUOUS_OUTCOME_CODES = frozenset(
+    {
+        IntegrationTimeoutError.code,
+        IntegrationMalformedResponseError.code,
+        ToolTimeoutError.code,
+    }
+)
 
 
 def _workspace(context: ToolExecutionContext) -> Workspace:
@@ -583,7 +611,11 @@ CALENDAR_BOOKING_TOOL = Tool(
         side_effect_type=SideEffectType.EXTERNAL_WRITE,
         default_timeout_seconds=10.0,
         max_timeout_seconds=15.0,
-        retry_policy=RetryPolicy(max_retries=2, retryable_error_codes=WRITE_RETRYABLE_CODES),
+        retry_policy=RetryPolicy(
+            max_retries=2,
+            retryable_error_codes=WRITE_RETRYABLE_CODES,
+            ambiguous_outcome_error_codes=CALENDAR_AMBIGUOUS_OUTCOME_CODES,
+        ),
         idempotency_mode=IdempotencyMode.REQUIRED,
     ),
     handler=_calendar_booking_handler,

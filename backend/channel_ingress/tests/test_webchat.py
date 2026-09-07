@@ -146,3 +146,49 @@ def test_list_messages_is_scoped_to_the_sessions_own_conversation():
 
     assert len(list_chat_messages(session=session_a)) == 1
     assert list_chat_messages(session=session_b) == []
+
+
+def test_after_cursor_ties_are_broken_by_sequence_not_random_id():
+    """Phase 16 Checkpoint 2 Part B (section 6) regression: the ``after``
+    cursor used to tie-break a ``created_at`` collision on ``id`` (a random
+    UUID) while ``message_list_for_conversation`` orders by
+    ``(created_at, sequence)`` — a genuine mismatch that could skip or
+    duplicate a message across polls whenever the anchor's UUID happened to
+    sort the "wrong" way relative to its true (sequence) position. Forces
+    the exact tie and proves both directions: nothing already seen is
+    re-returned, and nothing is silently skipped."""
+    from channel_ingress.tests.factories import ChatSessionFactory
+    from conversations.models import Message
+    from conversations.tests.factories import ConversationFactory, MessageFactory
+    from customers.tests.factories import CustomerFactory
+
+    endpoint = WebChatEndpointFactory()
+    customer = CustomerFactory(workspace=endpoint.workspace)
+    conversation = ConversationFactory(workspace=endpoint.workspace, customer=customer)
+    session = ChatSessionFactory(
+        workspace=endpoint.workspace,
+        endpoint=endpoint,
+        customer=customer,
+        conversation=conversation,
+    )
+
+    messages = [MessageFactory(conversation=conversation, body=f"msg-{i}") for i in range(4)]
+    same_ts = timezone.now()
+    # Force a genuine created_at tie across all four messages, the same way
+    # a real DB timestamp collision would look — sequence is untouched
+    # (still strictly increasing in creation order) since it is a DB
+    # sequence, never an auto_now_add column.
+    Message.objects.filter(id__in=[m.id for m in messages]).update(created_at=same_ts)
+    ordered = list(Message.objects.filter(conversation=conversation).order_by("sequence"))
+
+    # Poll from the very start.
+    first_page = list_chat_messages(session=session)
+    assert [m.id for m in first_page] == [m.id for m in ordered]
+
+    # Poll again "after" the second message, purely by its id — the bug
+    # this regression closes would use ``id__gt`` here and could exclude a
+    # later-``sequence`` message whose UUID happens to sort lower, or
+    # re-include an earlier one whose UUID happens to sort higher.
+    anchor = ordered[1]
+    next_page = list_chat_messages(session=session, after=str(anchor.id))
+    assert [m.id for m in next_page] == [m.id for m in ordered[2:]]

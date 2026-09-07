@@ -375,9 +375,26 @@ def cancel_agent_run(
 
 
 def _next_sequence_and_create_step(run: AgentRun, **fields: Any) -> AgentStep:
-    last = AgentStep.objects.filter(run=run).order_by("-sequence").first()
-    sequence = (last.sequence + 1) if last else 1
-    return AgentStep.objects.create(run=run, workspace=run.workspace, sequence=sequence, **fields)
+    """Phase 16 final release gate: two callers racing for the *same* run
+    (observed in production-realistic conditions — a resume and a
+    concurrent cancellation) previously computed the same "next sequence"
+    value independently (no lock serialized the read), and separately, two
+    concurrent bare INSERTs into ``agents_agentstep`` both referencing the
+    same ``AgentRun`` via FK could deadlock on PostgreSQL's own internal
+    FOR KEY SHARE multixact resolution for that parent row — reproduced as
+    a genuine, if rare, ``deadlock detected`` error under real threads and
+    real PostgreSQL. Locking the parent ``AgentRun`` row first serializes
+    both the sequence read and the FK-referencing INSERT for concurrent
+    callers on the same run, closing both problems with the one change:
+    the second caller simply waits for the first's transaction to commit,
+    rather than either mis-computing a duplicate sequence or deadlocking."""
+    with transaction.atomic():
+        AgentRun.objects.select_for_update().get(pk=run.pk)
+        last = AgentStep.objects.filter(run=run).order_by("-sequence").first()
+        sequence = (last.sequence + 1) if last else 1
+        return AgentStep.objects.create(
+            run=run, workspace=run.workspace, sequence=sequence, **fields
+        )
 
 
 def _record_step_factory(run: AgentRun):
@@ -733,7 +750,7 @@ def resume_agent_run_after_approval(approval_request_id: uuid.UUID | str) -> str
     of idempotency for *all* of these outcomes, not just the approved one.
     """
     from approvals.models import ApprovalRequest, ApprovalStatus
-    from tools.errors import ToolError
+    from tools.errors import ToolError, ToolExecutionInProgressError
     from tools.execution import resume_after_approval
 
     approval = ApprovalRequest.objects.select_related(
@@ -766,6 +783,12 @@ def resume_agent_run_after_approval(approval_request_id: uuid.UUID | str) -> str
             tool_result = resume_after_approval(
                 tool_execution_id=str(approval.tool_execution_id), record_step=record_step
             )
+        except ToolExecutionInProgressError:
+            # Phase 16 Part A, section 8: a genuinely concurrent/redelivered
+            # resume observed another caller already owning this exact
+            # ToolExecution — a safe no-op, exactly like ``_claim_run_for_
+            # resume`` returning None above, never a run failure.
+            return "already_resumed"
         except ToolError as exc:
             return _fail_run(run, code=exc.code, message=exc.safe_message).status
         # Section 35-36, 60: the approved result is normalized through the

@@ -139,9 +139,28 @@ class Message(BaseModel):
     body = models.TextField()
     external_id = models.CharField(max_length=255, null=True, blank=True)
     metadata = models.JSONField(default=dict, blank=True)
+    # Phase 16 Part F (section 33): a strictly-increasing, DB-assigned
+    # insertion sequence, kept alongside ``created_at`` purely as a
+    # deterministic ordering tie-breaker. ``id`` (BaseModel's UUID primary
+    # key) is *not* a safe tie-breaker for creation order — it is random,
+    # not monotonic — so two messages sharing the same ``created_at``
+    # (a real, if rare, possibility: ``auto_now_add`` resolves to whatever
+    # precision the DB timestamp column and the Python clock both give it)
+    # previously sorted in effectively random relative order. That silently
+    # broke the "newest history is retained" guarantee
+    # ``agents.context.build_conversation_context`` depends on — reproduced
+    # concretely as the older of two same-instant messages sometimes
+    # surviving a context-window trim instead of the newer one.
+    sequence = models.BigIntegerField(
+        unique=True,
+        editable=False,
+        db_default=models.Func(
+            models.Value("conversations_message_sequence_seq"), function="nextval"
+        ),
+    )
 
     class Meta:
-        ordering = ["created_at"]
+        ordering = ["created_at", "sequence"]
         indexes = [
             models.Index(fields=["conversation", "created_at"], name="msg_conv_created_idx"),
             models.Index(fields=["workspace", "created_at"], name="msg_ws_created_idx"),

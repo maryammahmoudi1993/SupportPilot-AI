@@ -53,10 +53,16 @@ def conversation_get_for_workspace_or_404(
 
 
 def message_list_for_conversation(*, conversation: Conversation) -> QuerySet[Message]:
+    # Ordered by (created_at, sequence) rather than (created_at, id):
+    # ``sequence`` is a strictly-increasing DB-assigned insertion order,
+    # while ``id`` is a random UUID — see Message.sequence's docstring for
+    # why that matters (agents.context relies on this ordering being
+    # genuinely chronological, not "chronological except on a timestamp
+    # tie").
     return (
         Message.objects.filter(conversation=conversation)
         .select_related("sender_membership", "sender_membership__user")
-        .order_by("created_at", "id")
+        .order_by("created_at", "sequence")
     )
 
 

@@ -233,6 +233,19 @@ def decide_approval(
 
         if _expire_if_stale(locked):
             pending_error = ApprovalExpiredError()
+        elif locked.status == ApprovalStatus.EXPIRED:
+            # Phase 16 Part A, section 9: the row was already expired by a
+            # concurrent call (a racing decide_approval that won the lock
+            # first, or the periodic sweeper) between this call reading its
+            # argument and acquiring the lock above. ``_expire_if_stale``
+            # only detects expiry it performs itself — without this branch,
+            # an already-EXPIRED, non-PENDING row would fall through to the
+            # PENDING-only branch below and record a phantom decision (a
+            # false "approved"/"rejected" audit event and webhook, with no
+            # actual execution ever resuming, since the underlying
+            # ToolExecution was already terminated when the row first
+            # expired).
+            pending_error = ApprovalExpiredError()
         elif locked.status == ApprovalStatus.CANCELLED:
             pending_error = ApprovalCancelledError()
         elif locked.status in (ApprovalStatus.APPROVED, ApprovalStatus.REJECTED):

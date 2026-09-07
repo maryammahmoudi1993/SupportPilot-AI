@@ -32,6 +32,7 @@ from workspaces.models import Workspace
 
 from .contracts import Tool, ToolExecutionContext
 from .errors import (
+    ToolAmbiguousOutcomeRequiresReconciliationError,
     ToolApprovalActionChangedError,
     ToolApprovalCancelledError,
     ToolApprovalExpiredError,
@@ -466,6 +467,18 @@ def _resolve_existing(
         # below, because both already own one-to-one policy-gate rows for
         # this exact ToolExecution.
         return existing, False, True
+    # Phase 16 Checkpoint 4 (Part A): before treating this as an ordinary
+    # retryable failure, check whether the *stored* error from the prior
+    # attempt means the provider's own commit outcome is genuinely unknown
+    # for a provider that cannot dedupe a blind retry (see
+    # ``RetryPolicy.ambiguous_outcome_error_codes``). Resetting to PENDING
+    # here would make a second real provider call with no way to know the
+    # first one didn't already succeed — refuse instead, for every retry
+    # path that reuses this idempotency key (automatic, manual/operator,
+    # and task redelivery all funnel through this same function).
+    if existing.error_code in tool.spec.retry_policy.ambiguous_outcome_error_codes:
+        raise ToolAmbiguousOutcomeRequiresReconciliationError()
+
     # Ordinary terminal failure/timeout/cancellation: the same idempotency
     # key may be retried (bounded by the tool's total attempt budget),
     # rather than permanently burning the key on a transient failure
@@ -786,6 +799,18 @@ def resume_after_approval(
             return ToolExecutionResult(
                 execution=execution, output=execution.result_redacted, reused=True
             )
+        if execution.status == ToolExecutionStatus.RUNNING:
+            # Phase 16 Part A, section 8: a genuine concurrent/redelivered
+            # resume call observed the winning racer's claim (WAITING_FOR_
+            # APPROVAL -> RUNNING) but that racer has not finished yet — this
+            # is not a rejection, expiry, or policy denial, so it must never
+            # be misreported as one (the ``error_cls is None`` defensive
+            # fallback below would otherwise fabricate
+            # ``ToolApprovalRejectedError`` for a call that was never
+            # actually rejected, incorrectly failing the whole agent run).
+            # Mirrors ``_resolve_existing``'s identical "another caller
+            # already owns this row" signal for the first-execution path.
+            raise ToolExecutionInProgressError()
         _raise_policy_terminal_outcome(execution)
     execution = claimed
 

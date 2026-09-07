@@ -135,12 +135,23 @@ def list_chat_messages(*, session: ChatSession, after: str | None = None) -> lis
     if after:
         anchor = queryset.filter(pk=after).first()
         if anchor is not None:
-            # Tie-broken on id, matching the queryset's own (created_at, id)
-            # ordering, so two messages sharing a timestamp are never
-            # skipped or duplicated across successive polls.
+            # Phase 16 Checkpoint 2 Part B (section 6): tie-broken on
+            # ``sequence``, matching the queryset's own actual
+            # ``(created_at, sequence)`` ordering (see
+            # ``conversations.selectors.message_list_for_conversation``) —
+            # this previously compared ``id`` (a random UUID) here while the
+            # queryset itself sorted on ``sequence``, a genuine mismatch:
+            # on a real ``created_at`` tie between two messages, a cursor
+            # advance keyed on the wrong column could skip a message
+            # entirely (its ``sequence`` places it after the anchor but its
+            # random ``id`` happens to be smaller) or return one a second
+            # time (the reverse). ``sequence`` is the same
+            # strictly-increasing DB-assigned tie-breaker
+            # ``agents.context.build_conversation_context`` already relies
+            # on for this exact reason.
             queryset = queryset.filter(
                 Q(created_at__gt=anchor.created_at)
-                | Q(created_at=anchor.created_at, id__gt=anchor.id)
+                | Q(created_at=anchor.created_at, sequence__gt=anchor.sequence)
             )
     limit = settings.CHANNEL_WEBCHAT_MESSAGE_HISTORY_LIMIT
     return list(queryset[:limit])

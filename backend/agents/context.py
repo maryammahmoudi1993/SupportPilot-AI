@@ -8,6 +8,7 @@ from typing import Literal
 from uuid import UUID
 
 from django.conf import settings
+from django.db.models import Q
 
 from conversations.models import (
     Conversation,
@@ -91,6 +92,19 @@ def _normalized_role(message: Message) -> ContextRole | None:
     return None
 
 
+# Phase 16 Checkpoint 2 Part G (section 22): the same eligibility rule as
+# _normalized_role, expressed as a DB filter so a conversation with a very
+# long history never requires loading every one of its messages into Python
+# just to find the newest ``max_messages`` eligible ones (see
+# ``build_conversation_context``'s bounded query below).
+_ELIGIBLE_ROLE_FILTER = Q(
+    sender_type=MessageSenderType.CUSTOMER, direction=MessageDirection.INBOUND
+) | Q(
+    sender_type__in=(MessageSenderType.HUMAN_AGENT, MessageSenderType.AI_AGENT),
+    direction=MessageDirection.OUTBOUND,
+)
+
+
 def _bounded_message(message: Message, *, role: ContextRole, limit: int) -> ContextMessage:
     content = message.body[:limit]
     return ContextMessage(
@@ -124,27 +138,36 @@ def build_conversation_context(
     if selected_limits.max_messages < 1 or selected_limits.max_characters < 1:
         raise ValueError("Conversation context limits must be positive.")
 
-    queryset = message_list_for_conversation(conversation=conversation).filter(
-        workspace=workspace, created_at__lte=trigger_message.created_at
+    eligible_qs = (
+        message_list_for_conversation(conversation=conversation)
+        .filter(workspace=workspace, created_at__lte=trigger_message.created_at)
+        .filter(_ELIGIBLE_ROLE_FILTER)
     )
-    eligible: list[tuple[Message, ContextRole]] = []
-    for message in queryset:
-        role = _normalized_role(message)
-        if role is not None:
-            eligible.append((message, role))
+    # Phase 16 Checkpoint 2 Part G (section 22): bounded at the DB layer —
+    # only the newest ``max_messages`` eligible rows are ever fetched into
+    # Python, regardless of how long the conversation's full history is.
+    # ``available_count`` still reflects the true total (a single indexed
+    # COUNT query, not a row fetch) so ``truncated`` below is exact even
+    # though the candidate list itself is capped.
+    available_count = eligible_qs.count()
+    newest_candidates = list(
+        eligible_qs.order_by("-created_at", "-sequence")[: selected_limits.max_messages]
+    )
 
     trigger_context = _bounded_message(
         trigger_message, role="user", limit=selected_limits.max_characters
     )
     remaining_characters = selected_limits.max_characters - len(trigger_context.content)
     retained_newest_first: list[ContextMessage] = []
-    for message, role in reversed(eligible):
+    for message in newest_candidates:
         if message.id == trigger_message.id:
             continue
         if len(retained_newest_first) >= selected_limits.max_messages - 1:
             break
         if remaining_characters <= 0:
             break
+        role = _normalized_role(message)
+        assert role is not None  # guaranteed by _ELIGIBLE_ROLE_FILTER above
         normalized = _bounded_message(message, role=role, limit=remaining_characters)
         if not normalized.content:
             continue
@@ -152,7 +175,6 @@ def build_conversation_context(
         remaining_characters -= len(normalized.content)
 
     retained = tuple(reversed(retained_newest_first)) + (trigger_context,)
-    available_count = len(eligible)
     content_was_truncated = any(message.truncated for message in retained)
     return ConversationContext(
         conversation_id=conversation.id,

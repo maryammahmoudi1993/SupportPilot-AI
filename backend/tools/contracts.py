@@ -62,10 +62,31 @@ class RetryPolicy:
     service trusts to decide whether a failed attempt may be retried — an
     error code absent from this set is treated as non-retryable regardless
     of how many attempts remain.
+
+    ``ambiguous_outcome_error_codes`` (Phase 16 Checkpoint 4, Part A) is a
+    second, narrower classification: error codes that mean the *provider's*
+    own commit outcome is genuinely unknown (a timeout after the request
+    may already have been processed), for tools whose provider has no
+    native way to deduplicate a blind retry of the exact same logical
+    action (unlike, e.g., ``payment.refund``'s Stripe idempotency-key
+    support). When the *stored* ``ToolExecution.error_code`` from a prior
+    attempt with the same idempotency key is in this set, a same-key retry
+    is refused with ``ToolAmbiguousOutcomeRequiresReconciliationError``
+    instead of being reset to ``PENDING`` and re-invoking the handler — the
+    normal retry-reset path in ``tools.execution._resolve_existing`` would
+    otherwise make a second real provider call with no way to know the
+    first one didn't already succeed. Empty by default (preserves every
+    existing tool's current behavior); this is deliberately independent of
+    ``retryable_error_codes`` — a code can appear in neither, either, or
+    both sets, though a tool would not normally put the same code in both
+    (one drives *automatic* in-process retry of a call known to have never
+    reached the provider; the other blocks *any* retry, automatic or
+    manual, of a call whose provider-side outcome is unknown).
     """
 
     max_retries: int = 0
     retryable_error_codes: frozenset[str] = field(default_factory=frozenset)
+    ambiguous_outcome_error_codes: frozenset[str] = field(default_factory=frozenset)
 
     def __post_init__(self) -> None:
         if self.max_retries < 0:

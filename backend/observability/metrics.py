@@ -102,6 +102,7 @@ __all__ = [
     "observe_delivery_redrive",
     "observe_webhook_response",
     "observe_webhook_destination_rejection",
+    "observe_stuck_run_recovery",
     "refresh_delivery_backlog_gauges",
     "render_metrics",
 ]
@@ -899,6 +900,28 @@ DELIVERY_BROKER_PUBLICATION_FAILURES_TOTAL = Counter(
     "Total best-effort Celery publication failures, by channel and source.",
     ["channel", "source"],
 )
+
+#: Phase 16 Checkpoint 3 (Part E): ``agents.recovery.recover_stuck_agent_runs``
+#: and ``evaluations.recovery.recover_stuck_evaluation_runs`` previously only
+#: emitted a structured log line — invisible to any dashboard/alert built on
+#: metrics. ``domain`` (2 values: ``agent`` / ``evaluation``) is the only
+#: label — never a run id (would be unbounded cardinality) or a workspace/
+#: customer id (forbidden by this project's metric-labeling rules).
+STUCK_RUN_RECOVERIES_TOTAL = Counter(
+    f"{METRIC_NAMESPACE}_stuck_run_recoveries_total",
+    "Total AgentRun/EvaluationRun rows recovered (failed) by the stuck-worker sweeper, by domain.",
+    ["domain"],
+)
+
+
+def observe_stuck_run_recovery(*, domain: str, count: int = 1) -> None:
+    """Called once per sweep by ``agents.recovery``/``evaluations.recovery``
+    with the number of rows actually recovered in that sweep (0 is a valid,
+    intentionally-skipped call — see each call site)."""
+    if count <= 0:
+        return
+    STUCK_RUN_RECOVERIES_TOTAL.labels(domain=domain).inc(count)
+
 
 _DELIVERY_PUBLICATION_SOURCES = frozenset({"initial", "sweeper"})
 

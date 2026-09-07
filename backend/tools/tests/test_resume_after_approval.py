@@ -13,6 +13,7 @@ from tools.errors import (
     ToolApprovalRejectedError,
     ToolDisabledError,
     ToolError,
+    ToolExecutionInProgressError,
     ToolInvalidInputError,
 )
 from tools.execution import resume_after_approval
@@ -43,6 +44,69 @@ class TestResumeRaceAndReplay:
         assert second.reused is True
         assert second.output == first.output
         assert fake.refund_call_count == 1
+
+    def test_two_concurrent_resume_calls_invoke_the_handler_exactly_once(self, monkeypatch):
+        """Phase 16 Part A, section 8: a redelivered Celery resume task
+        racing an in-flight resume for the same approved ``ToolExecution``
+        must never invoke the refund handler twice — proven with real
+        threads against ``_claim_resume``'s row lock, not a sequential
+        double-call."""
+        import threading
+
+        import django.db as django_db
+
+        run, approval, fake = pending_refund_approval(monkeypatch)
+        _approve(run, approval)
+
+        barrier = threading.Barrier(2)
+        results: list[object] = [None, None]
+        errors: list[BaseException | None] = [None, None]
+
+        def make_worker(index):
+            def worker():
+                django_db.close_old_connections()
+                barrier.wait()
+                try:
+                    results[index] = resume_after_approval(
+                        tool_execution_id=str(approval.tool_execution_id)
+                    )
+                except BaseException as exc:  # noqa: BLE001 - captured for assertion
+                    errors[index] = exc
+                finally:
+                    django_db.close_old_connections()
+
+            return worker
+
+        threads = [threading.Thread(target=make_worker(i)) for i in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        # The handler runs exactly once no matter how the two calls
+        # interleave — the load-bearing assertion for this test.
+        assert fake.refund_call_count == 1
+
+        # The losing racer observes one of two honest outcomes depending on
+        # timing: it either arrives after the winner has already finalized
+        # (SUCCEEDED -> a replayed, non-error result) or while the winner is
+        # still mid-flight (RUNNING -> ``ToolExecutionInProgressError``).
+        # What it must never do is fabricate a rejection/expiry/policy
+        # denial that never actually happened — that was the Phase 16
+        # regression this test exists to pin (a spurious
+        # ``ToolApprovalRejectedError`` previously reached here and, one
+        # layer up, incorrectly failed the whole agent run).
+        for exc in errors:
+            assert exc is None or isinstance(exc, ToolExecutionInProgressError)
+
+        succeeded = [r for r in results if r is not None]
+        assert len(succeeded) >= 1
+        for r in succeeded:
+            assert r.output == succeeded[0].output
+        if len(succeeded) == 2:
+            # Both observed the result without error: exactly one of them
+            # actually ran the handler, the other replayed it.
+            assert sorted(r.reused for r in succeeded) == [False, True]
 
     def test_second_resume_call_after_rejection_replays_the_rejection(self, monkeypatch):
         run, approval, fake = pending_refund_approval(monkeypatch)
