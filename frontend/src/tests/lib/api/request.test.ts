@@ -33,10 +33,27 @@ describe("unwrap", () => {
     );
   });
 
-  it("throws a parse_error when data and error are both absent", async () => {
+  it("throws a parse_error when a status expected to carry a body has none", async () => {
     await expect(
-      unwrap(Promise.resolve({ data: undefined, error: undefined, response: fakeResponse(204) })),
+      unwrap(Promise.resolve({ data: undefined, error: undefined, response: fakeResponse(200) })),
     ).rejects.toMatchObject({ code: "parse_error" });
+  });
+
+  it("returns undefined (not an error) for a 204 No Content success", async () => {
+    // Real case: POST /api/v1/auth/logout/ returns 204 with no body.
+    // A 204 legitimately has no body per HTTP semantics — that must not be
+    // treated as a parse failure.
+    const result = await unwrap(
+      Promise.resolve({ data: undefined, error: undefined, response: fakeResponse(204) }),
+    );
+    expect(result).toBeUndefined();
+  });
+
+  it("returns undefined (not an error) for a 304 Not Modified", async () => {
+    const result = await unwrap(
+      Promise.resolve({ data: undefined, error: undefined, response: fakeResponse(304) }),
+    );
+    expect(result).toBeUndefined();
   });
 });
 

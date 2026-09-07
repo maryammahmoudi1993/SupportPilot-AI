@@ -31,6 +31,13 @@ export async function unwrap<T>(resultPromise: Promise<OpenApiFetchResult<T>>): 
   }
 
   if (result.data === undefined) {
+    // A successful response can legitimately have no body — 204 No Content
+    // (e.g. POST /auth/logout/) always does, per HTTP semantics, not just
+    // per this backend's convention. Only treat a *missing* body as an
+    // error for statuses that are expected to carry one.
+    if (result.response.status === 204 || result.response.status === 304) {
+      return undefined as T;
+    }
     throw new ApiError("The server returned an empty response.", {
       code: "parse_error",
       status: result.response.status,
