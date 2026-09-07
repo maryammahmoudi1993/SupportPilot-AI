@@ -8,6 +8,7 @@
  */
 import { apiClient } from "@/lib/api/client";
 import { ensureCsrfCookie } from "@/lib/api/csrf";
+import { clearLogoutPending, markLogoutPending } from "@/lib/api/logout-intent";
 import { unwrap } from "@/lib/api/request";
 import { withAccessTokenRetry } from "@/lib/api/session";
 import { setAccessToken } from "@/lib/api/token-store";
@@ -22,23 +23,41 @@ export async function login(credentials: LoginCredentials): Promise<CurrentUser>
     }),
   );
   setAccessToken(body.access);
+  // A fresh login supersedes any earlier unconfirmed logout: the old
+  // refresh cookie this login replaces is exactly what that logout wanted
+  // revoked, so there's nothing left to warn about.
+  clearLogoutPending();
   return body.user;
 }
 
 /**
- * Best-effort server-side session revocation. Local privileged state is
- * always cleared regardless of whether the server call succeeds — a
- * network outage or an already-expired session must never leave the user
- * stuck looking logged in (see README.md, "Logout").
+ * "complete" — the backend confirmed the refresh token was revoked.
+ * "server_unconfirmed" — the local session was still cleared (see below),
+ * but the request to revoke it server-side failed, so the refresh cookie
+ * may still be valid until it naturally expires or a later attempt
+ * succeeds. Never reported to the user as "you are fully signed out" —
+ * see LoginForm's handling of `AuthState.logoutPending`.
  */
-export async function logout(): Promise<void> {
+export type LogoutResult = "complete" | "server_unconfirmed";
+
+/**
+ * Local privileged state is always cleared immediately, before the network
+ * call even starts — a network outage or an already-expired session must
+ * never leave the user looking logged in (see README.md, "Logout"). Server
+ * revocation is still attempted and its result reported via the return
+ * value, rather than silently swallowed: the caller needs to know whether
+ * it can honestly claim the session is fully gone.
+ */
+export async function logout(): Promise<LogoutResult> {
+  setAccessToken(null);
   try {
     await ensureCsrfCookie();
     await unwrap(apiClient.POST("/api/v1/auth/logout/"));
+    clearLogoutPending();
+    return "complete";
   } catch {
-    // Swallowed intentionally — see the doc comment above.
-  } finally {
-    setAccessToken(null);
+    markLogoutPending();
+    return "server_unconfirmed";
   }
 }
 

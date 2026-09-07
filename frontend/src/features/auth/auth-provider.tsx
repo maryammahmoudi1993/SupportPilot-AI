@@ -18,6 +18,7 @@ import {
 } from "@/features/auth/api";
 import type { CurrentUser, LoginCredentials } from "@/features/auth/types";
 import { ApiError } from "@/lib/api/errors";
+import { isLogoutPending } from "@/lib/api/logout-intent";
 import { setSessionExpiredHandler } from "@/lib/api/token-store";
 
 export type AuthStatus = "loading" | "authenticated" | "unauthenticated";
@@ -33,6 +34,15 @@ export interface AuthState {
    * that wants to offer "Retry" instead of "please log in" can check this.
    */
   error: ApiError | null;
+  /**
+   * True when a logout could not be confirmed server-side (the refresh
+   * token's revocation request failed — network, CSRF, or server error).
+   * The user IS locally signed out (privileged UI is already gone by the
+   * time this is ever true), but the backend session may still be live
+   * until it naturally expires or a later attempt succeeds — never
+   * represent this state to the user as "you are fully signed out".
+   */
+  logoutPending: boolean;
 }
 
 export interface AuthContextValue extends AuthState {
@@ -49,6 +59,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     status: "loading",
     user: null,
     error: null,
+    logoutPending: false,
   });
 
   // Bootstrap/revalidate calls race if e.g. a mount-time bootstrap is still
@@ -59,17 +70,35 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const bootstrap = useCallback(async () => {
     const id = ++requestId.current;
     setState((prev) => ({ ...prev, status: "loading" }));
+
+    if (isLogoutPending()) {
+      // A prior logout's server-side revocation was never confirmed. Retry
+      // it before doing anything else — the user must not be silently
+      // re-authenticated by a refresh cookie that logout intended to kill,
+      // just because it survived to the next page load.
+      const result = await logoutRequest();
+      if (id !== requestId.current) {
+        return;
+      }
+      if (result === "server_unconfirmed") {
+        setState({ status: "unauthenticated", user: null, error: null, logoutPending: true });
+        return;
+      }
+      // Revocation now confirmed — fall through to the normal bootstrap
+      // below, which will correctly find no valid session.
+    }
+
     try {
       const user = await fetchCurrentUser();
       if (id === requestId.current) {
-        setState({ status: "authenticated", user, error: null });
+        setState({ status: "authenticated", user, error: null, logoutPending: false });
       }
     } catch (err) {
       if (id !== requestId.current) {
         return;
       }
       const apiError = err instanceof ApiError ? err : null;
-      setState({ status: "unauthenticated", user: null, error: apiError });
+      setState({ status: "unauthenticated", user: null, error: apiError, logoutPending: false });
     }
   }, []);
 
@@ -89,7 +118,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           return prev;
         }
         requestId.current += 1; // invalidate any in-flight bootstrap/revalidate
-        return { status: "unauthenticated", user: null, error: null };
+        return { status: "unauthenticated", user: null, error: null, logoutPending: false };
       });
     });
     // bootstrap() only calls setState from inside its own `await`
@@ -105,13 +134,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const login = useCallback(async (credentials: LoginCredentials) => {
     const user = await loginRequest(credentials);
     requestId.current += 1;
-    setState({ status: "authenticated", user, error: null });
+    setState({ status: "authenticated", user, error: null, logoutPending: false });
   }, []);
 
   const logout = useCallback(async () => {
-    await logoutRequest();
+    const result = await logoutRequest();
     requestId.current += 1;
-    setState({ status: "unauthenticated", user: null, error: null });
+    setState({
+      status: "unauthenticated",
+      user: null,
+      error: null,
+      logoutPending: result === "server_unconfirmed",
+    });
   }, []);
 
   const value = useMemo<AuthContextValue>(

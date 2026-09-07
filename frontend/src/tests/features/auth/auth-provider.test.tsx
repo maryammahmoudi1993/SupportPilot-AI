@@ -14,6 +14,7 @@ function Probe() {
       <p data-testid="status">{auth.status}</p>
       <p data-testid="user">{auth.user?.email ?? "none"}</p>
       <p data-testid="error">{auth.error?.code ?? "none"}</p>
+      <p data-testid="logoutPending">{String(auth.logoutPending)}</p>
       <button
         onClick={() =>
           void auth.login({ email: FIXTURE_USER.email, password: FIXTURE_USER.password })
@@ -88,16 +89,59 @@ describe("AuthProvider login/logout", () => {
     expect(screen.getByTestId("user")).toHaveTextContent("none");
   });
 
-  it("clears logout privileged UI even when the server logout call fails", async () => {
+  it("clears logout privileged UI even when the server logout call fails, and flags it unconfirmed", async () => {
     mockState.refreshCookieValid = true;
     const user = userEvent.setup();
     renderWithAuth();
     await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("authenticated"));
 
-    mockState.refreshNetworkError = true; // logout's own POST will fail the same way
+    mockState.logoutNetworkError = true;
+    await user.click(screen.getByRole("button", { name: "Logout" }));
+
+    // Privileged UI is gone regardless of the server call's outcome...
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("unauthenticated"));
+    // ...but the app must not silently claim the server confirmed it.
+    expect(screen.getByTestId("logoutPending")).toHaveTextContent("true");
+  });
+
+  it("does not flag logoutPending after a successful logout", async () => {
+    mockState.refreshCookieValid = true;
+    const user = userEvent.setup();
+    renderWithAuth();
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("authenticated"));
+
     await user.click(screen.getByRole("button", { name: "Logout" }));
 
     await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("unauthenticated"));
+    expect(screen.getByTestId("logoutPending")).toHaveTextContent("false");
+  });
+
+  it("retries revocation on the next bootstrap instead of silently re-authenticating, and stops once it succeeds", async () => {
+    // Simulate: user logged in, clicked logout, the request failed, and the
+    // page was reloaded (a fresh AuthProvider mount) while still holding a
+    // technically-valid refresh cookie.
+    mockState.refreshCookieValid = true;
+    mockState.logoutNetworkError = true;
+    const first = renderWithAuth();
+    await waitFor(() => expect(first.getByTestId("status")).toHaveTextContent("authenticated"));
+    await userEvent.setup().click(first.getByRole("button", { name: "Logout" }));
+    await waitFor(() => expect(first.getByTestId("logoutPending")).toHaveTextContent("true"));
+    first.unmount();
+
+    // Reload: the server is still unreachable — must stay unauthenticated,
+    // not silently re-authenticate via the still-technically-valid cookie.
+    const second = renderWithAuth();
+    await waitFor(() => expect(second.getByTestId("status")).toHaveTextContent("unauthenticated"));
+    expect(second.getByTestId("logoutPending")).toHaveTextContent("true");
+    expect(second.getByTestId("user")).toHaveTextContent("none");
+    second.unmount();
+
+    // The network recovers; the next bootstrap's retry succeeds and clears
+    // the pending flag.
+    mockState.logoutNetworkError = false;
+    const third = renderWithAuth();
+    await waitFor(() => expect(third.getByTestId("logoutPending")).toHaveTextContent("false"));
+    expect(third.getByTestId("status")).toHaveTextContent("unauthenticated");
   });
 
   it("transitions to unauthenticated when a background refresh fails mid-session", async () => {

@@ -46,6 +46,8 @@ export const mockState = {
   loginRateLimited: false,
   /** When set, /login/ simulates a network failure (no response at all). */
   loginNetworkError: false,
+  /** When set, /logout/ simulates a network failure (no response at all) — the server never sees the request, so refreshCookieValid is left untouched. */
+  logoutNetworkError: false,
 };
 
 export function resetAuthMockState(): void {
@@ -59,6 +61,7 @@ export function resetAuthMockState(): void {
   mockState.refreshNetworkError = false;
   mockState.loginRateLimited = false;
   mockState.loginNetworkError = false;
+  mockState.logoutNetworkError = false;
   document.cookie = `${CSRF_COOKIE_NAME}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/`;
 }
 
@@ -157,6 +160,10 @@ export const authHandlers = [
   }),
 
   http.post(`${BASE}/api/v1/auth/logout/`, async ({ request }) => {
+    if (mockState.logoutNetworkError) {
+      return HttpResponse.error();
+    }
+
     const csrfRejection = requireCsrf(request);
     if (csrfRejection) return csrfRejection;
 

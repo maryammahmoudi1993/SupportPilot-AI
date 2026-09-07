@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { login } from "@/features/auth/api";
-import { FIXTURE_USER } from "@/tests/msw/handlers";
+import { login, logout } from "@/features/auth/api";
+import { FIXTURE_USER, mockState } from "@/tests/msw/handlers";
 
 describe("no token leak", () => {
   beforeEach(() => {
@@ -30,5 +30,20 @@ describe("no token leak", () => {
     // the same holds for whatever mock/test infrastructure stands in for
     // cookies here.
     expect(document.cookie).not.toMatch(/refresh/i);
+  });
+
+  it("the logout-pending marker never carries a token, only a boolean flag", async () => {
+    await login({ email: FIXTURE_USER.email, password: FIXTURE_USER.password });
+    mockState.logoutNetworkError = true;
+
+    await logout();
+
+    // Something was written (the marker) — but it must never look like a
+    // JWT (three base64url segments joined by dots) or contain the word
+    // "token"/the access token value itself.
+    expect(localStorage.length).toBe(1);
+    const allValues = Object.values(localStorage).join(" ");
+    expect(allValues).not.toMatch(/^ey[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/);
+    expect(allValues.length).toBeLessThan(10); // just the "1" flag, not a serialized object/credential
   });
 });

@@ -24,9 +24,13 @@ afterAll(() => server.close());
 
 // The access token, in-flight refresh promise, and mock auth server state
 // are all module-level singletons — reset them before every test so one
-// test's login/refresh state never leaks into the next.
+// test's login/refresh state never leaks into the next. localStorage now
+// carries the (non-secret) logout-pending marker (src/lib/api/logout-intent.ts)
+// and must be cleared the same way.
 beforeEach(() => {
   __resetTokenStoreForTests();
   __resetSessionForTests();
   resetAuthMockState();
+  localStorage.clear();
+  sessionStorage.clear();
 });

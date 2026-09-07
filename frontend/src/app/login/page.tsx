@@ -6,6 +6,7 @@ import { Suspense, useEffect } from "react";
 import { useAuth } from "@/features/auth/auth-provider";
 import { LoginForm } from "@/features/auth/login-form";
 import { resolveRedirectTarget } from "@/features/auth/redirect";
+import { Alert } from "@/components/ui/alert";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Spinner } from "@/components/ui/spinner";
 
@@ -31,7 +32,16 @@ function LoginPageContent() {
   }
 
   return (
-    <main id="main-content" className="mx-auto flex w-full max-w-md flex-1 items-center p-6">
+    <main
+      id="main-content"
+      className="mx-auto flex w-full max-w-md flex-1 flex-col justify-center gap-4 p-6"
+    >
+      {auth.logoutPending && (
+        <Alert variant="warning" title="Sign-out not fully confirmed">
+          You&apos;re signed out on this device, but we couldn&apos;t confirm it with the server.
+          We&apos;ll keep trying automatically — or sign in again to replace the session.
+        </Alert>
+      )}
       <Card className="w-full">
         <CardHeader>
           <CardTitle>Sign in</CardTitle>
