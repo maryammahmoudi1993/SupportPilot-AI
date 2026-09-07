@@ -50,4 +50,21 @@ describe("RootPage", () => {
 
     await waitFor(() => expect(replace).toHaveBeenCalledWith(DEFAULT_REDIRECT_TARGET));
   });
+
+  it("G. renders SessionVerificationError (not an infinite spinner, not a /login redirect) when the session is uncertain", async () => {
+    mockState.refreshNetworkError = true;
+    const replace = setupRouterMock();
+    render(
+      <AuthProvider>
+        <RootPage />
+      </AuthProvider>,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByText("We couldn't verify your session")).toBeInTheDocument(),
+    );
+    expect(screen.queryByText("Loading")).not.toBeInTheDocument();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(replace).not.toHaveBeenCalled();
+  });
 });

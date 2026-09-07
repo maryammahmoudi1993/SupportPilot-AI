@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import { AuthProvider } from "@/features/auth/auth-provider";
 import { LoginForm } from "@/features/auth/login-form";
 import { DEFAULT_REDIRECT_TARGET } from "@/features/auth/redirect";
+import { __setTimeoutOverrideForTests } from "@/lib/api/request";
 import { FIXTURE_USER, mockState } from "@/tests/msw/handlers";
 
 vi.mock("next/navigation", () => ({
@@ -96,6 +97,18 @@ describe("LoginForm", () => {
     await fillAndSubmit(FIXTURE_USER.email, FIXTURE_USER.password);
 
     expect(await screen.findByRole("alert")).toHaveTextContent(/unable to reach the server/i);
+  });
+
+  it("B. bounds a hung login request — the form recovers, no permanently-disabled submit button", async () => {
+    __setTimeoutOverrideForTests(50);
+    await renderLoginForm();
+    mockState.loginHang = true;
+
+    await fillAndSubmit(FIXTURE_USER.email, FIXTURE_USER.password);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/took too long/i);
+    // The submit state resets — not stuck disabled/loading forever.
+    expect(screen.getByRole("button", { name: "Sign in" })).toBeEnabled();
   });
 
   it("never logs the password to the console", async () => {

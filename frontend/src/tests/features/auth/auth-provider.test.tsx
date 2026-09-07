@@ -3,8 +3,9 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
 import { AuthProvider, useAuth } from "@/features/auth/auth-provider";
-import { __setRefreshTimeoutMsForTests, withAccessTokenRetry } from "@/lib/api/session";
+import { withAccessTokenRetry } from "@/lib/api/session";
 import { apiClient } from "@/lib/api/client";
+import { __setTimeoutOverrideForTests } from "@/lib/api/request";
 import { FIXTURE_USER, mockState } from "@/tests/msw/handlers";
 
 function Probe() {
@@ -77,13 +78,43 @@ describe("AuthProvider bootstrap", () => {
   });
 
   it("B. initial bootstrap timeout resolves to uncertain", async () => {
-    __setRefreshTimeoutMsForTests(50);
+    __setTimeoutOverrideForTests(50);
     mockState.refreshTimeout = true;
 
     renderWithAuth();
 
     await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("uncertain"));
     expect(screen.getByTestId("error")).toHaveTextContent("timeout");
+  });
+
+  it("3B.A. refresh succeeds but /me/ hangs: bounded timeout, resolves to uncertain — no infinite loading, no login redirect", async () => {
+    __setTimeoutOverrideForTests(50);
+    mockState.refreshCookieValid = true;
+    mockState.meHang = true;
+
+    renderWithAuth();
+
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("uncertain"));
+    expect(screen.getByTestId("error")).toHaveTextContent("timeout");
+    expect(screen.getByTestId("user")).toHaveTextContent("none");
+  });
+
+  it("E. an unexpected non-auth backend response (internal_server_error) during bootstrap resolves to uncertain, not unauthenticated", async () => {
+    mockState.refreshInternalServerError = true;
+
+    renderWithAuth();
+
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("uncertain"));
+    expect(screen.getByTestId("error")).toHaveTextContent("internal_server_error");
+  });
+
+  it("F. a malformed/unparseable backend response during bootstrap resolves to uncertain, not unauthenticated", async () => {
+    mockState.refreshMalformedBody = true;
+
+    renderWithAuth();
+
+    await waitFor(() => expect(screen.getByTestId("status")).toHaveTextContent("uncertain"));
+    expect(screen.getByTestId("error")).toHaveTextContent("parse_error");
   });
 });
 

@@ -59,12 +59,24 @@ export const mockState = {
   refreshNetworkError: false,
   /** When set, /refresh/ simulates a timed-out/aborted request (distinct from a plain network error — see errors.ts's normalizeTransportError). */
   refreshTimeout: false,
+  /** When set, /refresh/ responds 500 (a real server error — not an authentication verdict). */
+  refreshInternalServerError: false,
+  /** When set, /refresh/ responds 200 with a genuinely empty body — exercises unwrap()'s parse_error path (request.ts), not a network/HTTP-error path. */
+  refreshMalformedBody: false,
   /** When set, /login/ always 429s (rate-limit simulation). */
   loginRateLimited: false,
   /** When set, /login/ simulates a network failure (no response at all). */
   loginNetworkError: false,
+  /** When set, /login/ never resolves — exercises the real client-side request timeout. */
+  loginHang: false,
   /** When set, /logout/ simulates a network failure (no response at all) — the server never sees the request, so refreshCookieValid is left untouched. */
   logoutNetworkError: false,
+  /** When set, /logout/ never resolves — exercises the real client-side request timeout. */
+  logoutHang: false,
+  /** When set, /me/ never resolves — exercises the real client-side request timeout. */
+  meHang: false,
+  /** When set, GET /csrf/ never resolves — exercises the real client-side request timeout on the CSRF-priming call every login/refresh/logout makes first. */
+  csrfHang: false,
 };
 
 export function resetAuthMockState(): void {
@@ -78,9 +90,15 @@ export function resetAuthMockState(): void {
   mockState.meAlwaysUnauthorized = false;
   mockState.refreshNetworkError = false;
   mockState.refreshTimeout = false;
+  mockState.refreshInternalServerError = false;
+  mockState.refreshMalformedBody = false;
   mockState.loginRateLimited = false;
   mockState.loginNetworkError = false;
+  mockState.loginHang = false;
   mockState.logoutNetworkError = false;
+  mockState.logoutHang = false;
+  mockState.meHang = false;
+  mockState.csrfHang = false;
   document.cookie = `${CSRF_COOKIE_NAME}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/`;
 }
 
@@ -106,7 +124,10 @@ function issueAccessToken(): string {
 }
 
 export const authHandlers = [
-  http.get(`${BASE}/api/v1/auth/csrf/`, () => {
+  http.get(`${BASE}/api/v1/auth/csrf/`, async () => {
+    if (mockState.csrfHang) {
+      await delay("infinite");
+    }
     const token = `mock-csrf-token-${++csrfCounter}`;
     document.cookie = `${CSRF_COOKIE_NAME}=${token}; path=/`;
     return HttpResponse.json({ detail: "CSRF cookie set." });
@@ -117,6 +138,10 @@ export const authHandlers = [
 
     if (mockState.loginNetworkError) {
       return HttpResponse.error();
+    }
+
+    if (mockState.loginHang) {
+      await delay("infinite");
     }
 
     const csrfRejection = requireCsrf(request);
@@ -165,14 +190,29 @@ export const authHandlers = [
 
     if (mockState.refreshTimeout) {
       // Never resolves — pairs with the real client-side timeout
-      // (session.ts's `withTimeout(DEFAULT_TIMEOUT_MS)`) actually aborting
-      // the request, so the test can advance fake timers to produce a
-      // genuine `AbortError` -> "timeout" ApiError, not a simulated one.
+      // (session.ts's `requestWithTimeout`) actually aborting the request,
+      // so the test can produce a genuine `AbortError` -> "timeout"
+      // ApiError, not a simulated one.
       await delay("infinite");
     }
 
     const csrfRejection = requireCsrf(request);
     if (csrfRejection) return csrfRejection;
+
+    if (mockState.refreshInternalServerError) {
+      return HttpResponse.json(
+        { error: { code: "internal_server_error", message: "Something went wrong." } },
+        { status: 500 },
+      );
+    }
+
+    if (mockState.refreshMalformedBody) {
+      // A 200 with a genuinely empty body — unwrap()'s parse_error path
+      // (request.ts: a status not documented as legitimately bodyless, but
+      // `data` came back undefined). Real-world equivalent: a
+      // misconfigured proxy/load balancer stripping the response body.
+      return new HttpResponse(null, { status: 200 });
+    }
 
     if (!mockState.refreshCookieValid) {
       return HttpResponse.json(
@@ -191,6 +231,10 @@ export const authHandlers = [
       return HttpResponse.error();
     }
 
+    if (mockState.logoutHang) {
+      await delay("infinite");
+    }
+
     const csrfRejection = requireCsrf(request);
     if (csrfRejection) return csrfRejection;
 
@@ -199,11 +243,20 @@ export const authHandlers = [
     return new HttpResponse(null, { status: 204 });
   }),
 
-  http.get(`${BASE}/api/v1/auth/me/`, ({ request }) => {
+  http.get(`${BASE}/api/v1/auth/me/`, async ({ request }) => {
     mockState.meCallCount += 1;
 
     const authHeader = request.headers.get("authorization");
     const presentedToken = authHeader?.replace(/^Bearer\s+/i, "") ?? null;
+
+    if (mockState.meHang && presentedToken) {
+      // Only hang the *authenticated* attempt (a real access token
+      // presented — i.e. after a successful refresh), not the initial
+      // anonymous call every bootstrap makes first: that one is meant to
+      // 401 immediately and trigger the refresh, exactly like the
+      // "refresh succeeds, then /me/ hangs" scenario it simulates.
+      await delay("infinite");
+    }
 
     if (
       mockState.forceMeUnauthorized ||

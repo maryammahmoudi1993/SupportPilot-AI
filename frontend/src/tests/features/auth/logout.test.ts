@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { login, logout } from "@/features/auth/api";
 import { isLogoutPending } from "@/lib/api/logout-intent";
+import { __setTimeoutOverrideForTests } from "@/lib/api/request";
 import { getAccessToken } from "@/lib/api/token-store";
 import { FIXTURE_USER, mockState } from "@/tests/msw/handlers";
 
@@ -45,6 +46,18 @@ describe("logout — failure matrix", () => {
     // The server never saw the request, so its idea of the session is
     // untouched — the whole reason a pending marker is needed.
     expect(mockState.refreshCookieValid).toBe(true);
+  });
+
+  it("C. a hung server logout request is bounded — reports server_unconfirmed, local logout stays effective, no indefinite wait", async () => {
+    __setTimeoutOverrideForTests(50);
+    await loginFixtureUser();
+    mockState.logoutHang = true;
+
+    const result = await logout();
+
+    expect(result).toBe("server_unconfirmed");
+    expect(getAccessToken()).toBeNull();
+    expect(isLogoutPending()).toBe(true);
   });
 
   it("E. a later successful logout clears a previously-pending marker", async () => {

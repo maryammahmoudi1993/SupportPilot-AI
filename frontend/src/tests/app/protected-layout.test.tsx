@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import ProtectedLayout from "@/app/(protected)/layout";
 import { AuthProvider } from "@/features/auth/auth-provider";
 import { apiClient } from "@/lib/api/client";
+import { __setTimeoutOverrideForTests } from "@/lib/api/request";
 import { withAccessTokenRetry } from "@/lib/api/session";
 import { FIXTURE_USER, FIXTURE_WORKSPACE_ACME, mockState } from "@/tests/msw/handlers";
 
@@ -160,6 +161,25 @@ describe("ProtectedLayout", () => {
       expect(screen.getByText("We couldn't verify your session")).toBeInTheDocument(),
     );
     expect(replace).not.toHaveBeenCalled();
+  });
+
+  it("H. a hung /me/ (refresh succeeded) is bounded, resolves to uncertain, and Retry recovers to authenticated once /me/ answers", async () => {
+    __setTimeoutOverrideForTests(50);
+    mockState.refreshCookieValid = true;
+    mockState.meHang = true;
+    setupRouterMock();
+    renderProtected();
+
+    await waitFor(() =>
+      expect(screen.getByText("We couldn't verify your session")).toBeInTheDocument(),
+    );
+    expect(screen.queryByTestId("privileged-content")).not.toBeInTheDocument();
+
+    mockState.meHang = false;
+    FIXTURE_USER.workspaces = [FIXTURE_WORKSPACE_ACME];
+    await userEvent.setup().click(screen.getByRole("button", { name: "Retry" }));
+
+    await waitFor(() => expect(screen.getByTestId("privileged-content")).toBeInTheDocument());
   });
 
   it("redirects exactly once on a CONFIRMED invalid session, without looping", async () => {
