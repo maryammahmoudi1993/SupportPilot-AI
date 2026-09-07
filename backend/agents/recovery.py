@@ -6,9 +6,10 @@ Checkpoint 1 documented a real gap in
 left ``RUNNING`` by a worker that crashed mid-execution — with
 ``CELERY_TASK_ACKS_LATE`` unset and the task's ``max_retries=3`` inert (see
 that doc's Retry model section), such a row is stuck forever with no
-automated recovery path. This module closes the *logic* gap; wiring a
-periodic Celery Beat schedule to call it is deliberately left to Phase 17
-(see settings comment above ``AGENTS_STUCK_RUN_STALE_SECONDS``).
+automated recovery path. This module holds the recovery *logic*; the
+periodic Celery Beat schedule that calls it lives in
+``agents.tasks.recover_stuck_agent_runs_task`` and
+``config/celery.py``'s ``beat_schedule`` (Phase 17).
 
 Design choice — recover by failing, never by re-executing: a ``RUNNING``
 row's worker may already have called a tool with real-world side effects
@@ -54,11 +55,18 @@ logger = logging.getLogger("supportpilot")
 
 
 def recover_stuck_agent_runs(*, batch_size: int | None = None, now=None) -> int:
-    """Fail ``AgentRun`` rows left ``RUNNING`` past the staleness threshold.
+    """Fail ``AgentRun`` rows left ``RUNNING`` past the staleness threshold,
+    re-publish rows left ``PENDING`` past a much shorter threshold, and
+    re-publish rows left ``WAITING_FOR_APPROVAL`` whose gating approval is
+    already decided (Phase 17 final acceptance gate, Part B — see
+    ``_redispatch_stuck_pending_runs``/``_redispatch_stuck_waiting_for_approval_runs``
+    for why these are distinct, and distinctly safer, recoveries than the
+    RUNNING case).
 
-    Returns the number of runs actually recovered. Safe to call repeatedly
-    and from multiple concurrent workers/schedulers: each candidate row is
-    only ever recovered once (section 11 idempotency, race-safety below).
+    Returns the number of runs actually recovered/re-published. Safe to call
+    repeatedly and from multiple concurrent workers/schedulers: each
+    candidate row is only ever recovered once (section 11 idempotency,
+    race-safety below).
     """
     now = now or timezone.now()
     cutoff = now - timedelta(seconds=settings.AGENTS_STUCK_RUN_STALE_SECONDS)
@@ -80,7 +88,95 @@ def recover_stuck_agent_runs(*, batch_size: int | None = None, now=None) -> int:
             extra={"event": "agents_stuck_run_recovered", "count": recovered},
         )
         observe_stuck_run_recovery(domain="agent", count=recovered)
+    recovered += _redispatch_stuck_pending_runs(batch_size=batch_size, now=now)
+    recovered += _redispatch_stuck_waiting_for_approval_runs(batch_size=batch_size, now=now)
     return recovered
+
+
+def _redispatch_stuck_waiting_for_approval_runs(*, batch_size: int, now) -> int:
+    """A decision (approve/reject/expire) dispatches
+    ``resume_approved_action_task`` via its own ``transaction.on_commit`` —
+    if that single publish is lost, the ``AgentRun`` stays
+    ``WAITING_FOR_APPROVAL`` forever even though the gating
+    ``ApprovalRequest`` already reached a terminal decision, and no manual
+    API path exists to re-decide an already-resolved approval. Re-publishing
+    is safe: ``agents.services._claim_run_for_resume`` makes a
+    second/redelivered resume call a no-op (see
+    ``approvals/tasks.py``'s docstring). Deliberately excludes ``cancelled``
+    approvals — those are the terminal outcome of the *run itself* already
+    being cancelled through a different path (``cancel_approval_for_execution``
+    never dispatches a resume), so there is nothing to redispatch for one.
+    """
+    from approvals.models import ApprovalStatus
+
+    pending_cutoff = now - timedelta(
+        seconds=settings.AGENTS_STUCK_RUN_WAITING_FOR_APPROVAL_STALE_SECONDS
+    )
+    candidates = list(
+        AgentRun.objects.filter(
+            status=AgentRunStatus.WAITING_FOR_APPROVAL,
+            tool_executions__approval_request__status__in=(
+                ApprovalStatus.APPROVED,
+                ApprovalStatus.REJECTED,
+                ApprovalStatus.EXPIRED,
+            ),
+            tool_executions__approval_request__resolved_at__lte=pending_cutoff,
+        )
+        .order_by("updated_at")
+        .values_list("tool_executions__approval_request__id", flat=True)[:batch_size]
+    )
+    for approval_id in candidates:
+        _redispatch_resume(approval_id)
+    if candidates:
+        logger.info(
+            "agents_stuck_waiting_for_approval_run_redispatched",
+            extra={
+                "event": "agents_stuck_waiting_for_approval_run_redispatched",
+                "count": len(candidates),
+            },
+        )
+        observe_stuck_run_recovery(domain="agent_approval_resume_dispatch", count=len(candidates))
+    return len(candidates)
+
+
+def _redispatch_resume(approval_id) -> None:
+    from approvals.services import _dispatch_resume
+
+    _dispatch_resume(approval_id)
+
+
+def _redispatch_stuck_pending_runs(*, batch_size: int, now) -> int:
+    """A run's *only* initial publish is the ``transaction.on_commit``
+    ``.delay()`` call in ``create_agent_run`` — if that message never
+    reaches a worker (broker outage at that exact moment), the row stays
+    ``PENDING`` forever: the RUNNING-only sweep above can never see it, since
+    it never reaches RUNNING without a worker claiming it first. Re-publishing
+    is exactly as safe as the first publish: ``claim_agent_run`` only ever
+    transitions a row out of PENDING once, under its own row lock, so no
+    side effect has happened yet — this never risks duplicating one, unlike
+    recovering a RUNNING row.
+    """
+    pending_cutoff = now - timedelta(seconds=settings.AGENTS_STUCK_RUN_PENDING_STALE_SECONDS)
+    run_ids = list(
+        AgentRun.objects.filter(status=AgentRunStatus.PENDING, created_at__lte=pending_cutoff)
+        .order_by("created_at")
+        .values_list("id", flat=True)[:batch_size]
+    )
+    for run_id in run_ids:
+        _redispatch_run(run_id)
+    if run_ids:
+        logger.info(
+            "agents_stuck_pending_run_redispatched",
+            extra={"event": "agents_stuck_pending_run_redispatched", "count": len(run_ids)},
+        )
+        observe_stuck_run_recovery(domain="agent_pending_dispatch", count=len(run_ids))
+    return len(run_ids)
+
+
+def _redispatch_run(run_id) -> None:
+    from .services import _dispatch_run
+
+    _dispatch_run(run_id)
 
 
 def _recover_one_stuck_run(run_id, *, cutoff, now) -> bool:

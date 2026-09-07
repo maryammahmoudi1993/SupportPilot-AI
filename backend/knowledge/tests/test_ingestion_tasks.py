@@ -4,7 +4,7 @@ from unittest.mock import patch
 from django.test import override_settings
 
 from knowledge.errors import RetryableIngestionError
-from knowledge.tasks import ingest_knowledge_document
+from knowledge.tasks import ingest_knowledge_document, recover_stuck_ingestion_jobs_task
 
 
 def test_task_delegates_to_service():
@@ -39,3 +39,12 @@ def test_retry_exhaustion_marks_final_failure():
         result = task.run("job-id")
     assert result["status"] == "failed"
     fail.assert_called_once()
+
+
+def test_recover_stuck_ingestion_jobs_task_delegates_to_recovery_module():
+    """Thin Celery boundary — carries zero recovery logic of its own,
+    mirroring ``agents.tasks.recover_stuck_agent_runs_task`` (Phase 17 final
+    acceptance gate, Part B)."""
+    with patch("knowledge.recovery.recover_stuck_ingestion_jobs", return_value=3) as recover:
+        assert recover_stuck_ingestion_jobs_task.run() == 3
+    recover.assert_called_once_with()

@@ -6,6 +6,7 @@ time, per the checkpoint's "do not wait in real time" instruction.
 from __future__ import annotations
 
 from datetime import timedelta
+from unittest.mock import patch
 
 import pytest
 from django.utils import timezone
@@ -381,3 +382,103 @@ class TestRecoverStuckEvaluationRuns:
         assert recovered == 2
         assert statuses.count(EvaluationRunStatus.RUNNING) == 1
         assert statuses.count(EvaluationRunStatus.FAILED) == 2
+
+
+def _age_run_created(run: EvaluationRun, seconds: int) -> None:
+    EvaluationRun.objects.filter(pk=run.pk).update(
+        created_at=timezone.now() - timedelta(seconds=seconds)
+    )
+
+
+def _age_result_created(result: EvaluationResult, seconds: int) -> None:
+    EvaluationResult.objects.filter(pk=result.pk).update(
+        created_at=timezone.now() - timedelta(seconds=seconds)
+    )
+
+
+class TestRedispatchStuckPendingEvaluationRuns:
+    """Phase 17 final acceptance gate (Part B): a lost initial run-dispatch
+    message leaves an EvaluationRun PENDING forever, invisible to the
+    RUNNING-only sweep above — safe to re-publish since nothing has
+    executed yet."""
+
+    def test_fresh_pending_run_is_untouched(self):
+        run = EvaluationRunFactory(status=EvaluationRunStatus.PENDING)
+        _age_run_created(run, seconds=1)
+
+        with patch("evaluations.recovery._redispatch_start_run") as redispatch:
+            recovered = recover_stuck_evaluation_runs()
+
+        assert recovered == 0
+        redispatch.assert_not_called()
+
+    def test_stale_pending_run_is_redispatched_not_failed(self):
+        run = EvaluationRunFactory(status=EvaluationRunStatus.PENDING)
+        _age_run_created(run, seconds=121)
+
+        with patch("evaluations.recovery._redispatch_start_run") as redispatch:
+            recovered = recover_stuck_evaluation_runs()
+
+        assert recovered == 1
+        redispatch.assert_called_once_with(run.id)
+        run.refresh_from_db()
+        assert run.status == EvaluationRunStatus.PENDING
+
+    def test_redispatch_calls_the_real_dispatch_boundary(self):
+        run = EvaluationRunFactory(status=EvaluationRunStatus.PENDING)
+        _age_run_created(run, seconds=121)
+
+        with patch("evaluations.tasks.start_evaluation_run_task") as task:
+            recovered = recover_stuck_evaluation_runs()
+
+        assert recovered == 1
+        task.delay.assert_called_once()
+        assert task.delay.call_args.args[0] == str(run.id)
+
+
+class TestRedispatchStuckPendingEvaluationCases:
+    """Mirrors the run-level class above one level down: a case's own
+    dispatch can be lost even though its parent run reached RUNNING."""
+
+    def test_fresh_pending_case_is_untouched(self):
+        run = EvaluationRunFactory(status=EvaluationRunStatus.RUNNING, total_cases=1)
+        snapshot = EvaluationCaseSnapshotFactory(run=run, sequence=0, case_key="case-0")
+        result = EvaluationResultFactory(
+            run=run, case_snapshot=snapshot, status=EvaluationResultStatus.PENDING
+        )
+        _age_result_created(result, seconds=1)
+
+        with patch("evaluations.recovery._redispatch_case_executions") as redispatch:
+            recovered = recover_stuck_evaluation_runs()
+
+        assert recovered == 0
+        redispatch.assert_not_called()
+
+    def test_stale_pending_case_is_redispatched(self):
+        run = EvaluationRunFactory(status=EvaluationRunStatus.RUNNING, total_cases=1)
+        snapshot = EvaluationCaseSnapshotFactory(run=run, sequence=0, case_key="case-0")
+        result = EvaluationResultFactory(
+            run=run, case_snapshot=snapshot, status=EvaluationResultStatus.PENDING
+        )
+        _age_result_created(result, seconds=121)
+
+        with patch("evaluations.recovery._redispatch_case_executions") as redispatch:
+            recovered = recover_stuck_evaluation_runs()
+
+        assert recovered == 1
+        redispatch.assert_called_once_with([result.id])
+
+    def test_redispatch_calls_the_real_dispatch_boundary(self):
+        run = EvaluationRunFactory(status=EvaluationRunStatus.RUNNING, total_cases=1)
+        snapshot = EvaluationCaseSnapshotFactory(run=run, sequence=0, case_key="case-0")
+        result = EvaluationResultFactory(
+            run=run, case_snapshot=snapshot, status=EvaluationResultStatus.PENDING
+        )
+        _age_result_created(result, seconds=121)
+
+        with patch("evaluations.tasks.execute_evaluation_case_task") as task:
+            recovered = recover_stuck_evaluation_runs()
+
+        assert recovered == 1
+        task.delay.assert_called_once()
+        assert task.delay.call_args.args[0] == str(result.id)

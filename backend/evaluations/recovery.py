@@ -45,8 +45,11 @@ logger = logging.getLogger("supportpilot")
 def recover_stuck_evaluation_runs(*, batch_size: int | None = None, now=None) -> int:
     """Recover ``EvaluationRun`` rows left ``RUNNING`` past the staleness
     threshold: fail any of that run's stale ``RUNNING`` cases, then
-    recompute and (if now complete) finalize the run. Returns the number of
-    runs actually touched. Safe to call repeatedly/concurrently — see
+    recompute and (if now complete) finalize the run. Also re-publish rows/
+    cases left ``PENDING`` past a much shorter threshold (Phase 17 final
+    acceptance gate, Part B — see ``_redispatch_stuck_pending_runs``/
+    ``_redispatch_stuck_pending_cases``). Returns the number of runs/cases
+    actually touched. Safe to call repeatedly/concurrently — see
     ``_recover_one_stuck_run``."""
     now = now or timezone.now()
     cutoff = now - timedelta(seconds=settings.EVALUATIONS_STUCK_RUN_STALE_SECONDS)
@@ -68,7 +71,78 @@ def recover_stuck_evaluation_runs(*, batch_size: int | None = None, now=None) ->
             extra={"event": "evaluations_stuck_run_recovered", "count": recovered},
         )
         observe_stuck_run_recovery(domain="evaluation", count=recovered)
+    recovered += _redispatch_stuck_pending_runs(batch_size=batch_size, now=now)
+    recovered += _redispatch_stuck_pending_cases(batch_size=batch_size, now=now)
     return recovered
+
+
+def _redispatch_stuck_pending_runs(*, batch_size: int, now) -> int:
+    """A run's *only* initial publish is the ``transaction.on_commit``
+    ``.delay()`` call in ``create_evaluation_run`` — if that message never
+    reaches a worker, the row stays ``PENDING`` forever and is invisible to
+    the RUNNING-only sweep above. Re-publishing is exactly as safe as the
+    first publish: ``claim_evaluation_run`` only ever transitions a row out
+    of PENDING once, under its own row lock (mirrors
+    ``agents.recovery._redispatch_stuck_pending_runs``)."""
+    pending_cutoff = now - timedelta(seconds=settings.EVALUATIONS_STUCK_RUN_PENDING_STALE_SECONDS)
+    run_ids = list(
+        EvaluationRun.objects.filter(
+            status=EvaluationRunStatus.PENDING, created_at__lte=pending_cutoff
+        )
+        .order_by("created_at")
+        .values_list("id", flat=True)[:batch_size]
+    )
+    for run_id in run_ids:
+        _redispatch_start_run(run_id)
+    if run_ids:
+        logger.info(
+            "evaluations_stuck_pending_run_redispatched",
+            extra={"event": "evaluations_stuck_pending_run_redispatched", "count": len(run_ids)},
+        )
+        observe_stuck_run_recovery(domain="evaluation_pending_dispatch", count=len(run_ids))
+    return len(run_ids)
+
+
+def _redispatch_stuck_pending_cases(*, batch_size: int, now) -> int:
+    """Mirrors ``_redispatch_stuck_pending_runs`` one level down: a case's
+    dispatch (``dispatch_pending_case_executions``) can itself be lost even
+    though its parent run reached RUNNING. ``execute_evaluation_case_task``
+    -> ``execute_evaluation_case`` claims under its own row lock (see
+    ``evaluations/services.py``), so re-publishing an already-claimed or
+    already-terminal case id is a safe no-op."""
+    pending_cutoff = now - timedelta(seconds=settings.EVALUATIONS_STUCK_CASE_PENDING_STALE_SECONDS)
+    result_ids = list(
+        EvaluationResult.objects.filter(
+            status=EvaluationResultStatus.PENDING,
+            replay_of__isnull=True,
+            created_at__lte=pending_cutoff,
+        )
+        .order_by("created_at")
+        .values_list("id", flat=True)[:batch_size]
+    )
+    if result_ids:
+        _redispatch_case_executions(result_ids)
+        logger.info(
+            "evaluations_stuck_pending_case_redispatched",
+            extra={
+                "event": "evaluations_stuck_pending_case_redispatched",
+                "count": len(result_ids),
+            },
+        )
+        observe_stuck_run_recovery(domain="evaluation_case_pending_dispatch", count=len(result_ids))
+    return len(result_ids)
+
+
+def _redispatch_start_run(run_id) -> None:
+    from .services import _dispatch_start_run
+
+    _dispatch_start_run(run_id)
+
+
+def _redispatch_case_executions(result_ids) -> None:
+    from .services import _dispatch_case_executions
+
+    _dispatch_case_executions(result_ids)
 
 
 def _recover_one_stuck_run(run_id, *, cutoff, now) -> bool:

@@ -150,14 +150,91 @@ child-case progress over a synthetic heartbeat" guidance. See
 single-case stale-parent/live-case, race-favors-progress, all-stale,
 recovered-run-cannot-regress) for the regression proof.
 
-**Recovery primitive exists: YES** for `agents` and `evaluations`.
-**Automatic periodic scheduling exists: NO** — nothing calls either sweep
-function on a schedule yet; see Residual risks below for the Phase 17
-boundary. `approvals` needed no equivalent: its only "worker disappears"
-exposure is `ApprovalRequest` sitting `PENDING` past its TTL, which
-`expire_stale_approvals` (existing, scheduled-in-Phase-17 like the others)
-already covers — there is no separate `approvals`-owned `RUNNING` state a
-crashed worker could strand.
+**Recovery primitive exists: YES** for `agents`, `evaluations`, and (Phase 17
+final gate) `knowledge` ingestion. **Automatic periodic scheduling exists:
+YES** — all three are wired into Celery Beat (`config/celery.py`'s
+`beat_schedule`); this was the one remaining packaging gap Phase 16
+Checkpoint 2 deliberately left open, closed by Phase 17 (see the Beat
+schedule table in `docs/operations/deployment.md`). `approvals` needed no
+equivalent: its only "worker disappears" exposure is `ApprovalRequest`
+sitting `PENDING` past its TTL, which `expire_stale_approvals` (already
+scheduled) already covers — there is no separate `approvals`-owned
+`RUNNING` state a crashed worker could strand.
+
+**Phase 17 final backend acceptance gate closed a second, distinct gap: lost
+*initial* dispatch, not just a crashed RUNNING worker.** The final
+task-durability inventory (auditing every `@shared_task` against its DB
+source of truth) found that `agents.recovery.recover_stuck_agent_runs` and
+`evaluations.recovery.recover_stuck_evaluation_runs` only ever looked at rows
+already `RUNNING` — a row's *first* publish (the `transaction.on_commit`
+`.delay()` call made once, at creation, while still `PENDING`) could itself
+be lost (a broker outage at that exact moment), leaving the row `PENDING`
+forever with nothing to ever find it: it never reaches `RUNNING` without a
+worker claiming it first, so the RUNNING-only sweep can never see it. This
+was a real, customer-facing `UNRECOVERABLE` (category D) finding for
+`AgentRun` — a support request could silently never get an agent response —
+and the equivalent applied one level down to `EvaluationRun`
+(`start_evaluation_run_task`) and to an individual `EvaluationResult` case
+(`execute_evaluation_case_task`, dispatched separately by
+`dispatch_pending_case_executions`).
+
+The fix is a re-publish, not a failure, and is a categorically safer
+operation than recovering a RUNNING row: `claim_agent_run` /
+`claim_evaluation_run` only ever transition a row out of `PENDING` once,
+under their own row lock, so a still-`PENDING` row has never executed
+anything — redispatching it can never risk duplicating a side effect the
+way redispatching a RUNNING row would. `agents.recovery
+._redispatch_stuck_pending_runs`, `evaluations.recovery
+._redispatch_stuck_pending_runs`, and `evaluations.recovery
+._redispatch_stuck_pending_cases` each scan for rows/cases still `PENDING`
+past `AGENTS_STUCK_RUN_PENDING_STALE_SECONDS` /
+`EVALUATIONS_STUCK_RUN_PENDING_STALE_SECONDS` /
+`EVALUATIONS_STUCK_CASE_PENDING_STALE_SECONDS` (default 120s each — no
+1800s floor applies, unlike the RUNNING thresholds: a legitimate claim
+happens within milliseconds of dispatch, so redispatching early costs
+nothing and there is no "still legitimately mid-execution" case to
+distinguish from). Both are called from the same existing
+`recover_stuck_agent_runs()` / `recover_stuck_evaluation_runs()` entry
+points and the same Beat schedule entries — no new scheduled task was
+needed. See `agents/tests/test_recovery.py::TestRedispatchStuckPendingAgentRuns`
+and the two `evaluations/tests/test_recovery.py` classes with the same
+prefix for the regression proof.
+
+**The same inventory found a third gap in a different domain:
+`KnowledgeIngestionJob` had a durable row (`queued`/`processing`) but no
+periodic recovery path at all** — unlike `agents`/`evaluations`/
+`channel_ingress`/`notifications`, nothing ever re-published a job whose
+dispatch was lost, and the existing manual `retry_document` API endpoint
+only accepts a document already `failed` (a stuck `queued` row never gets
+there). Closed the same way as the delivery/channel-ingress sweepers:
+`knowledge.recovery.recover_stuck_ingestion_jobs` re-publishes any job
+`queued` past `KNOWLEDGE_STUCK_JOB_STALE_SECONDS` (created_at) or
+`processing` past the same threshold (started_at) — safe because
+`run_ingestion` already short-circuits on `SUCCEEDED` under its own row
+lock, exactly like `process_claimed_delivery`. New Beat schedule entry:
+`recover-stuck-knowledge-ingestion-jobs`
+(`knowledge.tasks.recover_stuck_ingestion_jobs_task`).
+
+**A fourth gap of the same "lost initial dispatch" shape as the PENDING
+cases above, one level further into the approval flow:** a decision
+(approve/reject/expire) dispatches `resume_approved_action_task` via its
+own `transaction.on_commit` (`approvals.services._dispatch_resume`) — if
+that single publish is lost, the `AgentRun` stays `WAITING_FOR_APPROVAL`
+forever even though its gating `ApprovalRequest` already reached a terminal
+decision, and no manual API path exists to re-decide an already-resolved
+approval (`decide_approval` only accepts a `PENDING` row). Closed the same
+way: `agents.recovery._redispatch_stuck_waiting_for_approval_runs` finds
+`AgentRun` rows `WAITING_FOR_APPROVAL` whose gating approval is `approved`/
+`rejected`/`expired` (deliberately excluding `cancelled` — that outcome
+means the run itself was already cancelled through a different path, which
+never dispatches a resume) and past `resolved_at` +
+`AGENTS_STUCK_RUN_WAITING_FOR_APPROVAL_STALE_SECONDS` (120s default),
+re-publishing the resume via the same `_dispatch_resume` boundary — safe
+because `agents.services._claim_run_for_resume` makes a second/redelivered
+resume call a no-op. Also folded into the existing
+`recover_stuck_agent_runs()` entry point and Beat schedule — no new
+scheduled task needed. See
+`agents/tests/test_recovery.py::TestRedispatchStuckWaitingForApprovalRuns`.
 
 **External side-effect window (Phase 16 Checkpoint 2A, section 15) — read
 carefully, this is a real, named gap, not a solved problem.** What the

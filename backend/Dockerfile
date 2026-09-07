@@ -30,4 +30,8 @@ USER app
 EXPOSE 8000
 
 ENTRYPOINT ["/app/entrypoint.sh"]
-CMD ["gunicorn", "config.wsgi:application", "--config", "config/gunicorn_conf.py", "--bind", "0.0.0.0:8000", "--workers", "3"]
+# Worker count/timeouts are configurable via environment (WEB_CONCURRENCY,
+# WEB_TIMEOUT_SECONDS, ...) inside config/gunicorn_conf.py itself — never
+# passed as a CLI flag here, since a Gunicorn CLI flag overrides its config
+# file's value and would silently ignore those settings.
+CMD ["gunicorn", "config.wsgi:application", "--config", "config/gunicorn_conf.py", "--bind", "0.0.0.0:8000"]

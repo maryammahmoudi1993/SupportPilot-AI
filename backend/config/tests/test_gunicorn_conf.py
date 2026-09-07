@@ -57,3 +57,38 @@ class TestChildExit:
             gunicorn_conf.child_exit(server=MagicMock(), worker=worker)
 
         mock_mark.assert_called_once_with(12345)
+
+
+class TestConfigurableWorkerSettings:
+    """Phase 17: worker count/timeouts read from environment at import time
+    with conservative, documented defaults — never a workstation/build-host
+    CPU-derived count (section 39)."""
+
+    def test_defaults_are_conservative(self):
+        assert gunicorn_conf.workers == 3
+        assert gunicorn_conf.timeout == 30
+        assert gunicorn_conf.graceful_timeout == 30
+        assert gunicorn_conf.keepalive == 5
+
+    def test_logs_go_to_stdout_and_stderr(self):
+        assert gunicorn_conf.accesslog == "-"
+        assert gunicorn_conf.errorlog == "-"
+
+    def test_worker_count_is_overridable_via_environment(self, monkeypatch):
+        monkeypatch.setenv("WEB_CONCURRENCY", "7")
+        monkeypatch.setenv("WEB_TIMEOUT_SECONDS", "60")
+        monkeypatch.setenv("WEB_GRACEFUL_TIMEOUT_SECONDS", "45")
+        monkeypatch.setenv("WEB_KEEPALIVE_SECONDS", "2")
+
+        import importlib
+
+        reloaded = importlib.reload(gunicorn_conf)
+        try:
+            assert reloaded.workers == 7
+            assert reloaded.timeout == 60
+            assert reloaded.graceful_timeout == 45
+            assert reloaded.keepalive == 2
+        finally:
+            # Restore module-level state for any test that runs after this
+            # one and imports the same already-loaded module object.
+            importlib.reload(gunicorn_conf)

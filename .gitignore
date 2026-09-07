@@ -47,6 +47,7 @@ dmypy.json
 .env
 .env.local
 .env.*.local
+.env.production
 
 # Database
 *.db
@@ -58,6 +59,10 @@ db.sqlite3
 staticfiles/
 media/
 local_settings.py
+
+# Celery Beat (default database scheduler's runtime state file)
+celerybeat-schedule
+celerybeat.pid
 
 # Logs
 *.log

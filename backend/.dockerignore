@@ -4,6 +4,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .mypy_cache/
+.ruff_cache/
 .coverage
 htmlcov/
 *.sqlite3
@@ -11,5 +12,8 @@ db.sqlite3
 .git/
 .env
 .env.local
+.env.production
+.env.*.local
+celerybeat-schedule
 staticfiles/
 media/

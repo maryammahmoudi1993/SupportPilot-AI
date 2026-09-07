@@ -9,6 +9,7 @@ a crashed worker) rather than sleeping in real time, per the checkpoint's
 from __future__ import annotations
 
 from datetime import timedelta
+from unittest.mock import patch
 
 import pytest
 from django.utils import timezone
@@ -248,3 +249,158 @@ class TestRecoverStuckAgentRuns:
             AgentRun.objects.filter(pk__in=[r.pk for r in runs]).values_list("status", flat=True)
         )
         assert statuses == {AgentRunStatus.RUNNING, AgentRunStatus.FAILED}
+
+
+def _age_created(run: AgentRun, seconds: int) -> None:
+    AgentRun.objects.filter(pk=run.pk).update(
+        created_at=timezone.now() - timedelta(seconds=seconds)
+    )
+
+
+class TestRedispatchStuckPendingAgentRuns:
+    """Phase 17 final acceptance gate (Part B): a lost *initial* dispatch
+    message leaves a run PENDING forever, invisible to the RUNNING-only
+    sweep above — closed by re-publishing it, which is safe because nothing
+    has executed yet (unlike recovering a RUNNING row)."""
+
+    def test_fresh_pending_run_is_untouched(self):
+        run = AgentRunFactory(status=AgentRunStatus.PENDING)
+        _age_created(run, seconds=1)  # well under the default 120s threshold
+
+        with patch("agents.recovery._redispatch_run") as redispatch:
+            recovered = recover_stuck_agent_runs()
+
+        assert recovered == 0
+        redispatch.assert_not_called()
+        run.refresh_from_db()
+        assert run.status == AgentRunStatus.PENDING
+
+    def test_stale_pending_run_is_redispatched_not_failed(self):
+        run = AgentRunFactory(status=AgentRunStatus.PENDING)
+        _age_created(run, seconds=121)
+
+        with patch("agents.recovery._redispatch_run") as redispatch:
+            recovered = recover_stuck_agent_runs()
+
+        assert recovered == 1
+        redispatch.assert_called_once_with(run.id)
+        run.refresh_from_db()
+        # Never transitioned/failed by the sweep itself — only re-published;
+        # the real claim boundary (claim_agent_run) is what moves it.
+        assert run.status == AgentRunStatus.PENDING
+
+    def test_redispatch_calls_the_real_dispatch_boundary(self):
+        run = AgentRunFactory(status=AgentRunStatus.PENDING)
+        _age_created(run, seconds=121)
+
+        with patch("agents.tasks.execute_agent_run_task") as task:
+            recovered = recover_stuck_agent_runs()
+
+        assert recovered == 1
+        task.delay.assert_called_once()
+        assert task.delay.call_args.args[0] == str(run.id)
+
+
+class TestRedispatchStuckWaitingForApprovalRuns:
+    """Phase 17 final acceptance gate (Part B, second pass): a decision
+    (approve/reject/expire) dispatches ``resume_approved_action_task`` via
+    its own ``transaction.on_commit`` — if that publish is lost, the run
+    stays WAITING_FOR_APPROVAL forever even though its gating
+    ApprovalRequest is already decided. Safe to re-publish (resume-claim
+    no-op if it already succeeded)."""
+
+    def _waiting_for_approval(self, monkeypatch):
+        """``execute_tool`` (used directly by the ``pending_refund_approval``
+        factory) only creates the ``ApprovalRequest`` — it never transitions
+        the parent ``AgentRun`` to ``WAITING_FOR_APPROVAL`` itself; that only
+        happens inside the real orchestration loop
+        (``agents/services.py``'s ``_pause_for_approval``, called from
+        ``execute_support_agent_run``, which this lower-level factory never
+        runs). Set it explicitly so these tests exercise the real production
+        invariant the sweep depends on, rather than a run left ``RUNNING``."""
+        from approvals.tests.factories import pending_refund_approval
+
+        run, approval, fake = pending_refund_approval(monkeypatch)
+        AgentRun.objects.filter(pk=run.pk).update(status=AgentRunStatus.WAITING_FOR_APPROVAL)
+        run.refresh_from_db()
+        return run, approval, fake
+
+    def _decide_without_dispatching_resume(self, approval, *, status, seconds_ago):
+        """Mirrors what ``decide_approval``/``expire_stale_approvals``
+        persist, without their ``transaction.on_commit`` resume dispatch —
+        simulating exactly the lost-publish scenario this sweep exists
+        for."""
+        from approvals.models import ApprovalRequest
+
+        approval.status = status
+        approval.resolved_at = timezone.now() - timedelta(seconds=seconds_ago)
+        approval.save(update_fields=["status", "resolved_at"])
+        return ApprovalRequest.objects.get(pk=approval.pk)
+
+    def test_fresh_decided_approval_is_untouched(self, monkeypatch):
+        from approvals.models import ApprovalStatus
+
+        run, approval, _fake = self._waiting_for_approval(monkeypatch)
+        self._decide_without_dispatching_resume(
+            approval, status=ApprovalStatus.APPROVED, seconds_ago=1
+        )
+
+        with patch("agents.recovery._redispatch_resume") as redispatch:
+            recovered = recover_stuck_agent_runs()
+
+        assert recovered == 0
+        redispatch.assert_not_called()
+
+    def test_stale_decided_approval_is_redispatched(self, monkeypatch):
+        from approvals.models import ApprovalStatus
+
+        run, approval, _fake = self._waiting_for_approval(monkeypatch)
+        self._decide_without_dispatching_resume(
+            approval, status=ApprovalStatus.APPROVED, seconds_ago=121
+        )
+
+        with patch("agents.recovery._redispatch_resume") as redispatch:
+            recovered = recover_stuck_agent_runs()
+
+        assert recovered == 1
+        redispatch.assert_called_once_with(approval.id)
+        run.refresh_from_db()
+        assert run.status == AgentRunStatus.WAITING_FOR_APPROVAL
+
+    def test_cancelled_approval_is_never_a_candidate(self, monkeypatch):
+        from approvals.models import ApprovalStatus
+
+        run, approval, _fake = self._waiting_for_approval(monkeypatch)
+        self._decide_without_dispatching_resume(
+            approval, status=ApprovalStatus.CANCELLED, seconds_ago=121
+        )
+
+        with patch("agents.recovery._redispatch_resume") as redispatch:
+            recovered = recover_stuck_agent_runs()
+
+        assert recovered == 0
+        redispatch.assert_not_called()
+
+    def test_still_pending_approval_is_never_a_candidate(self, monkeypatch):
+        run, approval, _fake = self._waiting_for_approval(monkeypatch)
+
+        with patch("agents.recovery._redispatch_resume") as redispatch:
+            recovered = recover_stuck_agent_runs()
+
+        assert recovered == 0
+        redispatch.assert_not_called()
+
+    def test_redispatch_calls_the_real_dispatch_boundary(self, monkeypatch):
+        from approvals.models import ApprovalStatus
+
+        run, approval, _fake = self._waiting_for_approval(monkeypatch)
+        self._decide_without_dispatching_resume(
+            approval, status=ApprovalStatus.APPROVED, seconds_ago=121
+        )
+
+        with patch("approvals.tasks.resume_approved_action_task") as task:
+            recovered = recover_stuck_agent_runs()
+
+        assert recovered == 1
+        task.delay.assert_called_once()
+        assert task.delay.call_args.args[0] == str(approval.id)
