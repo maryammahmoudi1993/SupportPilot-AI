@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { AuthProvider } from "@/features/auth/auth-provider";
 import { LoginForm } from "@/features/auth/login-form";
+import { DEFAULT_REDIRECT_TARGET } from "@/features/auth/redirect";
 import { FIXTURE_USER, mockState } from "@/tests/msw/handlers";
 
 vi.mock("next/navigation", () => ({
@@ -49,7 +50,7 @@ describe("LoginForm", () => {
 
     await fillAndSubmit(FIXTURE_USER.email, FIXTURE_USER.password);
 
-    await waitFor(() => expect(replace).toHaveBeenCalledWith("/"));
+    await waitFor(() => expect(replace).toHaveBeenCalledWith(DEFAULT_REDIRECT_TARGET));
   });
 
   it("redirects to a safe next target after login", async () => {
@@ -65,7 +66,7 @@ describe("LoginForm", () => {
 
     await fillAndSubmit(FIXTURE_USER.email, FIXTURE_USER.password);
 
-    await waitFor(() => expect(replace).toHaveBeenCalledWith("/"));
+    await waitFor(() => expect(replace).toHaveBeenCalledWith(DEFAULT_REDIRECT_TARGET));
   });
 
   it("shows a safe error message and does not authenticate on invalid credentials", async () => {

@@ -9,7 +9,7 @@
 const CONTROL_OR_WHITESPACE = /[\x00-\x1f\s]/;
 
 /** Default destination when no "next" param is present or it fails validation. */
-export const DEFAULT_REDIRECT_TARGET = "/";
+export const DEFAULT_REDIRECT_TARGET = "/app";
 
 export function isSafeRedirectTarget(target: string | null | undefined): target is string {
   if (!target) {
