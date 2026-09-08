@@ -23,6 +23,12 @@ export interface E2EData {
   workspaceACustomerName: string;
   workspaceBCustomerId: string;
   workspaceBCustomerName: string;
+  workspaceBConversationId: string;
+  workspaceBConversationSubject: string;
+  workspaceBUnassignedConversationId: string;
+  workspaceBUnassignedConversationSubject: string;
+  workspaceAConversationId: string;
+  workspaceAConversationSubject: string;
 }
 
 let cached: E2EData | null = null;

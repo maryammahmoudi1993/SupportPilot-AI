@@ -22,6 +22,7 @@ export const DATA_FILE = path.resolve(__dirname, ".e2e-data.json");
 const SETUP_SCRIPT = `
 import json
 from accounts.models import User
+from conversations.models import Conversation, ConversationChannel, ConversationStatus, Message, MessageDirection, MessageSenderType
 from customers.models import Customer
 from workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole
 
@@ -41,8 +42,10 @@ zero = make_user("e2e-zero", "e2e-zero@example.com", "E2E", "ZeroWorkspace")
 
 ws_a = Workspace.objects.create(name="E2E Workspace A")
 ws_b = Workspace.objects.create(name="E2E Workspace B")
-WorkspaceMembership.objects.create(workspace=ws_a, user=primary, role=WorkspaceRole.OWNER)
-WorkspaceMembership.objects.create(workspace=ws_b, user=primary, role=WorkspaceRole.SUPPORT_AGENT)
+membership_a = WorkspaceMembership.objects.create(workspace=ws_a, user=primary, role=WorkspaceRole.OWNER)
+membership_b = WorkspaceMembership.objects.create(
+    workspace=ws_b, user=primary, role=WorkspaceRole.SUPPORT_AGENT
+)
 
 # Customers domain (Phase 19 Chunk 1) — real cross-workspace data so the
 # real-backend smoke and later Phase 19 E2E specs can prove tenant
@@ -66,6 +69,51 @@ ws_b_customer = Customer.objects.create(
     email="bob.belcher@example.com", company="Globex Burgers", is_active=True,
 )
 
+# Conversations/messages domain (Phase 19 Chunk 2) — real cross-workspace
+# data so the real-backend smoke and later Phase 19 E2E specs can prove
+# tenant isolation, filters, message ordering, and sender/source rendering
+# against the actual API. Conversation/Message rows cascade-delete with
+# their workspace (both FK workspace, on_delete=CASCADE).
+ws_b_conversation = Conversation.objects.create(
+    workspace=ws_b, customer=ws_b_customer, channel=ConversationChannel.WEB,
+    status=ConversationStatus.OPEN, subject="Order delayed", assigned_to=membership_b,
+)
+Message.objects.create(
+    workspace=ws_b, conversation=ws_b_conversation, sender_type=MessageSenderType.CUSTOMER,
+    direction=MessageDirection.INBOUND, body="My order hasn't arrived yet.",
+)
+Message.objects.create(
+    workspace=ws_b, conversation=ws_b_conversation, sender_type=MessageSenderType.HUMAN_AGENT,
+    sender_membership=membership_b, direction=MessageDirection.OUTBOUND,
+    body="Let me look into that for you right away.",
+)
+Message.objects.create(
+    workspace=ws_b, conversation=ws_b_conversation, sender_type=MessageSenderType.AI_AGENT,
+    direction=MessageDirection.OUTBOUND, body="Tracking shows the package is out for delivery today.",
+)
+Message.objects.create(
+    workspace=ws_b, conversation=ws_b_conversation, sender_type=MessageSenderType.SYSTEM,
+    direction=MessageDirection.INTERNAL, body="Escalation timer paused: carrier confirmed transit.",
+)
+ws_b_conversation.last_message_at = Message.objects.filter(conversation=ws_b_conversation).latest(
+    "created_at"
+).created_at
+ws_b_conversation.save(update_fields=["last_message_at"])
+
+ws_b_unassigned_conversation = Conversation.objects.create(
+    workspace=ws_b, customer=ws_b_customer, channel=ConversationChannel.CHAT,
+    status=ConversationStatus.CLOSED, subject="Unassigned chat inquiry",
+)
+
+ws_a_conversation = Conversation.objects.create(
+    workspace=ws_a, customer=ws_a_customer, channel=ConversationChannel.EMAIL,
+    status=ConversationStatus.PENDING, subject="Billing question", assigned_to=membership_a,
+)
+Message.objects.create(
+    workspace=ws_a, conversation=ws_a_conversation, sender_type=MessageSenderType.CUSTOMER,
+    direction=MessageDirection.INBOUND, body="Can you clarify this month's invoice?",
+)
+
 print(json.dumps({
     "primaryEmail": primary.email,
     "primaryPassword": PASSWORD,
@@ -86,6 +134,12 @@ print(json.dumps({
     "workspaceACustomerName": ws_a_customer.display_name,
     "workspaceBCustomerId": str(ws_b_customer.id),
     "workspaceBCustomerName": ws_b_customer.display_name,
+    "workspaceBConversationId": str(ws_b_conversation.id),
+    "workspaceBConversationSubject": ws_b_conversation.subject,
+    "workspaceBUnassignedConversationId": str(ws_b_unassigned_conversation.id),
+    "workspaceBUnassignedConversationSubject": ws_b_unassigned_conversation.subject,
+    "workspaceAConversationId": str(ws_a_conversation.id),
+    "workspaceAConversationSubject": ws_a_conversation.subject,
 }))
 `;
 
