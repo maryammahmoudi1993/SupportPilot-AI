@@ -49,30 +49,40 @@ frontend/
     app/            App Router routes, layouts, and route-level UI states
       (protected)/   Route group for every authenticated route (no URL segment of its own)
         app/         The real authenticated landing route (/app)
+          customers/          Customers list (/app/customers)
+            [customerId]/     Customer detail (/app/customers/:id)
       login/         The public login route
     components/
       ui/           Design-system primitives (Button, Input, Card, DropdownMenu, Sheet, ...)
       shell/        Application shell chrome (Sidebar, Header, nav config/links, user menu, mobile nav)
+      support/      Shared operational UI, reused across every business domain (EntityNotFound,
+                    ListError, Pagination, Timestamp) — see "Operational Support Workspace" below
     features/
       auth/          Login/logout/me operations, AuthProvider, LoginForm, redirect safety
       workspace/     Active-workspace state, selection persistence, the workspace switcher
+      customers/     Customers domain: typed API boundary, query-key factory, React Query hooks,
+                     URL-state (de)serialization, and the list/detail page components
     lib/            Framework-agnostic code: API transport, config, utils
       api/           Central HTTP client, token/session/CSRF handling, error normalization
+      query/         Server-state (TanStack Query) client factory and provider — see
+                     "Operational Support Workspace" below
     types/          Generated types only (api.ts) — never hand-edited
     tests/          Vitest specs, mirroring the src/ layout they cover
-      msw/           Request-level mocks for the auth endpoints
+      msw/           Request-level mocks for the auth and customers endpoints
+      support/       Shared test helpers (e.g. renderAuthenticated)
   scripts/          Node scripts (API type generation, drift check)
   openapi.yaml      Generated OpenAPI schema snapshot (see below)
 ```
 
-Other feature domains (customers, conversations, tickets, agents,
-approvals, knowledge, integrations, evaluations, settings) get their own
-directories under `src/features/` starting in the phase that implements
-them — `auth` and `workspace` are the first two, and the pattern they
-establish (a feature owns its API calls, its own React state, and its own
-tests; transport-level concerns generic across features stay in `lib/api`;
-shell-chrome concerns generic across every authenticated route stay in
-`components/shell`) is meant to repeat.
+Other feature domains (conversations, tickets, agents, approvals,
+knowledge, integrations, evaluations, settings) get their own directories
+under `src/features/` starting in the phase that implements them — `auth`,
+`workspace`, and (as of Phase 19 Chunk 1) `customers` establish the
+pattern: a feature owns its API calls, its own React state, and its own
+tests; transport-level concerns generic across features stay in `lib/api`
+(and, as of Chunk 1, `lib/query`); shell-chrome and cross-domain
+operational UI concerns stay in `components/shell` and `components/support`
+respectively.
 
 ## API contract and type generation
 
@@ -724,6 +734,159 @@ No route under `(protected)` attempts server-side JWT validation or a
 second, Next-held session: see "Browser/backend topology" above, which this
 chunk doesn't change.
 
+## Operational Support Workspace (Phase 19)
+
+Phase 19 is the first business-product frontend phase: an authenticated
+operator uses SupportPilot AI to browse real customers, conversations, and
+tickets. Chunk 1 implements the first slice — **Customers** — and the
+server-state foundation the rest of Phase 19 builds on.
+
+### Server-state strategy
+
+Phase 18 deliberately shipped without a server-state library — one route
+(`/app`) reading data already fetched by `AuthProvider` didn't justify one.
+Phase 19 does: multiple lists, detail pages, pagination, filters, and
+cross-domain navigation, all workspace-scoped and all needing cache
+invalidation that a hand-rolled `useEffect`/`useState` per page would either
+duplicate or get subtly wrong (stale data across a workspace switch, a
+list not refreshing after a mutation, races between a fast filter change
+and a slow request). **TanStack Query v5** (`@tanstack/react-query`) is
+introduced in Chunk 1, at the point this actually starts to matter, not
+speculatively ahead of it.
+
+`src/lib/query/query-client.ts` (`createQueryClient()`) defines the
+project's retry policy explicitly rather than accepting the library
+default:
+
+- `network_error`, `timeout`, and `internal_server_error` are the only
+  retried outcomes — bounded to 2 retries with a fast, capped backoff
+  (200ms, then 400ms; the library default is `1000 * 2^attempt` up to 30s,
+  which would leave an operator staring at a spinner for seconds over one
+  transient blip).
+- Every other `ApiError` code (`validation_error`, `permission_denied`,
+  `not_found`, `conflict`, `rate_limited`, `invalid_request`,
+  `parse_error`, `unknown_error`) is a definitive outcome — never retried.
+- `authentication_failed` is explicitly excluded: a 401 that reaches a
+  query already survived `lib/api/session.ts`'s own coordinated
+  refresh-and-retry-once. Retrying it again here would just race that
+  mechanism; a *definitive* 401 is handled by `AuthProvider`'s
+  session-expired handler (clearing the session, redirecting to `/login`),
+  not by a query retry.
+- Mutations never retry (`retry: false`) — an ambiguous automatic retry of
+  a state-changing request (was it applied once, or twice?) is worse than
+  a surfaced error the operator can act on. Phase 19 Chunk 1 ships no
+  mutations yet (Customers is read-only — see below); this policy is
+  in place for the write endpoints later chunks/domains add.
+- `refetchOnWindowFocus`/`refetchOnReconnect` are off: an operator asks for
+  fresh data by navigating or pressing an explicit Retry, not via an
+  implicit background refetch — and the defaults fight determinism in
+  tests for no real product benefit here.
+
+`src/lib/query/query-provider.tsx` (`QueryProvider`) owns exactly one
+`QueryClient` instance, mounted inside `ProtectedLayout` — *inside* the
+`auth.status === "authenticated"` branch, alongside `WorkspaceProvider`
+(see `app/(protected)/layout.tsx`). This is what gives session-scoped cache
+isolation for free: `ProtectedLayout` renders entirely different JSX for
+every other `AuthStatus`, so `QueryProvider` (and therefore every cached
+query) unmounts completely on logout or a confirmed mid-session expiry, and
+remounts fresh — with an empty cache — on the next login. There is no
+cache to leak between sessions because the `QueryClient` itself is gone,
+not merely invalidated. A **workspace switch**, by contrast, happens
+*within* one authenticated session and must not tear this down — isolation
+there is the query-key factories' job (below), not this provider's.
+
+### Workspace-scoped query keys
+
+Every domain gets a typed key factory (see
+`src/features/customers/query-keys.ts` for the customers one) whose keys
+all embed the active workspace ID as their second segment:
+
+```
+["workspaces", workspaceId, "customers", "list", params]
+["workspaces", workspaceId, "customers", "detail", customerId]
+```
+
+This is the actual mechanism behind "Workspace A's cached data never
+renders under Workspace B": a workspace switch changes every hook's
+`queryKey`, so React Query treats it as a *disjoint* cache entry, not the
+same entry gone stale — there's no shared bucket a stale value could leak
+out of. The one place this needs extra care is `placeholderData`
+(`src/features/customers/queries.ts`, `useCustomerListQuery`): React
+Query's `keepPreviousData` helper reuses the *previous successful query's*
+data across ANY key change, including a workspace switch — which would
+flash Workspace A's rows for a moment while Workspace B's request is in
+flight. Instead, `useCustomerListQuery` reuses `placeholderData` only when
+the *previous* query's key carries the *same* workspace ID as the current
+one (still giving smooth in-workspace pagination/filtering, never a
+cross-tenant flash) — covered by
+`customers-list-page.test.tsx`'s workspace-switch test, which asserts the
+old workspace's customer name is gone from the DOM immediately on switch,
+not merely eventually.
+
+### Customer API contract
+
+| Question             | Answer                                                                                                                                                                   |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| List                  | `GET /api/v1/workspaces/{workspace_id}/customers/` — `customers/views.py` `CustomerListCreateView`, any active member.                                                 |
+| Detail                | `GET /api/v1/workspaces/{workspace_id}/customers/{customer_id}/` — `CustomerDetailView`. A customer belonging to a different workspace 404s exactly like one that never existed (`customers/selectors.py customer_get_for_workspace_or_404`) — never a 403, no existence leakage. |
+| Pagination            | Backend-standard `PageNumberPagination` (`common/pagination.py`) — `{count, next, previous, results}`, `page`/`page_size` query params, default page size 50, max 500. |
+| Search                | A single `search` query param, `icontains` across display/first/last name, email, phone, and external ID (`customers/selectors.py customer_list_for_workspace`) — no explicit-submit contract, so the UI debounces type-ahead (300ms) rather than firing per keystroke. |
+| Filters               | `is_active` (boolean) — real and backend-tested, surfaced as a Status select (All/Active/Inactive).                                                                    |
+| Sort                  | None. `ordering` appears in the generated OpenAPI schema only because `OrderingFilter` is in the project's global `DEFAULT_FILTER_BACKENDS` — the view sets no `ordering_fields`, so the backend silently ignores it. The frontend never sends it (see the comment in `features/customers/api.ts`) — sending an unsupported control would be building UI for a capability that doesn't exist. |
+| Create/update         | `POST`/`PATCH` exist on the backend (`CustomerWriteSerializer`) but are out of Chunk 1's scope — the Customers UI is intentionally **read-only** for now; a real write UI is better deferred than faked. |
+
+**Schema gap (Category A — typing deficiency, not a missing capability)**:
+`is_active` is a real, tested filter the view reads directly from
+`request.query_params`, so `drf-spectacular` can't see it and it's absent
+from the generated `api_v1_workspaces_customers_list` operation's query
+type. `features/customers/api.ts` narrows this explicitly with a local
+`CustomerListQuery` type (`Omit<GeneratedQuery, "ordering"> & { is_active?:
+boolean }`) — no `any`, no `ts-ignore`, and a comment pointing at the exact
+backend code that makes it real.
+
+### Pagination, search, and filter conventions
+
+List state (`page`, `search`, `status`) lives in the URL query string
+(`src/features/customers/url-params.ts`), not component state alone — a
+bookmarked/shared `/app/customers?search=jane&status=active` link restores
+the same view, and browser back/forward works. Every value read from
+`URLSearchParams` is treated as untrusted (a hand-edited or stale link):
+`page` must match `^[1-9]\d*$` or falls back to 1, `status` falls back to
+`"all"` for anything unrecognized, `search` is length-capped. Defaulted
+fields are omitted from the serialized query string, so the URL stays
+clean (`/app/customers`, not `/app/customers?page=1&search=&status=all`).
+Changing search or status resets `page` to 1; pagination itself preserves
+the current search/status. `Pagination` (`components/support/pagination.tsx`)
+drives Next/Previous off the backend's actual `next`/`previous` URLs, never
+off page-size arithmetic the frontend would have to guess at.
+
+### States
+
+`CustomersListPage`/`CustomerDetailPage` distinguish: initial loading
+(skeleton), a network/server error (`ListError` — an `Alert` plus Retry,
+never collapsed into "empty"), a confirmed empty result set (two distinct
+messages depending on whether a filter is active), and success. Detail
+additionally distinguishes a confirmed 404 (`EntityNotFound` — deliberately
+generic wording, since the backend returns the identical 404 for "doesn't
+exist" and "exists in a different workspace") from a malformed route ID
+(validated client-side against a UUID pattern *before* any request is
+made — `customer-detail-page.test.tsx` asserts no network call happens for
+a non-UUID `customerId`) and from a genuine network error. The
+zero-workspace/workspace-load-error/loading states are already handled
+once, globally, by `AppShell`'s `WorkspaceGate` (Phase 18) — the customers
+pages don't duplicate them.
+
+### Navigation
+
+"Customers" is added to `NAV_ITEMS` (`components/shell/nav-config.ts`) now
+that `/app/customers` is a real route with real data. Conversations/Inbox
+and Tickets are **not** added yet — an unclickable nav entry for a route
+that doesn't exist yet is worse than a short sidebar. `NavLinks`'
+active-route matching (`components/shell/nav-links.tsx`) now treats every
+non-`/app` destination as active for its own path *and* any nested route
+under it (`startsWith`), so the sidebar stays highlighted while drilled
+into `/app/customers/[id]`.
+
 ## Local development
 
 1. Start the backend (see `../README.md`) so `NEXT_PUBLIC_API_BASE_URL`
@@ -852,7 +1015,32 @@ and a genuinely malformed/empty response, not just network/timeout
 rendering, closing a gap the Chunk 3A report itself flagged as untested
 (`root-page.test.tsx` "G").
 
-## End-to-end tests (`e2e/`, Phase 18 Chunk 4)
+Added in Phase 19 Chunk 1 (`src/tests/features/customers/`,
+`src/tests/lib/query/`): the workspace-scoped query-key factory (disjoint
+keys per workspace, per-param variation); the query client's retry policy
+(retryable vs. definitive `ApiError` codes, the `authentication_failed`
+carve-out, mutations never retrying); URL query-string parsing/serialization
+(defaults, malformed `page`/`status`/oversized `search` all falling back
+safely, round-tripping); the customer API boundary's request shape
+(default params send no query string at all; `is_active`/`search`/`page`
+sent correctly; the backend-ignored `ordering` param never sent); and the
+full page-level matrix for both `CustomersListPage` and
+`CustomerDetailPage` — real data rendering, empty vs. network-error
+(distinct, both with a working Retry), debounced search (a burst of
+keystrokes producing exactly one URL update, not one per keystroke), the
+status filter and pagination each preserving the other and resetting page
+to 1 where appropriate, a confirmed 404, a customer belonging to a
+*different* workspace resolving to the identical safe not-found UI (never
+leaking that the ID exists elsewhere), a malformed (non-UUID) route ID
+rejected with **zero** network requests, and — the workspace-isolation
+regression this chunk cares most about — switching the active workspace
+mid-session causing the old workspace's customer to disappear from the DOM
+immediately, with the new workspace's data never bridging the two (mocked
+via `src/tests/msw/customer-handlers.ts`, a workspace-scoped in-memory
+store mirroring the real backend's list/detail/pagination/search/`is_active`
+contract and 404 semantics).
+
+## End-to-end tests (`e2e/`, Phase 18 Chunk 4; extended Phase 19 Chunk 1)
 
 Playwright (`@playwright/test`), Chromium only — the mandatory acceptance
 browser for this phase; Firefox/WebKit weren't added (single-browser
@@ -864,7 +1052,10 @@ out to `manage.py shell` to create two synthetic users (one with two real
 workspace memberships — owner + support_agent — one with zero) directly in
 the project's Postgres container, and `e2e/global-teardown.ts` deletes them
 unconditionally afterward (also self-healing: setup wipes any `e2e-*`/`E2E *`
-leftovers from a prior aborted run before creating fresh ones).
+leftovers from a prior aborted run before creating fresh ones). Extended in
+Phase 19 Chunk 1 to also seed real `Customer` rows in each of the two
+workspaces (including one inactive customer) — they need no separate
+cleanup, since `Customer.workspace` cascade-deletes with the workspace.
 `playwright.config.ts`'s `webServer` array starts both halves itself —
 Django (`manage.py runserver`) and the frontend built and started in
 **production mode** (`next build && next start`, not `next dev`) — so the
@@ -903,6 +1094,17 @@ check; and an axe accessibility scan (0 serious/critical required) across
 `/login`, authenticated `/app`, the zero-workspace state, and
 `SessionVerificationError`, plus a keyboard-only pass over the login form,
 workspace switcher, and user menu.
+
+**Added in Phase 19 Chunk 1** (`e2e/customers.spec.ts`) — a real-backend
+smoke proof for the Customers domain, separate from Chunk 4's own
+accessibility/responsive/full-acceptance pass: listing the active
+workspace's real customers and opening a detail record; search narrowing
+the real result set; a workspace switch swapping the visible customer list
+(the old workspace's customer is asserted gone, not just the new one
+present); a customer ID from a different workspace deep-linked directly
+resolving to the safe not-found UI, never leaking that the record exists
+elsewhere; and logout from the customers page. Conversations/Tickets get
+their own specs in later Phase 19 chunks once those routes exist.
 
 **Login volume, deliberately kept realistic rather than exhaustive**: even
 with the throttle raised, a handful of tests (routing's `?next` cases, the
