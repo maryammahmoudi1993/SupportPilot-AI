@@ -17,6 +17,10 @@ export default defineConfig({
     setupFiles: ["./src/tests/setup.ts"],
     globals: false,
     css: true,
+    // `e2e/*.spec.ts` are Playwright specs (real-browser acceptance suite,
+    // see playwright.config.ts) — Vitest's default include pattern would
+    // otherwise also match them and try to run them as unit tests.
+    exclude: ["**/node_modules/**", "e2e/**"],
     // Vitest injects `env` into process.env before any module (including
     // setupFiles) is evaluated — required here because setup.ts itself
     // transitively imports modules that read NEXT_PUBLIC_API_BASE_URL at
