@@ -38,6 +38,21 @@ function readOrExit(filePath, label) {
   }
 }
 
+/**
+ * Line endings are not part of the API contract this check cares about: a
+ * Windows checkout with `core.autocrlf=true` normalizes the committed files
+ * to CRLF on disk, while the freshly-regenerated temp files (written by this
+ * same Node process, never touched by Git) stay LF — a real difference with
+ * zero connection to whether the backend's schema actually changed. Comparing
+ * without normalizing this produced a false "drift detected" on every run on
+ * such a checkout, regardless of content (verified via `git diff`, which
+ * showed no real change at all). Normalize both sides before comparing so
+ * only an actual content difference counts as drift.
+ */
+function normalizeLineEndings(text) {
+  return text.replace(/\r\n/g, "\n");
+}
+
 try {
   await generateSchemaAndTypes({
     backendRoot,
@@ -51,8 +66,8 @@ try {
   const freshSchema = readFileSync(freshSchemaPath, "utf-8");
   const freshTypes = readFileSync(freshTypesPath, "utf-8");
 
-  const schemaDrifted = committedSchema !== freshSchema;
-  const typesDrifted = committedTypes !== freshTypes;
+  const schemaDrifted = normalizeLineEndings(committedSchema) !== normalizeLineEndings(freshSchema);
+  const typesDrifted = normalizeLineEndings(committedTypes) !== normalizeLineEndings(freshTypes);
 
   if (schemaDrifted || typesDrifted) {
     console.error(
