@@ -3,8 +3,10 @@
 import Link from "next/link";
 import type { ReactNode } from "react";
 
+import { RelatedConversationsPanel } from "@/features/conversations/components/related-conversations-panel";
 import { useCustomerDetailQuery } from "@/features/customers/queries";
 import { CustomerStatusBadge } from "@/features/customers/components/customer-status-badge";
+import { RelatedTicketsPanel } from "@/features/tickets/components/related-tickets-panel";
 import { useWorkspace } from "@/features/workspace/workspace-provider";
 import { EntityNotFound } from "@/components/support/entity-not-found";
 import { ListError } from "@/components/support/list-error";
@@ -40,7 +42,13 @@ function Field({ label, value }: { label: string; value: ReactNode }) {
   );
 }
 
-function CustomerDetailContent({ workspaceId, customerId }: { workspaceId: string; customerId: string }) {
+function CustomerDetailContent({
+  workspaceId,
+  customerId,
+}: {
+  workspaceId: string;
+  customerId: string;
+}) {
   const query = useCustomerDetailQuery(workspaceId, customerId);
 
   if (query.isPending) {
@@ -96,13 +104,16 @@ function CustomerDetailContent({ workspaceId, customerId }: { workspaceId: strin
           {customer.notes && (
             <div className="mt-4">
               <dt className="text-text-muted text-xs font-medium uppercase">Notes</dt>
-              <dd className="text-text-primary mt-1 text-sm whitespace-pre-wrap break-words">
+              <dd className="text-text-primary mt-1 text-sm break-words whitespace-pre-wrap">
                 {customer.notes}
               </dd>
             </div>
           )}
         </CardContent>
       </Card>
+
+      <RelatedConversationsPanel workspaceId={workspaceId} customerId={customerId} />
+      <RelatedTicketsPanel workspaceId={workspaceId} customerId={customerId} />
     </div>
   );
 }
@@ -122,5 +133,7 @@ export function CustomerDetailPage({ customerId }: { customerId: string }) {
     );
   }
 
-  return <CustomerDetailContent workspaceId={workspace.activeWorkspace.id} customerId={customerId} />;
+  return (
+    <CustomerDetailContent workspaceId={workspace.activeWorkspace.id} customerId={customerId} />
+  );
 }

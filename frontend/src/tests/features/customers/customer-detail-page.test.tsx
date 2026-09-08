@@ -3,8 +3,19 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
 import { CustomerDetailPage } from "@/features/customers/components/customer-detail-page";
-import { FIXTURE_USER, FIXTURE_WORKSPACE_ACME, FIXTURE_WORKSPACE_GLOBEX, mockState } from "@/tests/msw/handlers";
-import { customerMockState, makeCustomerFixture, seedCustomers } from "@/tests/msw/customer-handlers";
+import {
+  FIXTURE_USER,
+  FIXTURE_WORKSPACE_ACME,
+  FIXTURE_WORKSPACE_GLOBEX,
+  mockState,
+} from "@/tests/msw/handlers";
+import {
+  customerMockState,
+  makeCustomerFixture,
+  seedCustomers,
+} from "@/tests/msw/customer-handlers";
+import { makeConversationFixture, seedConversations } from "@/tests/msw/conversation-handlers";
+import { makeTicketFixture, seedTickets } from "@/tests/msw/ticket-handlers";
 import { renderAuthenticated } from "@/tests/support/render-authenticated";
 
 const CUST_1 = "11111111-1111-4111-8111-111111111111";
@@ -86,9 +97,58 @@ describe("CustomerDetailPage", () => {
     expect(screen.queryByText("Customer not found")).not.toBeInTheDocument();
 
     customerMockState.detailNetworkError = false;
-    seedCustomers(FIXTURE_WORKSPACE_ACME.id, [makeCustomerFixture({ id: CUST_1, display_name: "Jane Doe" })]);
+    seedCustomers(FIXTURE_WORKSPACE_ACME.id, [
+      makeCustomerFixture({ id: CUST_1, display_name: "Jane Doe" }),
+    ]);
     await userEvent.setup().click(screen.getByRole("button", { name: "Retry" }));
 
     expect(await screen.findByRole("heading", { name: "Jane Doe" })).toBeInTheDocument();
+  });
+
+  it("shows a bounded related-tickets and related-conversations preview using the real customer filter, with no N+1", async () => {
+    signIn([FIXTURE_WORKSPACE_ACME]);
+    seedCustomers(FIXTURE_WORKSPACE_ACME.id, [
+      makeCustomerFixture({ id: CUST_1, display_name: "Jane Doe" }),
+    ]);
+    seedConversations(FIXTURE_WORKSPACE_ACME.id, [
+      makeConversationFixture({ id: "conv-1", customer_id: CUST_1, subject: "Order delayed" }),
+    ]);
+    seedTickets(FIXTURE_WORKSPACE_ACME.id, [
+      makeTicketFixture({
+        id: "tick-1",
+        customer_id: CUST_1,
+        subject: "Refund request",
+        priority: "high",
+      }),
+    ]);
+
+    renderAuthenticated(<CustomerDetailPage customerId={CUST_1} />);
+
+    expect(await screen.findByRole("link", { name: "Order delayed" })).toHaveAttribute(
+      "href",
+      "/app/inbox/conv-1",
+    );
+    expect(screen.getByRole("link", { name: "Refund request" })).toHaveAttribute(
+      "href",
+      "/app/tickets/tick-1",
+    );
+    expect(
+      screen.getByRole("link", { name: /View all 1 conversation for this customer/ }),
+    ).toHaveAttribute("href", `/app/inbox?customer=${CUST_1}`);
+    expect(
+      screen.getByRole("link", { name: /View all 1 ticket for this customer/ }),
+    ).toHaveAttribute("href", `/app/tickets?customer=${CUST_1}`);
+  });
+
+  it("shows a distinct empty state for a customer with no related records", async () => {
+    signIn([FIXTURE_WORKSPACE_ACME]);
+    seedCustomers(FIXTURE_WORKSPACE_ACME.id, [
+      makeCustomerFixture({ id: CUST_1, display_name: "Jane Doe" }),
+    ]);
+
+    renderAuthenticated(<CustomerDetailPage customerId={CUST_1} />);
+
+    expect(await screen.findByText("No conversations for this customer yet.")).toBeInTheDocument();
+    expect(await screen.findByText("No tickets for this customer yet.")).toBeInTheDocument();
   });
 });
