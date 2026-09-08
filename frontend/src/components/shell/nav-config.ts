@@ -3,13 +3,13 @@
  *
  * Phase 18 Chunk 3 implemented the application shell only, with a single
  * "Overview" entry. Phase 19 Chunk 1 added "Customers" once `/app/customers`
- * became a real route with real data. Phase 19 Chunk 2 adds "Inbox" now
- * that `/app/inbox` is real too — see frontend/README.md, "Navigation".
- * Tickets is added in a later Phase 19 chunk, once its route exists. A
- * stable `id`/`path` per entry lets feature code (e.g. workspace-scoped
- * query-key conventions) reference a destination without coupling to its
- * label or position. Do not add a destination whose route does not yet
- * exist — an unclickable/fake nav entry is worse than a short sidebar.
+ * became a real route with real data. Phase 19 Chunk 2 added "Inbox" once
+ * `/app/inbox` was real too. Phase 19 Chunk 3 adds "Tickets" now that
+ * `/app/tickets` is real — see frontend/README.md, "Navigation". A stable
+ * `id`/`path` per entry lets feature code (e.g. workspace-scoped query-key
+ * conventions) reference a destination without coupling to its label or
+ * position. Do not add a destination whose route does not yet exist — an
+ * unclickable/fake nav entry is worse than a short sidebar.
  */
 export interface NavItem {
   id: string;
@@ -22,4 +22,5 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { id: "overview", label: "Overview", path: "/app" },
   { id: "inbox", label: "Inbox", path: "/app/inbox" },
   { id: "customers", label: "Customers", path: "/app/customers" },
+  { id: "tickets", label: "Tickets", path: "/app/tickets" },
 ];
