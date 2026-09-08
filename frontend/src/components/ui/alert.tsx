@@ -24,7 +24,15 @@ export const Alert = forwardRef<HTMLDivElement, AlertProps>(
       {...props}
     >
       {title && <p className="font-medium">{title}</p>}
-      {children && <div className={cn(title && "mt-1", "text-current/90")}>{children}</div>}
+      {/* Full-opacity `text-current` — a `/90` opacity modifier here
+          previously softened the body text just enough to drop the
+          warning variant's contrast ratio below WCAG AA's 4.5:1 minimum
+          (4.06:1, caught by an axe scan in the E2E suite's Phase 18
+          Chunk 4 acceptance gate). Every variant's `-700` text color
+          against its `-50` background already provides enough contrast
+          on its own; the opacity was a purely stylistic softening with no
+          accessibility benefit. */}
+      {children && <div className={cn(title && "mt-1", "text-current")}>{children}</div>}
     </div>
   ),
 );
