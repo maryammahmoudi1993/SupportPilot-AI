@@ -65,7 +65,12 @@ export function makeConversationFixture(
 }
 
 export function makeMessageFixture(
-  overrides: Partial<MessageFixture> & { id: string; sender_type: string; direction: string; body: string },
+  overrides: Partial<MessageFixture> & {
+    id: string;
+    sender_type: string;
+    direction: string;
+    body: string;
+  },
 ): MessageFixture {
   return {
     sender: null,
@@ -143,6 +148,7 @@ export const conversationHandlers = [
     const status = url.searchParams.get("status");
     const channel = url.searchParams.get("channel");
     const unassigned = url.searchParams.get("unassigned");
+    const customer = url.searchParams.get("customer");
 
     let results = conversationMockState.conversationsByWorkspace[workspaceId] ?? [];
     if (status) {
@@ -153,6 +159,9 @@ export const conversationHandlers = [
     }
     if (unassigned === "true") {
       results = results.filter((conversation) => conversation.assigned_to === null);
+    }
+    if (customer) {
+      results = results.filter((conversation) => conversation.customer_id === customer);
     }
 
     return HttpResponse.json(paginate(results, url));

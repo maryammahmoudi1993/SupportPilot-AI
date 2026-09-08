@@ -32,7 +32,10 @@ export type PaginatedConversationList = Omit<
 export type Message = Omit<components["schemas"]["Message"], "sender"> & {
   sender: MembershipSummary | null;
 };
-export type PaginatedMessageList = Omit<components["schemas"]["PaginatedMessageList"], "results"> & {
+export type PaginatedMessageList = Omit<
+  components["schemas"]["PaginatedMessageList"],
+  "results"
+> & {
   results: Message[];
 };
 
@@ -50,6 +53,15 @@ export interface ConversationListParams {
   status: ConversationStatusFilter;
   channel: ConversationChannelFilter;
   assignment: ConversationAssignmentFilter;
+  /**
+   * Contextual, URL-driven only — never exposed as a picker in the Inbox
+   * list UI itself (Phase 19 Chunk 3, master prompt Part K). Set when
+   * arriving from a real cross-domain link such as Customer detail's
+   * "Related conversations" panel (`/app/inbox?customer=<id>`, a real
+   * backend filter — see conversations/selectors.py
+   * `conversation_list_for_workspace`).
+   */
+  customerId: string | null;
 }
 
 export const DEFAULT_CONVERSATION_LIST_PARAMS: ConversationListParams = {
@@ -57,6 +69,7 @@ export const DEFAULT_CONVERSATION_LIST_PARAMS: ConversationListParams = {
   status: "all",
   channel: "all",
   assignment: "all",
+  customerId: null,
 };
 
 export interface MessageListParams {

@@ -16,7 +16,9 @@
  *    `customer`, `status`, `channel`, `assigned_to`, and `unassigned` — none
  *    of which drf-spectacular can see, because the view reads them directly
  *    from `request.query_params` rather than a filter backend attribute.
- *    `ConversationListQuery` below narrows this explicitly.
+ *    `ConversationListQuery` below narrows this explicitly. `customer` was
+ *    already real in Chunk 2 but unused; Chunk 3 wires it up for real
+ *    cross-domain contextual links (Customer detail → Inbox).
  * 2. `ordering` and `search` are dead parameters on BOTH the conversation
  *    list and message list endpoints: they appear in the generated schema
  *    only because `OrderingFilter`/`SearchFilter` are in the project's
@@ -45,6 +47,7 @@ type ConversationListQuery = Omit<GeneratedConversationListQuery, "ordering" | "
   status?: string;
   channel?: string;
   unassigned?: boolean;
+  customer?: string;
 };
 
 function toConversationListQuery(params: ConversationListParams): ConversationListQuery {
@@ -60,6 +63,9 @@ function toConversationListQuery(params: ConversationListParams): ConversationLi
   }
   if (params.assignment === "unassigned") {
     query.unassigned = true;
+  }
+  if (params.customerId) {
+    query.customer = params.customerId;
   }
   return query;
 }

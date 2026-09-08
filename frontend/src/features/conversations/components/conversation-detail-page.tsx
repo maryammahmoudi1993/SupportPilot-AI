@@ -9,7 +9,7 @@ import {
   ConversationChannelBadge,
   ConversationStatusBadge,
 } from "@/features/conversations/components/conversation-badges";
-import { CustomerRefLink } from "@/features/conversations/components/customer-ref-link";
+import { CustomerRefLink } from "@/components/support/customer-ref-link";
 import { MessageTimeline } from "@/features/conversations/components/message-timeline";
 import { useConversationDetailQuery, useMessageListQuery } from "@/features/conversations/queries";
 import { parseMessagePage } from "@/features/conversations/url-params";
@@ -119,7 +119,10 @@ function ConversationDetailContent({
         </CardHeader>
         <CardContent>
           <dl className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <Field label="Customer" value={<CustomerRefLink customerId={conversation.customer_id} />} />
+            <Field
+              label="Customer"
+              value={<CustomerRefLink customerId={conversation.customer_id} />}
+            />
             <Field label="Assigned to" value={conversation.assigned_to?.email ?? "Unassigned"} />
             <Field label="Started" value={<Timestamp value={conversation.started_at} />} />
             <Field
@@ -168,9 +171,12 @@ function ConversationDetailContent({
                 <Pagination
                   page={messagePage}
                   hasPrevious={
-                    messagesQuery.data.previous !== null && messagesQuery.data.previous !== undefined
+                    messagesQuery.data.previous !== null &&
+                    messagesQuery.data.previous !== undefined
                   }
-                  hasNext={messagesQuery.data.next !== null && messagesQuery.data.next !== undefined}
+                  hasNext={
+                    messagesQuery.data.next !== null && messagesQuery.data.next !== undefined
+                  }
                   onPrevious={() => goToMessagePage(Math.max(1, messagePage - 1))}
                   onNext={() => goToMessagePage(messagePage + 1)}
                   summary={`Page ${messagePage} · ${messagesQuery.data.count} message${messagesQuery.data.count === 1 ? "" : "s"} total`}
@@ -220,6 +226,9 @@ export function ConversationDetailPage({ conversationId }: { conversationId: str
   }
 
   return (
-    <ConversationDetailInner workspaceId={workspace.activeWorkspace.id} conversationId={conversationId} />
+    <ConversationDetailInner
+      workspaceId={workspace.activeWorkspace.id}
+      conversationId={conversationId}
+    />
   );
 }

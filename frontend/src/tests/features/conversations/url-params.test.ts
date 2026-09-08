@@ -13,14 +13,30 @@ describe("parseConversationListParams", () => {
       status: "all",
       channel: "all",
       assignment: "all",
+      customerId: null,
     });
   });
 
   it("round-trips valid params", () => {
+    const customerId = "11111111-1111-4111-8111-111111111111";
     const params = parseConversationListParams(
-      new URLSearchParams("page=2&status=open&channel=email&assigned=unassigned"),
+      new URLSearchParams(
+        `page=2&status=open&channel=email&assigned=unassigned&customer=${customerId}`,
+      ),
     );
-    expect(params).toEqual({ page: 2, status: "open", channel: "email", assignment: "unassigned" });
+    expect(params).toEqual({
+      page: 2,
+      status: "open",
+      channel: "email",
+      assignment: "unassigned",
+      customerId,
+    });
+  });
+
+  it("ignores a malformed customer ID rather than sending it to the backend", () => {
+    expect(
+      parseConversationListParams(new URLSearchParams("customer=not-a-uuid")).customerId,
+    ).toBeNull();
   });
 
   it("falls back to 'all' for an unrecognized status or channel value", () => {
@@ -31,7 +47,9 @@ describe("parseConversationListParams", () => {
   });
 
   it("falls back to 'all' assignment for anything other than 'unassigned'", () => {
-    expect(parseConversationListParams(new URLSearchParams("assigned=mine")).assignment).toBe("all");
+    expect(parseConversationListParams(new URLSearchParams("assigned=mine")).assignment).toBe(
+      "all",
+    );
   });
 
   it("falls back to page 1 for a non-numeric, zero, or negative page value", () => {
@@ -44,7 +62,13 @@ describe("parseConversationListParams", () => {
 describe("buildConversationListQueryString", () => {
   it("produces an empty string for default params", () => {
     expect(
-      buildConversationListQueryString({ page: 1, status: "all", channel: "all", assignment: "all" }),
+      buildConversationListQueryString({
+        page: 1,
+        status: "all",
+        channel: "all",
+        assignment: "all",
+        customerId: null,
+      }),
     ).toBe("");
   });
 
@@ -55,6 +79,7 @@ describe("buildConversationListQueryString", () => {
         status: "open",
         channel: "all",
         assignment: "all",
+        customerId: null,
       }),
     ).toBe("?page=2&status=open");
     expect(
@@ -63,8 +88,22 @@ describe("buildConversationListQueryString", () => {
         status: "all",
         channel: "all",
         assignment: "unassigned",
+        customerId: null,
       }),
     ).toBe("?assigned=unassigned");
+  });
+
+  it("includes a real customer filter", () => {
+    const customerId = "11111111-1111-4111-8111-111111111111";
+    expect(
+      buildConversationListQueryString({
+        page: 1,
+        status: "all",
+        channel: "all",
+        assignment: "all",
+        customerId,
+      }),
+    ).toBe(`?customer=${customerId}`);
   });
 });
 

@@ -1,7 +1,11 @@
 import { HttpResponse, http } from "msw";
 import { describe, expect, it } from "vitest";
 
-import { fetchConversationDetail, fetchConversationList, fetchMessageList } from "@/features/conversations/api";
+import {
+  fetchConversationDetail,
+  fetchConversationList,
+  fetchMessageList,
+} from "@/features/conversations/api";
 import { server } from "@/tests/msw/server";
 
 const BASE = "http://localhost:8000";
@@ -16,13 +20,20 @@ describe("fetchConversationList request shape", () => {
       }),
     );
 
-    await fetchConversationList("ws-1", { page: 1, status: "all", channel: "all", assignment: "all" });
+    await fetchConversationList("ws-1", {
+      page: 1,
+      status: "all",
+      channel: "all",
+      assignment: "all",
+      customerId: null,
+    });
 
     const params = (capturedUrl as unknown as URL).searchParams;
     expect(params.has("page")).toBe(false);
     expect(params.has("status")).toBe(false);
     expect(params.has("channel")).toBe(false);
     expect(params.has("unassigned")).toBe(false);
+    expect(params.has("customer")).toBe(false);
     expect(params.has("search")).toBe(false);
     expect(params.has("ordering")).toBe(false);
   });
@@ -36,11 +47,13 @@ describe("fetchConversationList request shape", () => {
       }),
     );
 
+    const customerId = "11111111-1111-4111-8111-111111111111";
     await fetchConversationList("ws-1", {
       page: 2,
       status: "open",
       channel: "email",
       assignment: "unassigned",
+      customerId,
     });
 
     const params = (capturedUrl as unknown as URL).searchParams;
@@ -48,6 +61,7 @@ describe("fetchConversationList request shape", () => {
     expect(params.get("status")).toBe("open");
     expect(params.get("channel")).toBe("email");
     expect(params.get("unassigned")).toBe("true");
+    expect(params.get("customer")).toBe(customerId);
   });
 });
 

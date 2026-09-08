@@ -9,7 +9,7 @@ import {
   ConversationChannelBadge,
   ConversationStatusBadge,
 } from "@/features/conversations/components/conversation-badges";
-import { CustomerRefLink } from "@/features/conversations/components/customer-ref-link";
+import { CustomerRefLink } from "@/components/support/customer-ref-link";
 import { useConversationListQuery } from "@/features/conversations/queries";
 import type {
   ConversationAssignmentFilter,
@@ -78,8 +78,15 @@ function ConversationsListContent() {
     };
   }
 
+  function clearCustomerFilter() {
+    pushParams({ ...params, customerId: null, page: 1 });
+  }
+
   const hasFilters =
-    params.status !== "all" || params.channel !== "all" || params.assignment !== "all";
+    params.status !== "all" ||
+    params.channel !== "all" ||
+    params.assignment !== "all" ||
+    params.customerId !== null;
 
   return (
     <div className="flex flex-col gap-6">
@@ -87,6 +94,21 @@ function ConversationsListContent() {
         <h1 className="text-text-primary text-xl font-semibold">Inbox</h1>
         <p className="text-text-secondary text-sm">Conversations this workspace is handling.</p>
       </div>
+
+      {params.customerId && (
+        <div className="border-border-subtle bg-surface-2 flex flex-wrap items-center justify-between gap-2 rounded-lg border px-4 py-2.5 text-sm">
+          <span className="text-text-secondary">
+            Showing conversations for <CustomerRefLink customerId={params.customerId} />
+          </span>
+          <button
+            type="button"
+            onClick={clearCustomerFilter}
+            className="text-primary-700 hover:underline focus-visible:underline"
+          >
+            Clear filter
+          </button>
+        </div>
+      )}
 
       <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">
         <div className="w-full sm:w-48">
@@ -147,7 +169,7 @@ function ConversationsListContent() {
       )}
 
       {query.isSuccess && query.data.results.length === 0 && (
-        <div className="rounded-lg border border-dashed py-16 text-center border-border-subtle">
+        <div className="border-border-subtle rounded-lg border border-dashed py-16 text-center">
           <p className="text-text-primary text-sm font-medium">
             {hasFilters ? "No conversations match your filters" : "No conversations yet"}
           </p>
@@ -186,7 +208,9 @@ function ConversationsListContent() {
                   </th>
                 </tr>
               </thead>
-              <tbody className={cn("divide-y divide-border-subtle", query.isFetching && "opacity-60")}>
+              <tbody
+                className={cn("divide-border-subtle divide-y", query.isFetching && "opacity-60")}
+              >
                 {query.data.results.map((conversation) => (
                   <tr key={conversation.id} className="hover:bg-surface-2">
                     <td className="px-4 py-2.5 font-medium">
