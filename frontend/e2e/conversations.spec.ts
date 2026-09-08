@@ -22,9 +22,9 @@ test.describe("Inbox", () => {
     await expect(
       page.getByRole("link", { name: data.workspaceBConversationSubject }),
     ).toBeVisible();
-    await expect(
-      page.getByRole("link", { name: data.workspaceAConversationSubject }),
-    ).toHaveCount(0);
+    await expect(page.getByRole("link", { name: data.workspaceAConversationSubject })).toHaveCount(
+      0,
+    );
 
     await page.getByRole("link", { name: data.workspaceBConversationSubject }).click();
     await page.waitForURL(`**/app/inbox/${data.workspaceBConversationId}`);
@@ -34,8 +34,20 @@ test.describe("Inbox", () => {
     ).toBeVisible();
     // Real message timeline, real sender/source distinctions.
     await expect(page.getByText("My order hasn't arrived yet.")).toBeVisible();
-    await expect(page.getByText("Tracking shows the package is out for delivery today.")).toBeVisible();
+    await expect(
+      page.getByText("Tracking shows the package is out for delivery today."),
+    ).toBeVisible();
     await expect(page.getByText("Internal note")).toBeVisible();
+
+    // Content safety (Phase 19 Chunk 4): HTML/script-looking real message
+    // content renders as inert plain text, never interpreted as markup —
+    // the literal tags are visible text, not executed, and no injected
+    // global exists on the page.
+    await expect(page.getByText("<b>Is this bold?</b>")).toBeVisible();
+    const xssMarker = await page.evaluate(
+      () => (window as unknown as { __xss_marker?: boolean }).__xss_marker,
+    );
+    expect(xssMarker).toBeUndefined();
   });
 
   test("status and assignment filters narrow the real result set", async ({ page }) => {
@@ -47,18 +59,18 @@ test.describe("Inbox", () => {
     await expect(
       page.getByRole("link", { name: data.workspaceBUnassignedConversationSubject }),
     ).toBeVisible();
-    await expect(
-      page.getByRole("link", { name: data.workspaceBConversationSubject }),
-    ).toHaveCount(0);
+    await expect(page.getByRole("link", { name: data.workspaceBConversationSubject })).toHaveCount(
+      0,
+    );
 
     await page.getByLabel("Status").selectOption("all");
     await page.getByLabel("Assignment").selectOption("unassigned");
     await expect(
       page.getByRole("link", { name: data.workspaceBUnassignedConversationSubject }),
     ).toBeVisible();
-    await expect(
-      page.getByRole("link", { name: data.workspaceBConversationSubject }),
-    ).toHaveCount(0);
+    await expect(page.getByRole("link", { name: data.workspaceBConversationSubject })).toHaveCount(
+      0,
+    );
   });
 
   test("the linked customer opens the real customer detail page", async ({ page }) => {
@@ -66,7 +78,9 @@ test.describe("Inbox", () => {
     await login(page, data.primaryEmail, data.primaryPassword);
     await page.goto(`/app/inbox/${data.workspaceBConversationId}`);
 
-    await page.getByRole("link", { name: `Customer #${data.workspaceBCustomerId.slice(0, 8)}` }).click();
+    await page
+      .getByRole("link", { name: `Customer #${data.workspaceBCustomerId.slice(0, 8)}` })
+      .click();
     await page.waitForURL(`**/app/customers/${data.workspaceBCustomerId}`);
     await expect(page.getByRole("heading", { name: data.workspaceBCustomerName })).toBeVisible();
   });
@@ -87,9 +101,9 @@ test.describe("Inbox", () => {
     await expect(
       page.getByRole("link", { name: data.workspaceAConversationSubject }),
     ).toBeVisible();
-    await expect(
-      page.getByRole("link", { name: data.workspaceBConversationSubject }),
-    ).toHaveCount(0);
+    await expect(page.getByRole("link", { name: data.workspaceBConversationSubject })).toHaveCount(
+      0,
+    );
   });
 
   test("a conversation ID from a different workspace is rejected as not-found, never leaked", async ({
