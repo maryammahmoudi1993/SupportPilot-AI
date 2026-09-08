@@ -49,30 +49,55 @@ frontend/
     app/            App Router routes, layouts, and route-level UI states
       (protected)/   Route group for every authenticated route (no URL segment of its own)
         app/         The real authenticated landing route (/app)
+          customers/          Customers list (/app/customers)
+            [customerId]/     Customer detail (/app/customers/:id)
+          inbox/              Conversation list (/app/inbox)
+            [conversationId]/ Conversation detail + message timeline (/app/inbox/:id)
+          tickets/            Ticket list (/app/tickets)
+            [ticketId]/       Ticket detail (/app/tickets/:id)
       login/         The public login route
     components/
       ui/           Design-system primitives (Button, Input, Card, DropdownMenu, Sheet, ...)
       shell/        Application shell chrome (Sidebar, Header, nav config/links, user menu, mobile nav)
+      support/      Shared operational UI, reused across every business domain (EntityNotFound,
+                    ListError, Pagination, Timestamp, EnumBadge, CustomerRefLink) — see
+                    "Operational Support Workspace" below
     features/
       auth/          Login/logout/me operations, AuthProvider, LoginForm, redirect safety
       workspace/     Active-workspace state, selection persistence, the workspace switcher
+      customers/     Customers domain: typed API boundary, query-key factory, React Query hooks,
+                     URL-state (de)serialization, and the list/detail page components
+      conversations/ Conversations/messages domain: same shape as customers, plus the message
+                     timeline, status/channel badge components, and RelatedConversationsPanel
+                     (a Customer-detail contextual panel)
+      tickets/       Tickets domain: same shape again, plus status/priority badge components and
+                     RelatedTicketsPanel (a Customer-detail contextual panel) — see "Tickets +
+                     cross-domain operational navigation" below
     lib/            Framework-agnostic code: API transport, config, utils
       api/           Central HTTP client, token/session/CSRF handling, error normalization
+      query/         Server-state (TanStack Query) client factory and provider — see
+                     "Operational Support Workspace" below
     types/          Generated types only (api.ts) — never hand-edited
     tests/          Vitest specs, mirroring the src/ layout they cover
-      msw/           Request-level mocks for the auth endpoints
+      msw/           Request-level mocks for the auth, customers, conversations, and tickets
+                     endpoints
+      support/       Shared test helpers (e.g. renderAuthenticated)
   scripts/          Node scripts (API type generation, drift check)
   openapi.yaml      Generated OpenAPI schema snapshot (see below)
 ```
 
-Other feature domains (customers, conversations, tickets, agents,
-approvals, knowledge, integrations, evaluations, settings) get their own
-directories under `src/features/` starting in the phase that implements
-them — `auth` and `workspace` are the first two, and the pattern they
-establish (a feature owns its API calls, its own React state, and its own
-tests; transport-level concerns generic across features stay in `lib/api`;
-shell-chrome concerns generic across every authenticated route stay in
-`components/shell`) is meant to repeat.
+Other feature domains (agents, approvals, knowledge, integrations,
+evaluations, settings) get their own directories under `src/features/`
+starting in the phase that implements them — `auth`, `workspace`,
+`customers` (Phase 19 Chunk 1), `conversations` (Phase 19 Chunk 2), and
+`tickets` (Phase 19 Chunk 3) establish the pattern: a feature owns its API
+calls, its own React state, and its own tests; transport-level concerns
+generic across features stay in `lib/api` (and, as of Chunk 1, `lib/query`);
+shell-chrome and cross-domain
+operational UI concerns stay in `components/shell` and `components/support`
+respectively. A cross-domain reference component used by more than one
+feature (e.g. `CustomerRefLink`, linked to by both Conversations and
+Tickets) lives in `components/support`, not duplicated per-feature.
 
 ## API contract and type generation
 
@@ -724,6 +749,420 @@ No route under `(protected)` attempts server-side JWT validation or a
 second, Next-held session: see "Browser/backend topology" above, which this
 chunk doesn't change.
 
+## Operational Support Workspace (Phase 19)
+
+Phase 19 is the first business-product frontend phase: an authenticated
+operator uses SupportPilot AI to browse real customers, conversations, and
+tickets. Chunk 1 implements the first slice — **Customers** — and the
+server-state foundation the rest of Phase 19 builds on.
+
+### Server-state strategy
+
+Phase 18 deliberately shipped without a server-state library — one route
+(`/app`) reading data already fetched by `AuthProvider` didn't justify one.
+Phase 19 does: multiple lists, detail pages, pagination, filters, and
+cross-domain navigation, all workspace-scoped and all needing cache
+invalidation that a hand-rolled `useEffect`/`useState` per page would either
+duplicate or get subtly wrong (stale data across a workspace switch, a
+list not refreshing after a mutation, races between a fast filter change
+and a slow request). **TanStack Query v5** (`@tanstack/react-query`) is
+introduced in Chunk 1, at the point this actually starts to matter, not
+speculatively ahead of it.
+
+`src/lib/query/query-client.ts` (`createQueryClient()`) defines the
+project's retry policy explicitly rather than accepting the library
+default:
+
+- `network_error`, `timeout`, and `internal_server_error` are the only
+  retried outcomes — bounded to 2 retries with a fast, capped backoff
+  (200ms, then 400ms; the library default is `1000 * 2^attempt` up to 30s,
+  which would leave an operator staring at a spinner for seconds over one
+  transient blip).
+- Every other `ApiError` code (`validation_error`, `permission_denied`,
+  `not_found`, `conflict`, `rate_limited`, `invalid_request`,
+  `parse_error`, `unknown_error`) is a definitive outcome — never retried.
+- `authentication_failed` is explicitly excluded: a 401 that reaches a
+  query already survived `lib/api/session.ts`'s own coordinated
+  refresh-and-retry-once. Retrying it again here would just race that
+  mechanism; a *definitive* 401 is handled by `AuthProvider`'s
+  session-expired handler (clearing the session, redirecting to `/login`),
+  not by a query retry.
+- Mutations never retry (`retry: false`) — an ambiguous automatic retry of
+  a state-changing request (was it applied once, or twice?) is worse than
+  a surfaced error the operator can act on. Phase 19 Chunk 1 ships no
+  mutations yet (Customers is read-only — see below); this policy is
+  in place for the write endpoints later chunks/domains add.
+- `refetchOnWindowFocus`/`refetchOnReconnect` are off: an operator asks for
+  fresh data by navigating or pressing an explicit Retry, not via an
+  implicit background refetch — and the defaults fight determinism in
+  tests for no real product benefit here.
+
+`src/lib/query/query-provider.tsx` (`QueryProvider`) owns exactly one
+`QueryClient` instance, mounted inside `ProtectedLayout` — *inside* the
+`auth.status === "authenticated"` branch, alongside `WorkspaceProvider`
+(see `app/(protected)/layout.tsx`). This is what gives session-scoped cache
+isolation for free: `ProtectedLayout` renders entirely different JSX for
+every other `AuthStatus`, so `QueryProvider` (and therefore every cached
+query) unmounts completely on logout or a confirmed mid-session expiry, and
+remounts fresh — with an empty cache — on the next login. There is no
+cache to leak between sessions because the `QueryClient` itself is gone,
+not merely invalidated. A **workspace switch**, by contrast, happens
+*within* one authenticated session and must not tear this down — isolation
+there is the query-key factories' job (below), not this provider's.
+
+### Workspace-scoped query keys
+
+Every domain gets a typed key factory (see
+`src/features/customers/query-keys.ts` for the customers one) whose keys
+all embed the active workspace ID as their second segment:
+
+```
+["workspaces", workspaceId, "customers", "list", params]
+["workspaces", workspaceId, "customers", "detail", customerId]
+```
+
+This is the actual mechanism behind "Workspace A's cached data never
+renders under Workspace B": a workspace switch changes every hook's
+`queryKey`, so React Query treats it as a *disjoint* cache entry, not the
+same entry gone stale — there's no shared bucket a stale value could leak
+out of. The one place this needs extra care is `placeholderData`
+(`src/features/customers/queries.ts`, `useCustomerListQuery`): React
+Query's `keepPreviousData` helper reuses the *previous successful query's*
+data across ANY key change, including a workspace switch — which would
+flash Workspace A's rows for a moment while Workspace B's request is in
+flight. Instead, `useCustomerListQuery` reuses `placeholderData` only when
+the *previous* query's key carries the *same* workspace ID as the current
+one (still giving smooth in-workspace pagination/filtering, never a
+cross-tenant flash) — covered by
+`customers-list-page.test.tsx`'s workspace-switch test, which asserts the
+old workspace's customer name is gone from the DOM immediately on switch,
+not merely eventually.
+
+### Customer API contract
+
+| Question             | Answer                                                                                                                                                                   |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| List                  | `GET /api/v1/workspaces/{workspace_id}/customers/` — `customers/views.py` `CustomerListCreateView`, any active member.                                                 |
+| Detail                | `GET /api/v1/workspaces/{workspace_id}/customers/{customer_id}/` — `CustomerDetailView`. A customer belonging to a different workspace 404s exactly like one that never existed (`customers/selectors.py customer_get_for_workspace_or_404`) — never a 403, no existence leakage. |
+| Pagination            | Backend-standard `PageNumberPagination` (`common/pagination.py`) — `{count, next, previous, results}`, `page`/`page_size` query params, default page size 50, max 500. |
+| Search                | A single `search` query param, `icontains` across display/first/last name, email, phone, and external ID (`customers/selectors.py customer_list_for_workspace`) — no explicit-submit contract, so the UI debounces type-ahead (300ms) rather than firing per keystroke. |
+| Filters               | `is_active` (boolean) — real and backend-tested, surfaced as a Status select (All/Active/Inactive).                                                                    |
+| Sort                  | None. `ordering` appears in the generated OpenAPI schema only because `OrderingFilter` is in the project's global `DEFAULT_FILTER_BACKENDS` — the view sets no `ordering_fields`, so the backend silently ignores it. The frontend never sends it (see the comment in `features/customers/api.ts`) — sending an unsupported control would be building UI for a capability that doesn't exist. |
+| Create/update         | `POST`/`PATCH` exist on the backend (`CustomerWriteSerializer`) but are out of Chunk 1's scope — the Customers UI is intentionally **read-only** for now; a real write UI is better deferred than faked. |
+
+**Schema gap (Category A — typing deficiency, not a missing capability)**:
+`is_active` is a real, tested filter the view reads directly from
+`request.query_params`, so `drf-spectacular` can't see it and it's absent
+from the generated `api_v1_workspaces_customers_list` operation's query
+type. `features/customers/api.ts` narrows this explicitly with a local
+`CustomerListQuery` type (`Omit<GeneratedQuery, "ordering"> & { is_active?:
+boolean }`) — no `any`, no `ts-ignore`, and a comment pointing at the exact
+backend code that makes it real.
+
+### Pagination, search, and filter conventions
+
+List state (`page`, `search`, `status`) lives in the URL query string
+(`src/features/customers/url-params.ts`), not component state alone — a
+bookmarked/shared `/app/customers?search=jane&status=active` link restores
+the same view, and browser back/forward works. Every value read from
+`URLSearchParams` is treated as untrusted (a hand-edited or stale link):
+`page` must match `^[1-9]\d*$` or falls back to 1, `status` falls back to
+`"all"` for anything unrecognized, `search` is length-capped. Defaulted
+fields are omitted from the serialized query string, so the URL stays
+clean (`/app/customers`, not `/app/customers?page=1&search=&status=all`).
+Changing search or status resets `page` to 1; pagination itself preserves
+the current search/status. `Pagination` (`components/support/pagination.tsx`)
+drives Next/Previous off the backend's actual `next`/`previous` URLs, never
+off page-size arithmetic the frontend would have to guess at.
+
+### States
+
+`CustomersListPage`/`CustomerDetailPage` distinguish: initial loading
+(skeleton), a network/server error (`ListError` — an `Alert` plus Retry,
+never collapsed into "empty"), a confirmed empty result set (two distinct
+messages depending on whether a filter is active), and success. Detail
+additionally distinguishes a confirmed 404 (`EntityNotFound` — deliberately
+generic wording, since the backend returns the identical 404 for "doesn't
+exist" and "exists in a different workspace") from a malformed route ID
+(validated client-side against a UUID pattern *before* any request is
+made — `customer-detail-page.test.tsx` asserts no network call happens for
+a non-UUID `customerId`) and from a genuine network error. The
+zero-workspace/workspace-load-error/loading states are already handled
+once, globally, by `AppShell`'s `WorkspaceGate` (Phase 18) — the customers
+pages don't duplicate them.
+
+### Navigation
+
+"Customers" was added to `NAV_ITEMS` (`components/shell/nav-config.ts`) in
+Chunk 1 once `/app/customers` became a real route with real data. Chunk 2
+adds "Inbox" the same way, now that `/app/inbox` is real too. Real
+navigation is now Overview → Inbox → Customers; Tickets is **not** added
+yet — an unclickable nav entry for a route that doesn't exist yet is worse
+than a short sidebar. `NavLinks`' active-route matching
+(`components/shell/nav-links.tsx`) treats every non-`/app` destination as
+active for its own path *and* any nested route under it (`startsWith`), so
+the sidebar stays highlighted while drilled into `/app/customers/[id]` or
+`/app/inbox/[id]`.
+
+### Inbox / Conversations + message timeline (Phase 19 Chunk 2)
+
+**Route model**: `/app/inbox` (list) and `/app/inbox/[conversationId]`
+(detail) — "Inbox" is the nav label; the route segment is `conversations`'
+close relative in spirit but literally `inbox`, chosen up front per the
+build prompt's preferred model rather than the `/app/conversations`
+alternative. No duplicate route exists for the same data.
+
+**Conversation API contract**:
+
+| Question   | Answer                                                                                                                                                                                                                    |
+| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| List       | `GET /api/v1/workspaces/{workspace_id}/conversations/` — any active member.                                                                                                                                            |
+| Detail     | `GET /api/v1/workspaces/{workspace_id}/conversations/{conversation_id}/` — 404s exactly like a nonexistent conversation for one belonging to a different workspace.                                                    |
+| Messages   | `GET /api/v1/workspaces/{workspace_id}/conversations/{conversation_id}/messages/` — scoped by **both** workspace and conversation (`conversations/selectors.py`): a foreign-workspace conversation ID 404s this endpoint too, not just conversation detail. |
+| Pagination | Backend-standard `PageNumberPagination` on both list and message endpoints — `{count, next, previous, results}`, default page size 50.                                                                                  |
+| Filters    | `status` (open/pending/closed), `channel` (web/chat/email/sms/api), `unassigned` (boolean) — all real and backend-tested (`conversations/selectors.py conversation_list_for_workspace`). `customer`/`assigned_to` (UUID) filters also exist backend-side but have no UI control in Chunk 2 — an operator-facing customer/assignee *picker* is a materially separate UX investment better scoped with assignment UI itself. |
+| Search     | **Not implemented on the backend** for either endpoint — see the schema-gap note below. No search control exists in the UI.                                                                                             |
+| Ordering   | Not implemented on the backend (same dead-parameter situation as `search`) — never sent.                                                                                                                                |
+| Mutations  | Real and backend-tested (`POST .../messages/` to send, `.../status/`, `.../close/`, `.../reopen/`, `.../assign/`) but **deferred** — see "Deferred: operator reply and status mutations" below.                        |
+
+**Schema gaps (Category A — typing deficiencies, same shape as Chunk 1's
+`is_active`/`ordering` findings)**:
+
+1. `status`/`channel`/`unassigned` (conversation list) are real,
+   backend-tested filters absent from the generated
+   `api_v1_workspaces_conversations_list` operation's query type — narrowed
+   explicitly in `features/conversations/api.ts`'s `ConversationListQuery`.
+2. `ordering`/`search` appear in the generated schema for **both**
+   `conversations_list` and `conversations_messages_list` (global
+   filter-backend inference) but neither view configures `ordering_fields`/
+   `search_fields`, and neither selector accepts a `search` argument —
+   completely dead parameters on the real backend. Never sent.
+3. `Conversation.assigned_to` and `Message.sender` are both nested
+   `MembershipSummary` fields the generated schema types as non-nullable,
+   but the backing foreign keys (`assigned_to`, `sender_membership`) are
+   nullable and DRF correctly serializes `null` for an unassigned
+   conversation or a non-human-agent message — `drf-spectacular` doesn't
+   infer nullability through a nested read-only serializer the way it does
+   for a plain scalar. Re-typed in `features/conversations/types.ts`.
+4. The generated request body for `POST .../messages/` is typed as
+   `Message` (the read-only response shape) rather than the real
+   `MessageCreateSerializer` shape (`direction`, `body`, `external_id?`,
+   `metadata?`) — the view's `create()` uses a different serializer than
+   its class-level `serializer_class`, which `drf-spectacular` can't see
+   without an explicit `@extend_schema` override. Not narrowed in this
+   chunk since message send is deferred (see below); flagged here for
+   whichever chunk implements it.
+
+**Customer identity in the inbox — an architectural limitation, not a
+design choice**: the conversation list/detail response includes only
+`customer_id` (a UUID), never a name/email summary
+(`conversations/serializers.py ConversationSerializer`). Fetching each
+row's customer individually to show a name would be a client-side N+1 (up
+to 50 extra requests for one page) — explicitly disallowed (see "No client
+N+1" below) — and there is no bulk-by-IDs customer endpoint to fetch all of
+a page's customers in one request either (`customers/selectors.py
+customer_list_for_workspace` only supports a single free-text `search`, not
+an `id__in` filter). Chunk 2 therefore links to the customer honestly, by
+ID (`Customer #<first 8 chars>` — `features/conversations/components/
+customer-ref-link.tsx`), rather than either an N+1 fetch or a fabricated
+name. The minimal backend change that would resolve this is adding a
+lightweight customer summary (e.g. `customer_display_name`) to
+`ConversationSerializer`, mirroring how `assigned_to` is already embedded
+— flagged for a human decision, not implemented here (see "Backend policy").
+
+**No client N+1**: the list page issues exactly one request per
+page/filter change — no per-row customer, assignee, or other detail
+fetches. Conversation detail issues exactly two requests in parallel (the
+conversation itself and its first page of messages — see `queries.ts`'s
+`useMessageListQuery` doc comment), never serially chained.
+
+**Message ordering**: the backend orders messages by `(created_at,
+sequence)` ascending — oldest first (`conversations/selectors.py
+message_list_for_conversation`). `sequence` is a strictly-increasing,
+DB-assigned insertion sequence introduced in Phase 16 specifically to
+break same-`created_at` ties deterministically (`Message.sequence`'s
+backend docstring) — two messages can legitimately share a `created_at`
+value (`auto_now_add`'s precision, or a fast burst of sends), and `id`
+(a random UUID) is not a safe tie-breaker. The frontend renders `results`
+in exactly the order the API returns it and never re-sorts — verified by a
+regression test seeding two same-`created_at` messages in a specific order
+and asserting the DOM renders them in that same order
+(`conversation-detail-page.test.tsx`).
+
+**Sender/source semantics**: `Message.sender_type` (`customer`,
+`human_agent`, `ai_agent`, `system`) picks the label; a `human_agent`
+message additionally shows the real sender's email
+(`message-timeline.tsx`). `direction === "internal"` (a support-only note,
+never customer-visible) is marked with a distinct "Internal note" badge and
+background tint — a real, backend-enforced distinction
+(`MessageCreateSerializer` only allows `outbound`/`internal` from this API;
+`internal` is never shown to the customer) that the UI must not blur.
+Speaker is never inferred from message body content.
+
+**Message content safety**: rendered as plain text
+(`whitespace-pre-wrap break-words`, preserving real newlines and wrapping
+long unbroken URLs/words) — no `dangerouslySetInnerHTML`, no custom
+HTML/markdown rendering, since the backend returns and stores raw text with
+no structured-content contract.
+
+**Timeline semantics**: a plain `<ol>`/`<li>` list, not `role="log"` — the
+timeline is a static page load (paginated, not live-updating), so `role="log"`
+(an assistive-tech live region) would misrepresent it. Each `<li>` exposes
+sender, timestamp, and content together, in reading order.
+
+**Status/channel badges**: semantic text + color via the shared
+`EnumBadge` (`components/support/enum-badge.tsx`, new in this chunk) —
+never color alone, and a documented **safe fallback for a status/channel
+value the frontend doesn't recognize**: the badge falls back to the raw
+enum string as its own label and a neutral color rather than crashing or
+rendering blank (covered by a dedicated test seeding an unrecognized
+future status/channel).
+
+**Deferred: operator reply and status mutations**. The backend genuinely
+supports sending a message (`POST .../messages/`, `direction: "outbound" |
+"internal"`) and conversation status changes (`.../status/`, `.../close/`,
+`.../reopen/`, `.../assign/`) — verified real, not assumed. Both are
+deliberately **out of Chunk 2's scope** ("Inbox / Conversations + Message
+Timeline" — a read-only viewing experience), consistent with Chunk 1's own
+precedent of shipping Customers read-only despite `PATCH` existing. Message
+send specifically has a safety wrinkle worth documenting for whichever
+chunk implements it: there is no idempotency key or `external_id`
+uniqueness constraint on `Message` (unlike `Customer`/`Conversation`, which
+do have one), so a naive automatic retry after a network-ambiguous send
+could create a real duplicate message — the query client's existing
+"mutations never retry" policy (Chunk 1) is necessary but not sufficient
+here; a future implementation needs its own explicit ambiguous-failure UI
+per the build prompt's Part G, not just "retry: false".
+
+### Tickets + cross-domain operational navigation (Phase 19 Chunk 3)
+
+**Route model**: `/app/tickets` (list) and `/app/tickets/[ticketId]`
+(detail) — same pattern as Customers/Inbox. No duplicate route.
+
+**Ticket API contract**:
+
+| Question   | Answer                                                                                                                                                                                                                                                     |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| List       | `GET /api/v1/workspaces/{workspace_id}/tickets/` — any active member.                                                                                                                                                                                       |
+| Detail     | `GET /api/v1/workspaces/{workspace_id}/tickets/{ticket_id}/` — 404s exactly like a nonexistent ticket for one belonging to a different workspace.                                                                                                          |
+| Create     | `POST .../tickets/` — supported, non-viewer role. Not implemented in this chunk (see "Read-only by design" below).                                                                                                                                          |
+| Update     | `PATCH .../tickets/{id}/` — supported (manager+, or the assigned agent). Not implemented.                                                                                                                                                                    |
+| Status     | `POST .../{id}/status\|resolve\|reopen/`, assignment via `.../assign/`, `.../unassign/` — all real and backend-tested (`tickets/services.py`). Not implemented — see "Mutation decision" below.                                                            |
+| Pagination | Backend-standard `PageNumberPagination` — `{count, next, previous, results}`, default page size 50.                                                                                                                                                         |
+| Filters    | `status` (open/in_progress/pending/resolved/closed), `priority` (low/normal/high/urgent), `customer`, `assigned_to`, `unassigned`, `conversation` — all real (`tickets/selectors.py ticket_list_for_workspace`). Only `status`/`priority` have UI selects. |
+| Search     | **Not implemented on the backend.** No search control exists in the UI.                                                                                                                                                                                      |
+| Ordering   | **Not a client concern**: the backend always sorts by priority (urgent → low) then most-recently-created (`ticket_list_for_workspace`'s `_PRIORITY_ORDER` annotation) — a fixed, deliberate operational order. The generated `ordering` query parameter is a dead global-filter-backend artifact exactly like Customers/Conversations; never sent, and no sort control is offered (a regression test asserts no "sort"/"order" control exists). |
+| Customer relation | `customer_id` — always present (a ticket always belongs to a customer). Links to the existing `/app/customers/[customerId]` route.                                                                                                                    |
+| Conversation relation | `conversation_id` — nullable (a ticket may be created directly, not from a conversation). When present, links to the existing `/app/inbox/[conversationId]` route.                                                                                    |
+| Handoff relation | `HumanHandoff.ticket_id` exists backend-side, but `Ticket` itself carries no handoff/origin field, and `Conversation` exposes neither a ticket nor a handoff field — there is no real "created via handoff" fact surfaceable from the Ticket or Conversation API without a separate Handoff-domain fetch per row (N+1). Omitted; not inferred.                                                                                                     |
+
+**Schema gaps (Category A — typing deficiencies, same shape as prior chunks)**:
+
+1. `status`/`priority`/`customer`/`assigned_to`/`unassigned`/`conversation`
+   are real, backend-tested filters absent from the generated
+   `api_v1_workspaces_tickets_list` operation's query type (same
+   global-filter-backend-inference gap as Customers/Conversations) —
+   narrowed explicitly in `features/tickets/api.ts`'s `TicketListQuery`.
+2. `ordering`/`search` are dead parameters on the real backend (see table
+   above). Never sent.
+3. `Ticket.assigned_to` is a nested `MembershipSummary` field the generated
+   schema types as non-nullable, but the backing foreign key
+   (`Ticket.assigned_to`, `on_delete=SET_NULL`) is nullable — the same
+   drf-spectacular nested-nullability gap already documented for
+   `Conversation.assigned_to`/`Message.sender`. Re-typed in
+   `features/tickets/types.ts`.
+
+**Mutation decision — deferred, consistent with Customers/Conversations**:
+status transitions (`resolve`/`reopen`/`status`), assignment, and
+create/update are all real, backend-tested capabilities
+(`tickets/services.py`), but none are implemented in this chunk. Reasoning,
+per mutation:
+
+- **Status/resolve/reopen**: the transition table
+  (`TICKET_STATUS_TRANSITIONS`) rejects a same-status transition with a
+  clean domain `ValidationError` rather than silently no-op'ing or
+  double-recording an audit event — so a blind retry after an ambiguous
+  network failure is _individually_ safe (it either succeeds once, or
+  surfaces a deterministic "cannot transition from resolved to resolved"
+  error on the retry, never a corrupted or duplicated state). Still
+  deferred: shipping only status while omitting assignment produces a
+  half-interactive, inconsistent surface, and the full required test
+  matrix (success / domain-validation error / authorization failure /
+  duplicate-submission-blocked / retry-count / invalidation /
+  network-ambiguity, per mutation) is a materially separate scope of work
+  from this chunk's stated goal ("Tickets + Cross-Domain Operational
+  Navigation").
+- **Assign/unassign**: `assign_ticket` always records a fresh audit event
+  (`TICKET_ASSIGNED`/`TICKET_REASSIGNED`) on every successful call, even a
+  no-op reassignment to the same person — so a blind retry after an
+  ambiguous failure produces a real duplicate audit-log entry, not just a
+  harmless repeated error. Combined with the actor-dependent authorization
+  branching (manager+ may reassign anyone; a support agent may only
+  self-assign an _unassigned_ ticket), this is the same class of
+  "ambiguous side effect" that kept message send deferred in Chunk 2.
+- **Create/update**: out of this phase's stated UX scope per the build
+  prompt ("this phase primarily needs operational visibility/navigation,
+  not a replacement ticket administration system") — human-handoff-created
+  ticket creation already exists server-side and needs no client form.
+
+Blind mutation retry: **NO** (the query client's mutation-retry policy from
+Chunk 1 remains `retry: 0`; moot here since no mutation is wired up at
+all). Read-only is an explicitly sanctioned outcome for this phase, not a
+lesser one — see the build prompt's Part G, "Read-only is acceptable."
+
+**Cross-domain operational navigation** — the actual new capability this
+chunk adds:
+
+| Link                                   | Real?                                                                                                     | Mechanism                                                                                                          |
+| --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Ticket → Customer                       | Yes (`Ticket.customer_id`, always present)                                                                | Shared `components/support/customer-ref-link.tsx`, linking to `/app/customers/[customerId]`.                       |
+| Ticket → Conversation                   | Yes, when `conversation_id` is non-null                                                                   | "View originating conversation" link to `/app/inbox/[conversationId]`.                                             |
+| Conversation → Customer                 | Yes (unchanged from Chunk 2)                                                                              | Same shared `CustomerRefLink`.                                                                                     |
+| Conversation → Ticket                   | **N/A — not real.** `ConversationSerializer` exposes no ticket/handoff field.                              | Omitted; not inferred (build prompt Part F §19: "If not directly exposed, do not infer it").                       |
+| Customer → related Conversations        | Yes — a real `customer` filter on the conversation list (`conversation_list_for_workspace`)               | `RelatedConversationsPanel` (single bounded query, page 1, on Customer detail) + "View all" link to `/app/inbox?customer=<id>`. |
+| Customer → related Tickets              | Yes — a real `customer` filter on the ticket list (`ticket_list_for_workspace`)                            | `RelatedTicketsPanel` (same pattern) + "View all" link to `/app/tickets?customer=<id>`.                             |
+
+`customer` was already a real, backend-tested filter on both the
+conversation and ticket list endpoints before this chunk (the Chunk 2
+schema-gap note flagged it as "real but unused"); this chunk wires it up
+for exactly these two contextual, URL-driven links — **not** a customer
+picker in either list UI (`ConversationListParams.customerId` /
+`TicketListParams.customerId` are parsed from the URL's `?customer=`
+param, validated as a well-formed UUID, and rendered as a dismissible
+"Showing tickets/conversations for Customer #…" banner with a "Clear
+filter" action — never a dropdown or search box). A URL-supplied customer
+ID is not authorization: the backend's own workspace scoping is what
+actually enforces access (an ID for a customer in a different workspace
+simply yields zero matching rows, never a leak).
+
+**No client N+1**: the Tickets list issues exactly one request per
+page/filter change, matching Customers/Conversations. Customer detail now
+issues two additional bounded requests (one for `RelatedConversationsPanel`,
+one for `RelatedTicketsPanel`) — each a single real, filtered list query for
+that one detail page, never a per-row fetch across a list. Ticket detail
+issues exactly one request (no related-entity fetch beyond the two real
+links above, which cost nothing extra — they're plain `<Link>`s, not
+queries).
+
+**Query-key / cache consistency**: `ticketKeys` follows the same
+`["workspaces", workspaceId, "tickets", ...]` shape as
+`customerKeys`/`conversationKeys` (`features/tickets/query-keys.ts`). A
+ticket's embedded `customer_id`/`conversation_id` are plain filter/link
+values, never a second cached copy of Customer or Conversation entity
+data — `RelatedTicketsPanel`/`RelatedConversationsPanel` call the existing
+`useTicketListQuery`/`useConversationListQuery` hooks directly rather than
+introducing a parallel "tickets-for-customer" cache shape.
+
+**Status/priority badges**: same `EnumBadge` pattern as Conversations —
+semantic text + color, with a documented safe fallback for a status or
+priority value the frontend doesn't recognize yet (covered by a dedicated
+test seeding an unrecognized future value on both list and detail pages).
+
+**Navigation**: "Tickets" is now the fourth clickable sidebar entry
+(`components/shell/nav-config.ts`) — Overview, Inbox, Customers, Tickets.
+No Phase 20+ destination (Agents, Approvals, Knowledge, Integrations,
+Evaluations) is present.
+
 ## Local development
 
 1. Start the backend (see `../README.md`) so `NEXT_PUBLIC_API_BASE_URL`
@@ -852,7 +1291,84 @@ and a genuinely malformed/empty response, not just network/timeout
 rendering, closing a gap the Chunk 3A report itself flagged as untested
 (`root-page.test.tsx` "G").
 
-## End-to-end tests (`e2e/`, Phase 18 Chunk 4)
+Added in Phase 19 Chunk 1 (`src/tests/features/customers/`,
+`src/tests/lib/query/`): the workspace-scoped query-key factory (disjoint
+keys per workspace, per-param variation); the query client's retry policy
+(retryable vs. definitive `ApiError` codes, the `authentication_failed`
+carve-out, mutations never retrying); URL query-string parsing/serialization
+(defaults, malformed `page`/`status`/oversized `search` all falling back
+safely, round-tripping); the customer API boundary's request shape
+(default params send no query string at all; `is_active`/`search`/`page`
+sent correctly; the backend-ignored `ordering` param never sent); and the
+full page-level matrix for both `CustomersListPage` and
+`CustomerDetailPage` — real data rendering, empty vs. network-error
+(distinct, both with a working Retry), debounced search (a burst of
+keystrokes producing exactly one URL update, not one per keystroke), the
+status filter and pagination each preserving the other and resetting page
+to 1 where appropriate, a confirmed 404, a customer belonging to a
+*different* workspace resolving to the identical safe not-found UI (never
+leaking that the ID exists elsewhere), a malformed (non-UUID) route ID
+rejected with **zero** network requests, and — the workspace-isolation
+regression this chunk cares most about — switching the active workspace
+mid-session causing the old workspace's customer to disappear from the DOM
+immediately, with the new workspace's data never bridging the two (mocked
+via `src/tests/msw/customer-handlers.ts`, a workspace-scoped in-memory
+store mirroring the real backend's list/detail/pagination/search/`is_active`
+contract and 404 semantics).
+
+Added in Phase 19 Chunk 2 (`src/tests/features/conversations/`): the
+conversation query-key factory (disjoint per-workspace keys, message keys
+nesting under their conversation's own detail key); URL query-string
+parsing/serialization for status/channel/assignment filters (defaults,
+malformed input, round-tripping); the conversation/message API boundary's
+request shape (default params send no query string; `status`/`channel`/
+`unassigned` sent correctly; the backend-dead `search`/`ordering`
+parameters never sent on either endpoint); and the full list/detail/
+timeline matrix — real data rendering, empty vs. network-error (both with
+Retry), status/channel/assignment filters with pagination preserving them,
+a confirmed 404, a conversation belonging to a *different* workspace
+resolving to the same safe not-found UI, a malformed route ID rejected
+with zero network requests, an unrecognized future status/channel value
+rendering a safe fallback instead of crashing, the customer cross-link,
+long-content wrapping with no `dangerouslySetInnerHTML`, a zero-message
+empty state distinct from loading/error, sender/source rendering across
+all four `sender_type` values plus the internal-note distinction, the
+message-ordering regression (two same-`created_at` messages rendered in
+exact server order, never re-sorted), and — the workspace-isolation
+regression this chunk cares most about — switching the active workspace
+mid-session causing the old workspace's conversation to disappear from the
+DOM immediately (mocked via `src/tests/msw/conversation-handlers.ts`,
+scoping messages by *both* workspace and conversation like the real
+backend does).
+
+Added in Phase 19 Chunk 3 (`src/tests/features/tickets/`): the ticket
+query-key factory (disjoint per-workspace and per-customer-filter keys, and
+a regression asserting a ticket key never embeds a duplicate
+Customer/Conversation entity representation); URL query-string
+parsing/serialization for status/priority/customer filters (defaults,
+malformed input including a malformed customer ID silently dropped rather
+than sent to the backend, round-tripping); the ticket API boundary's
+request shape (default params send no query string; `status`/`priority`/
+`customer` sent correctly; the backend-dead `search`/`ordering` never
+sent); and the full list/detail matrix — real data rendering, empty vs.
+network-error (both with Retry), status/priority filters with pagination
+preserving them, a regression asserting no sort/order control is offered
+(ordering is backend-fixed), a confirmed 404, a ticket belonging to a
+*different* workspace resolving to the same safe not-found UI, a malformed
+route ID rejected with zero network requests, an unrecognized future
+status/priority value rendering a safe fallback, the real Customer and
+Conversation cross-links (and the honest "created directly, not from a
+conversation" case when `conversation_id` is null), the contextual
+customer-filter banner from a real cross-domain link with its Clear-filter
+control, and the workspace-isolation regression (switching the active
+workspace mid-session causing the old workspace's ticket to disappear from
+the DOM immediately). Also extended `src/tests/features/customers/
+customer-detail-page.test.tsx` with the new `RelatedTicketsPanel`/
+`RelatedConversationsPanel` cases: real preview rows linking to the real
+detail routes, the real `?customer=` "View all" links, and a distinct empty
+state per panel when the customer has no related records yet.
+
+## End-to-end tests (`e2e/`, Phase 18 Chunk 4; extended Phase 19 Chunks 1-3)
 
 Playwright (`@playwright/test`), Chromium only — the mandatory acceptance
 browser for this phase; Firefox/WebKit weren't added (single-browser
@@ -864,7 +1380,22 @@ out to `manage.py shell` to create two synthetic users (one with two real
 workspace memberships — owner + support_agent — one with zero) directly in
 the project's Postgres container, and `e2e/global-teardown.ts` deletes them
 unconditionally afterward (also self-healing: setup wipes any `e2e-*`/`E2E *`
-leftovers from a prior aborted run before creating fresh ones).
+leftovers from a prior aborted run before creating fresh ones). Extended in
+Phase 19 Chunk 1 to also seed real `Customer` rows in each of the two
+workspaces (including one inactive customer) — they need no separate
+cleanup, since `Customer.workspace` cascade-deletes with the workspace.
+Extended again in Chunk 2 with real `Conversation`/`Message` rows: one
+assigned, multi-message conversation in Workspace B (covering all four
+`sender_type` values and an internal note), one unassigned/closed
+conversation in Workspace B (for filter tests), and one conversation in
+Workspace A (for isolation/cross-workspace tests) — likewise no separate
+cleanup needed, since both cascade-delete with their workspace. Extended
+again in Chunk 3 with real `Ticket` rows: one urgent, assigned Workspace B
+ticket with a real `conversation_id` (for the Ticket → Conversation link),
+one resolved Workspace B ticket created directly with no conversation (for
+the status filter and the honest no-conversation case), and one Workspace A
+ticket (for isolation/cross-workspace tests) — no separate cleanup needed,
+since `Ticket.workspace` also cascade-deletes.
 `playwright.config.ts`'s `webServer` array starts both halves itself —
 Django (`manage.py runserver`) and the frontend built and started in
 **production mode** (`next build && next start`, not `next dev`) — so the
@@ -903,6 +1434,38 @@ check; and an axe accessibility scan (0 serious/critical required) across
 `/login`, authenticated `/app`, the zero-workspace state, and
 `SessionVerificationError`, plus a keyboard-only pass over the login form,
 workspace switcher, and user menu.
+
+**Added in Phase 19 Chunk 1** (`e2e/customers.spec.ts`) — a real-backend
+smoke proof for the Customers domain, separate from Chunk 4's own
+accessibility/responsive/full-acceptance pass: listing the active
+workspace's real customers and opening a detail record; search narrowing
+the real result set; a workspace switch swapping the visible customer list
+(the old workspace's customer is asserted gone, not just the new one
+present); a customer ID from a different workspace deep-linked directly
+resolving to the safe not-found UI, never leaking that the record exists
+elsewhere; and logout from the customers page.
+
+**Added in Phase 19 Chunk 2** (`e2e/conversations.spec.ts`) — the same kind
+of real-backend smoke proof for Inbox/Conversations: listing the active
+workspace's real conversations and opening one to see the real message
+timeline (including the internal-note distinction); the status and
+assignment filters narrowing the real result set; the customer cross-link
+opening the real customer detail page; a workspace switch swapping the
+visible conversation list (the old workspace's conversation asserted gone);
+a conversation ID from a different workspace deep-linked directly
+resolving to the safe not-found UI; and logout from the inbox.
+
+**Added in Phase 19 Chunk 3** (`e2e/tickets.spec.ts`) — the same kind of
+real-backend smoke proof for Tickets, plus the new cross-domain navigation
+graph: listing the active workspace's real tickets, filtering by status,
+and opening one to see real fields; the real Ticket → Customer and
+Ticket → Conversation navigation; the honest no-conversation case for a
+directly-created ticket; Customer detail's real, filtered links to Tickets
+and Conversations for that customer (following the "View all" link and
+landing on the same contextual, filtered Tickets list); a workspace switch
+swapping the visible ticket list; a ticket ID from a different workspace
+deep-linked directly resolving to the safe not-found UI; and logout from
+Tickets.
 
 **Login volume, deliberately kept realistic rather than exhaustive**: even
 with the throttle raised, a handful of tests (routing's `?next` cases, the

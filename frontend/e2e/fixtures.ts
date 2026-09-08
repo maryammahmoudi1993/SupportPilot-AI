@@ -19,6 +19,22 @@ export interface E2EData {
   /** The other real, accessible workspace — for switch/stale-preference tests. */
   otherWorkspaceName: string;
   otherWorkspaceId: string;
+  workspaceACustomerId: string;
+  workspaceACustomerName: string;
+  workspaceBCustomerId: string;
+  workspaceBCustomerName: string;
+  workspaceBConversationId: string;
+  workspaceBConversationSubject: string;
+  workspaceBUnassignedConversationId: string;
+  workspaceBUnassignedConversationSubject: string;
+  workspaceAConversationId: string;
+  workspaceAConversationSubject: string;
+  workspaceBTicketId: string;
+  workspaceBTicketSubject: string;
+  workspaceBResolvedTicketId: string;
+  workspaceBResolvedTicketSubject: string;
+  workspaceATicketId: string;
+  workspaceATicketSubject: string;
 }
 
 let cached: E2EData | null = null;

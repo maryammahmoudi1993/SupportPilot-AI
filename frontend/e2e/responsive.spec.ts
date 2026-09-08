@@ -30,6 +30,32 @@ for (const viewport of VIEWPORTS) {
       await login(page, data.primaryEmail, data.primaryPassword);
       await assertNoHorizontalOverflow(page);
     });
+
+    // Phase 19 Chunk 4: the operational workspace's own list/detail pages.
+    const OPERATIONAL_PAGES: {
+      name: string;
+      path: (data: ReturnType<typeof e2eData>) => string;
+    }[] = [
+      { name: "Customers list", path: () => "/app/customers" },
+      { name: "Customer detail", path: (data) => `/app/customers/${data.workspaceBCustomerId}` },
+      { name: "Inbox list", path: () => "/app/inbox" },
+      {
+        name: "Conversation detail",
+        path: (data) => `/app/inbox/${data.workspaceBConversationId}`,
+      },
+      { name: "Tickets list", path: () => "/app/tickets" },
+      { name: "Ticket detail", path: (data) => `/app/tickets/${data.workspaceBTicketId}` },
+    ];
+
+    for (const { name, path } of OPERATIONAL_PAGES) {
+      test(`${name} has no horizontal overflow`, async ({ page }) => {
+        const data = e2eData();
+        await login(page, data.primaryEmail, data.primaryPassword);
+        await page.goto(path(data));
+        await expect(page.locator("table, h1, h2, h3").first()).toBeVisible();
+        await assertNoHorizontalOverflow(page);
+      });
+    }
   });
 }
 
@@ -61,6 +87,68 @@ test.describe("Mobile shell (375px)", () => {
     // Workspace switcher and user menu (sign-out) remain reachable in the header.
     await expect(page.getByRole("button", { name: data.defaultWorkspaceName })).toBeVisible();
     await expect(page.getByRole("button", { name: /Account menu/i })).toBeVisible();
+  });
+
+  test("Customers is usable: list, search, and detail with related panels all reachable", async ({
+    page,
+  }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+    await page.goto("/app/customers");
+
+    await expect(page.getByLabel("Search")).toBeVisible();
+    await expect(page.getByRole("link", { name: data.workspaceBCustomerName })).toBeVisible();
+
+    await page.goto(`/app/customers/${data.workspaceBCustomerId}`);
+    await expect(page.getByRole("heading", { name: data.workspaceBCustomerName })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Related conversations" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Related tickets" })).toBeVisible();
+    await expect(
+      page.getByRole("link", { name: data.workspaceBConversationSubject }),
+    ).toBeVisible();
+    await expect(page.getByRole("link", { name: data.workspaceBTicketSubject })).toBeVisible();
+  });
+
+  test("Inbox is usable: list opens a conversation whose timeline wraps long content and links back", async ({
+    page,
+  }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+    await page.goto("/app/inbox");
+    await expect(
+      page.getByRole("link", { name: data.workspaceBConversationSubject }),
+    ).toBeVisible();
+
+    await page.getByRole("link", { name: data.workspaceBConversationSubject }).click();
+    await page.waitForURL(`**/app/inbox/${data.workspaceBConversationId}`);
+    await expect(
+      page.getByRole("heading", { name: data.workspaceBConversationSubject }),
+    ).toBeVisible();
+    await expect(page.getByText("My order hasn't arrived yet.")).toBeVisible();
+    await assertNoHorizontalOverflow(page);
+
+    await expect(
+      page.getByRole("link", { name: `Customer #${data.workspaceBCustomerId.slice(0, 8)}` }),
+    ).toBeVisible();
+    await expect(page.getByRole("link", { name: "← Back to Inbox" })).toBeVisible();
+  });
+
+  test("Tickets is usable: list opens a detail record with visible status and reachable links", async ({
+    page,
+  }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+    await page.goto("/app/tickets");
+    await expect(page.getByRole("link", { name: data.workspaceBTicketSubject })).toBeVisible();
+
+    await page.getByRole("link", { name: data.workspaceBTicketSubject }).click();
+    await page.waitForURL(`**/app/tickets/${data.workspaceBTicketId}`);
+    await expect(page.getByRole("heading", { name: data.workspaceBTicketSubject })).toBeVisible();
+    await expect(page.getByText("Urgent")).toBeVisible();
+    await expect(
+      page.getByRole("link", { name: `Customer #${data.workspaceBCustomerId.slice(0, 8)}` }),
+    ).toBeVisible();
+    await expect(page.getByRole("link", { name: "View originating conversation" })).toBeVisible();
   });
 });
 

@@ -210,6 +210,31 @@ test.describe("Session uncertainty (real browser, network interception)", () => 
     await expect(page.getByRole("button", { name: data.defaultWorkspaceName })).toBeVisible();
   });
 
+  test("session uncertainty on a Phase 19 operational page hides its content and shows SessionVerificationError, never a bare /login redirect", async ({
+    page,
+  }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+    await page.goto("/app/tickets");
+    await expect(page.getByRole("link", { name: data.workspaceBTicketSubject })).toBeVisible();
+
+    // ProtectedLayout wraps every /app/* route identically — session
+    // uncertainty discovered on reload must hide the operational content
+    // (never leave a privileged ticket row rendered underneath) and show
+    // the same SessionVerificationError state as /app itself, not a login
+    // redirect purely from a transport failure.
+    await page.route("**/api/v1/auth/refresh/", (route) => route.abort("failed"));
+    await page.reload();
+
+    await expect(page.getByText("We couldn't verify your session")).toBeVisible();
+    await expect(page.getByRole("link", { name: data.workspaceBTicketSubject })).not.toBeVisible();
+    expect(page.url()).not.toContain("/login");
+
+    await page.unroute("**/api/v1/auth/refresh/");
+    await page.getByRole("button", { name: "Retry" }).click();
+    await expect(page.getByRole("navigation", { name: "Primary" })).toBeVisible();
+  });
+
   test("uncertain -> Retry -> confirmed invalid session redirects to /login, not stuck uncertain", async ({
     page,
   }) => {

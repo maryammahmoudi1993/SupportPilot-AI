@@ -9,6 +9,7 @@ import { WorkspaceProvider } from "@/features/workspace/workspace-provider";
 import { AppShell } from "@/components/shell/app-shell";
 import { SessionVerificationError } from "@/components/shell/session-verification-error";
 import { Spinner } from "@/components/ui/spinner";
+import { QueryProvider } from "@/lib/query/query-provider";
 
 /**
  * Gates every route under this group behind a confirmed session. This is a
@@ -70,8 +71,10 @@ export default function ProtectedLayout({ children }: { children: ReactNode }) {
   }
 
   return (
-    <WorkspaceProvider>
-      <AppShell>{children}</AppShell>
-    </WorkspaceProvider>
+    <QueryProvider>
+      <WorkspaceProvider>
+        <AppShell>{children}</AppShell>
+      </WorkspaceProvider>
+    </QueryProvider>
   );
 }

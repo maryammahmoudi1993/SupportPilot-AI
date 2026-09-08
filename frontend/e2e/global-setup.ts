@@ -22,6 +22,9 @@ export const DATA_FILE = path.resolve(__dirname, ".e2e-data.json");
 const SETUP_SCRIPT = `
 import json
 from accounts.models import User
+from conversations.models import Conversation, ConversationChannel, ConversationStatus, Message, MessageDirection, MessageSenderType
+from customers.models import Customer
+from tickets.models import Ticket, TicketPriority, TicketStatus
 from workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole
 
 PASSWORD = "e2e-Test-Passw0rd!"
@@ -40,8 +43,124 @@ zero = make_user("e2e-zero", "e2e-zero@example.com", "E2E", "ZeroWorkspace")
 
 ws_a = Workspace.objects.create(name="E2E Workspace A")
 ws_b = Workspace.objects.create(name="E2E Workspace B")
-WorkspaceMembership.objects.create(workspace=ws_a, user=primary, role=WorkspaceRole.OWNER)
-WorkspaceMembership.objects.create(workspace=ws_b, user=primary, role=WorkspaceRole.SUPPORT_AGENT)
+membership_a = WorkspaceMembership.objects.create(workspace=ws_a, user=primary, role=WorkspaceRole.OWNER)
+membership_b = WorkspaceMembership.objects.create(
+    workspace=ws_b, user=primary, role=WorkspaceRole.SUPPORT_AGENT
+)
+
+# Customers domain (Phase 19 Chunk 1) — real cross-workspace data so the
+# real-backend smoke and later Phase 19 E2E specs can prove tenant
+# isolation, search, and pagination against the actual API, not a mock.
+# Customer rows cascade-delete with their workspace (Customer.workspace,
+# on_delete=CASCADE) so no separate cleanup is needed here.
+ws_a_customer = Customer.objects.create(
+    workspace=ws_a, first_name="Ada", last_name="Lovelace",
+    email="ada.lovelace@example.com", company="Analytical Engines Ltd", is_active=True,
+)
+Customer.objects.create(
+    workspace=ws_a, first_name="Grace", last_name="Hopper",
+    email="grace.hopper@example.com", company="COBOL Systems", is_active=True,
+)
+Customer.objects.create(
+    workspace=ws_a, first_name="Retired", last_name="Account",
+    email="retired.account@example.com", company="Formerly Inc", is_active=False,
+)
+ws_b_customer = Customer.objects.create(
+    workspace=ws_b, first_name="Bob", last_name="Belcher",
+    email="bob.belcher@example.com", company="Globex Burgers", is_active=True,
+    # Real notes content so Customer detail's notes section (a real, if
+    # optional, rendered field) is actually exercised by the E2E accessibility
+    # scan rather than skipped by an empty fixture (Phase 19 Chunk 4 found the
+    # <dt>/<dd> markup here wasn't wrapped in a <dl> precisely because no
+    # existing fixture ever populated this field).
+    notes="Prefers email contact. VIP account since 2024.",
+)
+
+# Conversations/messages domain (Phase 19 Chunk 2) — real cross-workspace
+# data so the real-backend smoke and later Phase 19 E2E specs can prove
+# tenant isolation, filters, message ordering, and sender/source rendering
+# against the actual API. Conversation/Message rows cascade-delete with
+# their workspace (both FK workspace, on_delete=CASCADE).
+ws_b_conversation = Conversation.objects.create(
+    workspace=ws_b, customer=ws_b_customer, channel=ConversationChannel.WEB,
+    status=ConversationStatus.OPEN, subject="Order delayed", assigned_to=membership_b,
+)
+Message.objects.create(
+    workspace=ws_b, conversation=ws_b_conversation, sender_type=MessageSenderType.CUSTOMER,
+    direction=MessageDirection.INBOUND, body="My order hasn't arrived yet.",
+)
+Message.objects.create(
+    workspace=ws_b, conversation=ws_b_conversation, sender_type=MessageSenderType.HUMAN_AGENT,
+    sender_membership=membership_b, direction=MessageDirection.OUTBOUND,
+    body="Let me look into that for you right away.",
+)
+Message.objects.create(
+    workspace=ws_b, conversation=ws_b_conversation, sender_type=MessageSenderType.AI_AGENT,
+    direction=MessageDirection.OUTBOUND, body="Tracking shows the package is out for delivery today.",
+)
+Message.objects.create(
+    workspace=ws_b, conversation=ws_b_conversation, sender_type=MessageSenderType.SYSTEM,
+    direction=MessageDirection.INTERNAL, body="Escalation timer paused: carrier confirmed transit.",
+)
+# Phase 19 Chunk 4 content-safety fixture: HTML/script-looking real message
+# content, to prove end to end (not just via unit test) that it is rendered
+# as inert plain text, never interpreted as markup.
+Message.objects.create(
+    workspace=ws_b, conversation=ws_b_conversation, sender_type=MessageSenderType.CUSTOMER,
+    direction=MessageDirection.INBOUND,
+    body="<b>Is this bold?</b> <script>window.__xss_marker = true;</script>",
+)
+ws_b_conversation.last_message_at = Message.objects.filter(conversation=ws_b_conversation).latest(
+    "created_at"
+).created_at
+ws_b_conversation.save(update_fields=["last_message_at"])
+
+ws_b_unassigned_conversation = Conversation.objects.create(
+    workspace=ws_b, customer=ws_b_customer, channel=ConversationChannel.CHAT,
+    status=ConversationStatus.CLOSED, subject="Unassigned chat inquiry",
+)
+
+ws_a_conversation = Conversation.objects.create(
+    workspace=ws_a, customer=ws_a_customer, channel=ConversationChannel.EMAIL,
+    status=ConversationStatus.PENDING, subject="Billing question", assigned_to=membership_a,
+)
+Message.objects.create(
+    workspace=ws_a, conversation=ws_a_conversation, sender_type=MessageSenderType.CUSTOMER,
+    direction=MessageDirection.INBOUND, body="Can you clarify this month's invoice?",
+)
+
+# Tickets domain (Phase 19 Chunk 3) — real cross-workspace data, with a real
+# ticket/conversation relationship on one Workspace B ticket, so the
+# real-backend smoke and E2E specs can prove tenant isolation, filters, and
+# cross-domain navigation (Ticket -> Customer, Ticket -> Conversation,
+# Customer -> related Tickets/Conversations) against the actual API. Ticket
+# rows cascade-delete with their workspace (Ticket.workspace, on_delete=CASCADE).
+ws_b_ticket = Ticket.objects.create(
+    workspace=ws_b, customer=ws_b_customer, conversation=ws_b_conversation,
+    subject="Refund for delayed order", description="Customer requests a refund.",
+    priority=TicketPriority.URGENT, assigned_to=membership_b,
+)
+ws_b_resolved_ticket = Ticket.objects.create(
+    workspace=ws_b, customer=ws_b_customer, subject="Resolved billing question",
+    status=TicketStatus.RESOLVED, priority=TicketPriority.LOW,
+)
+ws_a_ticket = Ticket.objects.create(
+    workspace=ws_a, customer=ws_a_customer, subject="Workspace A only ticket",
+    priority=TicketPriority.NORMAL,
+)
+
+# Phase 19 Chunk 4A: a second real page of Workspace B tickets, so the
+# keyboard-only journey can prove real pagination (Next/Previous) rather
+# than asserting it only via a mocked page in a unit test. Low priority so
+# ws_b_ticket (urgent) always sorts first, on page 1, keeping every existing
+# spec's assumptions about what's visible on page 1 unaffected.
+Ticket.objects.bulk_create([
+    Ticket(
+        workspace=ws_b, customer=ws_b_customer, subject=f"Bulk ticket {i}",
+        priority=TicketPriority.LOW,
+    )
+    for i in range(55)
+])
 
 print(json.dumps({
     "primaryEmail": primary.email,
@@ -59,6 +178,22 @@ print(json.dumps({
     "defaultWorkspaceId": str(ws_b.id),
     "otherWorkspaceName": ws_a.name,
     "otherWorkspaceId": str(ws_a.id),
+    "workspaceACustomerId": str(ws_a_customer.id),
+    "workspaceACustomerName": ws_a_customer.display_name,
+    "workspaceBCustomerId": str(ws_b_customer.id),
+    "workspaceBCustomerName": ws_b_customer.display_name,
+    "workspaceBConversationId": str(ws_b_conversation.id),
+    "workspaceBConversationSubject": ws_b_conversation.subject,
+    "workspaceBUnassignedConversationId": str(ws_b_unassigned_conversation.id),
+    "workspaceBUnassignedConversationSubject": ws_b_unassigned_conversation.subject,
+    "workspaceAConversationId": str(ws_a_conversation.id),
+    "workspaceAConversationSubject": ws_a_conversation.subject,
+    "workspaceBTicketId": str(ws_b_ticket.id),
+    "workspaceBTicketSubject": ws_b_ticket.subject,
+    "workspaceBResolvedTicketId": str(ws_b_resolved_ticket.id),
+    "workspaceBResolvedTicketSubject": ws_b_resolved_ticket.subject,
+    "workspaceATicketId": str(ws_a_ticket.id),
+    "workspaceATicketSubject": ws_a_ticket.subject,
 }))
 `;
 

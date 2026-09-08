@@ -25,7 +25,12 @@ export function NavLinks({
     <nav aria-label="Primary" className={className}>
       <ul className="flex flex-col gap-1">
         {NAV_ITEMS.map((item) => {
-          const isActive = pathname === item.path;
+          // "/app" itself must only match exactly (every other route also
+          // starts with "/app"); every other destination also matches its
+          // own nested detail routes (e.g. "/app/customers/[id]") so the
+          // sidebar stays highlighted while drilled into a record.
+          const isActive =
+            item.path === "/app" ? pathname === item.path : pathname.startsWith(item.path);
           return (
             <li key={item.id}>
               <Link
