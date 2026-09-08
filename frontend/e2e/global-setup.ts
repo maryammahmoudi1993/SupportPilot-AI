@@ -24,6 +24,7 @@ import json
 from accounts.models import User
 from conversations.models import Conversation, ConversationChannel, ConversationStatus, Message, MessageDirection, MessageSenderType
 from customers.models import Customer
+from tickets.models import Ticket, TicketPriority, TicketStatus
 from workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole
 
 PASSWORD = "e2e-Test-Passw0rd!"
@@ -114,6 +115,26 @@ Message.objects.create(
     direction=MessageDirection.INBOUND, body="Can you clarify this month's invoice?",
 )
 
+# Tickets domain (Phase 19 Chunk 3) — real cross-workspace data, with a real
+# ticket/conversation relationship on one Workspace B ticket, so the
+# real-backend smoke and E2E specs can prove tenant isolation, filters, and
+# cross-domain navigation (Ticket -> Customer, Ticket -> Conversation,
+# Customer -> related Tickets/Conversations) against the actual API. Ticket
+# rows cascade-delete with their workspace (Ticket.workspace, on_delete=CASCADE).
+ws_b_ticket = Ticket.objects.create(
+    workspace=ws_b, customer=ws_b_customer, conversation=ws_b_conversation,
+    subject="Refund for delayed order", description="Customer requests a refund.",
+    priority=TicketPriority.URGENT, assigned_to=membership_b,
+)
+ws_b_resolved_ticket = Ticket.objects.create(
+    workspace=ws_b, customer=ws_b_customer, subject="Resolved billing question",
+    status=TicketStatus.RESOLVED, priority=TicketPriority.LOW,
+)
+ws_a_ticket = Ticket.objects.create(
+    workspace=ws_a, customer=ws_a_customer, subject="Workspace A only ticket",
+    priority=TicketPriority.NORMAL,
+)
+
 print(json.dumps({
     "primaryEmail": primary.email,
     "primaryPassword": PASSWORD,
@@ -140,6 +161,12 @@ print(json.dumps({
     "workspaceBUnassignedConversationSubject": ws_b_unassigned_conversation.subject,
     "workspaceAConversationId": str(ws_a_conversation.id),
     "workspaceAConversationSubject": ws_a_conversation.subject,
+    "workspaceBTicketId": str(ws_b_ticket.id),
+    "workspaceBTicketSubject": ws_b_ticket.subject,
+    "workspaceBResolvedTicketId": str(ws_b_resolved_ticket.id),
+    "workspaceBResolvedTicketSubject": ws_b_resolved_ticket.subject,
+    "workspaceATicketId": str(ws_a_ticket.id),
+    "workspaceATicketSubject": ws_a_ticket.subject,
 }))
 `;
 
