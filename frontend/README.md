@@ -852,6 +852,75 @@ and a genuinely malformed/empty response, not just network/timeout
 rendering, closing a gap the Chunk 3A report itself flagged as untested
 (`root-page.test.tsx` "G").
 
+## End-to-end tests (`e2e/`, Phase 18 Chunk 4)
+
+Playwright (`@playwright/test`), Chromium only — the mandatory acceptance
+browser for this phase; Firefox/WebKit weren't added (single-browser
+coverage was judged sufficient for a foundation-only phase, not a gap
+worth the added CI time). Config: `playwright.config.ts`.
+
+**Runs against the real backend**, not mocks: `e2e/global-setup.ts` shells
+out to `manage.py shell` to create two synthetic users (one with two real
+workspace memberships — owner + support_agent — one with zero) directly in
+the project's Postgres container, and `e2e/global-teardown.ts` deletes them
+unconditionally afterward (also self-healing: setup wipes any `e2e-*`/`E2E *`
+leftovers from a prior aborted run before creating fresh ones).
+`playwright.config.ts`'s `webServer` array starts both halves itself —
+Django (`manage.py runserver`) and the frontend built and started in
+**production mode** (`next build && next start`, not `next dev`) — so the
+suite is self-contained given only `docker compose up -d db redis` already
+running. Playwright's own request interception (`page.route()`) is used
+only for the narrow set of failure cases impractical to induce against a
+healthy real backend (a hung or aborted request) — every genuine
+login/refresh/workspace/logout flow is the real HTTP round trip.
+
+**E2E-only backend throttle override**: `AUTH_LOGIN_THROTTLE_RATE` and
+`AUTH_REFRESH_THROTTLE_RATE` are raised (via `webServer`'s `env`, not a
+backend file) for the E2E backend process only. Both are already
+environment-driven settings (`config/settings.py`, defaults `10/min`/`30/min`
+— the same mechanism as `DATABASE_URL`/`ALLOWED_HOSTS`), calibrated for
+production abuse-prevention against a single real user, not the volume a
+real-browser suite legitimately generates in a few minutes (every page
+load bootstraps via a real refresh call too). No backend code, no backend
+setting, and no security *logic* changes — CSRF, credential checks, and
+cookie issuance/rotation are exercised completely unmodified; only the
+request-volume threshold differs for this process.
+
+**Coverage**: real-browser login (CSRF prime → login → refresh cookie
+received, HttpOnly, access token never in storage/URL) and its
+invalid-credentials path; reload restoration via the refresh cookie alone;
+logout (shell gone, server cookie revoked, a failed/aborted logout still
+clears local state and reports `"server_unconfirmed"` honestly, pending-marker
+recovery, explicit-login-supersedes-pending-logout); the full session-
+uncertainty matrix (initial and mid-session network failure,
+`/me/`-only failure, Retry to valid/invalid/still-uncertain); real
+workspace load/switch/persistence/reload, a stale persisted workspace ID
+discarded safely, and the zero-workspace no-crash state; protected routing
+(unauthenticated → `/login`, safe/unsafe `?next`, authenticated → `/login`
+redirect); a responsive sweep at 375×812/768×1024/1280×800/1440×900 (no
+horizontal overflow) plus a dedicated mobile-drawer and desktop-layout
+check; and an axe accessibility scan (0 serious/critical required) across
+`/login`, authenticated `/app`, the zero-workspace state, and
+`SessionVerificationError`, plus a keyboard-only pass over the login form,
+workspace switcher, and user menu.
+
+**Login volume, deliberately kept realistic rather than exhaustive**: even
+with the throttle raised, a handful of tests (routing's `?next` cases, the
+keyboard-login-form pass) are real UI-driven logins rather than reusing a
+saved session, because they test the login flow itself. An earlier design
+tried reusing one Playwright `storageState` snapshot across many tests to
+minimize login volume — this broke: the backend rotates the refresh token
+on every use and blacklists the old one (`ROTATE_REFRESH_TOKENS`/
+`BLACKLIST_AFTER_ROTATION`, real, correct security behavior), so a second
+test loading the same frozen snapshot found its cookie already invalid.
+Reverted in favor of plain per-test logins, which is both simpler and a
+more realistic acceptance test than an optimization that fights the
+backend's own security model.
+
+Run with `npm run e2e` (`npm run e2e:report` opens the last HTML report).
+`playwright-report/`, `test-results/`, and `e2e/.e2e-data.json` are
+gitignored — no committed run artifacts, no persisted auth tokens.
+
 ## Security notes
 
 See "Authentication" above for the full model (credential storage, refresh
@@ -969,6 +1038,57 @@ coordination, CSRF, topology). Summary and explicit non-claims:
   also replaced this local per-function override with a single shared one
   (`__setTimeoutOverrideForTests`, `request.ts`) once four call sites needed
   the same kind of override.
+
+## Known defects fixed during Chunk 4 (final frontend acceptance gate)
+
+- **`Alert`'s warning variant failed WCAG AA color contrast**: caught by a
+  real axe scan (`e2e/accessibility.spec.ts`) against the actual rendered
+  `SessionVerificationError` state — `components/ui/alert.tsx` applied a
+  `text-current/90` opacity to the body text, which softened
+  `text-warning-700` against `bg-warning-50` just enough to drop the
+  contrast ratio to 4.06:1 (WCAG AA requires 4.5:1). This had shipped
+  unnoticed since Chunk 1 — the component-level tests never measured
+  contrast, only DOM structure/roles. Fixed by removing the opacity
+  modifier (`text-current`, full opacity) — every variant's `-700` text
+  color already provides sufficient contrast against its `-50` background
+  on its own; the opacity added no accessibility value.
+- **A real end-to-end run of ~25+ tests reliably exhausted the backend's
+  real login/refresh rate limits** (`AUTH_LOGIN_THROTTLE_RATE` 10/min,
+  `AUTH_REFRESH_THROTTLE_RATE` 30/min — both real, correctly-functioning
+  production abuse-prevention, not a bug): every authenticated E2E test
+  performs at least one real login, and every `/app` visit bootstraps via a
+  real refresh call, so a several-minute suite legitimately exceeds
+  per-minute thresholds calibrated for a single human user. Manifested as
+  cascading, unrelated-looking test failures (timeouts, 429s) with no
+  connection to the feature under test. Fixed by overriding both rates via
+  environment variables passed to the E2E backend process only (`webServer`
+  in `playwright.config.ts`) — no backend file or production default
+  changed. An earlier attempt to reduce login volume by reusing one
+  Playwright `storageState` snapshot across many tests looked like the
+  "correct" fix but was actually wrong: it broke on the *second* test to
+  use a saved snapshot, because the backend rotates the refresh token on
+  every use and blacklists the old one — correct, intentional security
+  behavior this fix must not (and does not) touch.
+- **Two E2E test-authoring bugs, not product defects**, caught by early
+  failed runs: `getByRole("alert")` matched both the login form's own error
+  alert and Next.js's built-in route-announcer element (also `role="alert"`)
+  — fixed by scoping to `page.locator("main").getByRole("alert")`. A test
+  assumed workspace "A" (created first) would be the default active
+  workspace; the real, correct backend ordering (`-created_at`, so the
+  *most recently created* membership sorts first) makes workspace "B" the
+  actual default — fixed by asserting against the real ordering instead of
+  an assumed one.
+- **A test asserted the wrong post-logout Back-button behavior**: expected
+  `page.goBack()` to show the login form. In this app both the post-login
+  and post-logout redirects use `router.replace()` (never `push()`), so
+  `/app` never becomes its own distinct, back-traversable history entry —
+  a *stronger* safety guarantee than the test assumed (there is nothing
+  privileged to go back to at all, not merely stale content), but it means
+  `goBack()`'s actual destination depends on whatever history existed
+  before the test's session and isn't reliably `/login`. Fixed by asserting
+  the actual invariant that matters (the privileged shell never
+  reappears) and using an independent fresh navigation, not a reload of
+  Back's unpredictable destination, to confirm the session stays gone.
 
 ## Known defects fixed during Chunk 3B
 
