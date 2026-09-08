@@ -19,6 +19,10 @@ export interface E2EData {
   /** The other real, accessible workspace — for switch/stale-preference tests. */
   otherWorkspaceName: string;
   otherWorkspaceId: string;
+  workspaceACustomerId: string;
+  workspaceACustomerName: string;
+  workspaceBCustomerId: string;
+  workspaceBCustomerName: string;
 }
 
 let cached: E2EData | null = null;

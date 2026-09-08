@@ -22,6 +22,7 @@ export const DATA_FILE = path.resolve(__dirname, ".e2e-data.json");
 const SETUP_SCRIPT = `
 import json
 from accounts.models import User
+from customers.models import Customer
 from workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole
 
 PASSWORD = "e2e-Test-Passw0rd!"
@@ -43,6 +44,28 @@ ws_b = Workspace.objects.create(name="E2E Workspace B")
 WorkspaceMembership.objects.create(workspace=ws_a, user=primary, role=WorkspaceRole.OWNER)
 WorkspaceMembership.objects.create(workspace=ws_b, user=primary, role=WorkspaceRole.SUPPORT_AGENT)
 
+# Customers domain (Phase 19 Chunk 1) — real cross-workspace data so the
+# real-backend smoke and later Phase 19 E2E specs can prove tenant
+# isolation, search, and pagination against the actual API, not a mock.
+# Customer rows cascade-delete with their workspace (Customer.workspace,
+# on_delete=CASCADE) so no separate cleanup is needed here.
+ws_a_customer = Customer.objects.create(
+    workspace=ws_a, first_name="Ada", last_name="Lovelace",
+    email="ada.lovelace@example.com", company="Analytical Engines Ltd", is_active=True,
+)
+Customer.objects.create(
+    workspace=ws_a, first_name="Grace", last_name="Hopper",
+    email="grace.hopper@example.com", company="COBOL Systems", is_active=True,
+)
+Customer.objects.create(
+    workspace=ws_a, first_name="Retired", last_name="Account",
+    email="retired.account@example.com", company="Formerly Inc", is_active=False,
+)
+ws_b_customer = Customer.objects.create(
+    workspace=ws_b, first_name="Bob", last_name="Belcher",
+    email="bob.belcher@example.com", company="Globex Burgers", is_active=True,
+)
+
 print(json.dumps({
     "primaryEmail": primary.email,
     "primaryPassword": PASSWORD,
@@ -59,6 +82,10 @@ print(json.dumps({
     "defaultWorkspaceId": str(ws_b.id),
     "otherWorkspaceName": ws_a.name,
     "otherWorkspaceId": str(ws_a.id),
+    "workspaceACustomerId": str(ws_a_customer.id),
+    "workspaceACustomerName": ws_a_customer.display_name,
+    "workspaceBCustomerId": str(ws_b_customer.id),
+    "workspaceBCustomerName": ws_b_customer.display_name,
 }))
 `;
 
