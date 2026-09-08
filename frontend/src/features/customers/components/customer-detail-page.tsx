@@ -102,12 +102,12 @@ function CustomerDetailContent({
             <Field label="Last updated" value={<Timestamp value={customer.updated_at} />} />
           </dl>
           {customer.notes && (
-            <div className="mt-4">
+            <dl className="mt-4">
               <dt className="text-text-muted text-xs font-medium uppercase">Notes</dt>
               <dd className="text-text-primary mt-1 text-sm break-words whitespace-pre-wrap">
                 {customer.notes}
               </dd>
-            </div>
+            </dl>
           )}
         </CardContent>
       </Card>

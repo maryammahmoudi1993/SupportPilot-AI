@@ -114,12 +114,12 @@ function TicketDetailContent({ workspaceId, ticketId }: { workspaceId: string; t
             />
           </dl>
           {ticket.description && (
-            <div>
+            <dl>
               <dt className="text-text-muted text-xs font-medium uppercase">Description</dt>
               <dd className="text-text-primary mt-1 text-sm break-words whitespace-pre-wrap">
                 {ticket.description}
               </dd>
-            </div>
+            </dl>
           )}
         </CardContent>
       </Card>

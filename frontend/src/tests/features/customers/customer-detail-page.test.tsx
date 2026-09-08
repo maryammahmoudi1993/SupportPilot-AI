@@ -140,6 +140,26 @@ describe("CustomerDetailPage", () => {
     ).toHaveAttribute("href", `/app/tickets?customer=${CUST_1}`);
   });
 
+  it("renders the Notes field as a valid <dl>/<dt>/<dd> group (regression: Chunk 4 axe finding)", async () => {
+    signIn([FIXTURE_WORKSPACE_ACME]);
+    seedCustomers(FIXTURE_WORKSPACE_ACME.id, [
+      makeCustomerFixture({
+        id: CUST_1,
+        display_name: "Jane Doe",
+        notes: "Prefers email contact.",
+      }),
+    ]);
+
+    renderAuthenticated(<CustomerDetailPage customerId={CUST_1} />);
+
+    const notesLabel = await screen.findByText("Notes");
+    expect(notesLabel.tagName).toBe("DT");
+    expect(notesLabel.closest("dl")).not.toBeNull();
+    const notesValue = screen.getByText("Prefers email contact.");
+    expect(notesValue.tagName).toBe("DD");
+    expect(notesValue.closest("dl")).toBe(notesLabel.closest("dl"));
+  });
+
   it("shows a distinct empty state for a customer with no related records", async () => {
     signIn([FIXTURE_WORKSPACE_ACME]);
     seedCustomers(FIXTURE_WORKSPACE_ACME.id, [

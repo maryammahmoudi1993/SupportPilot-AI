@@ -55,6 +55,27 @@ describe("TicketDetailPage", () => {
     );
   });
 
+  it("renders the Description field as a valid <dl>/<dt>/<dd> group (regression: Chunk 4 axe finding)", async () => {
+    signIn([FIXTURE_WORKSPACE_ACME]);
+    seedTickets(FIXTURE_WORKSPACE_ACME.id, [
+      makeTicketFixture({
+        id: TICK_1,
+        customer_id: CUSTOMER_1,
+        subject: "Refund request",
+        description: "Customer wants a refund for order #4821.",
+      }),
+    ]);
+
+    renderAuthenticated(<TicketDetailPage ticketId={TICK_1} />);
+
+    const descriptionLabel = await screen.findByText("Description");
+    expect(descriptionLabel.tagName).toBe("DT");
+    expect(descriptionLabel.closest("dl")).not.toBeNull();
+    const descriptionValue = screen.getByText("Customer wants a refund for order #4821.");
+    expect(descriptionValue.tagName).toBe("DD");
+    expect(descriptionValue.closest("dl")).toBe(descriptionLabel.closest("dl"));
+  });
+
   it("shows a plain no-conversation note when the ticket wasn't created from one", async () => {
     signIn([FIXTURE_WORKSPACE_ACME]);
     seedTickets(FIXTURE_WORKSPACE_ACME.id, [

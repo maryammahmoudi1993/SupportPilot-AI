@@ -68,6 +68,12 @@ Customer.objects.create(
 ws_b_customer = Customer.objects.create(
     workspace=ws_b, first_name="Bob", last_name="Belcher",
     email="bob.belcher@example.com", company="Globex Burgers", is_active=True,
+    # Real notes content so Customer detail's notes section (a real, if
+    # optional, rendered field) is actually exercised by the E2E accessibility
+    # scan rather than skipped by an empty fixture (Phase 19 Chunk 4 found the
+    # <dt>/<dd> markup here wasn't wrapped in a <dl> precisely because no
+    # existing fixture ever populated this field).
+    notes="Prefers email contact. VIP account since 2024.",
 )
 
 # Conversations/messages domain (Phase 19 Chunk 2) — real cross-workspace
@@ -95,6 +101,14 @@ Message.objects.create(
 Message.objects.create(
     workspace=ws_b, conversation=ws_b_conversation, sender_type=MessageSenderType.SYSTEM,
     direction=MessageDirection.INTERNAL, body="Escalation timer paused: carrier confirmed transit.",
+)
+# Phase 19 Chunk 4 content-safety fixture: HTML/script-looking real message
+# content, to prove end to end (not just via unit test) that it is rendered
+# as inert plain text, never interpreted as markup.
+Message.objects.create(
+    workspace=ws_b, conversation=ws_b_conversation, sender_type=MessageSenderType.CUSTOMER,
+    direction=MessageDirection.INBOUND,
+    body="<b>Is this bold?</b> <script>window.__xss_marker = true;</script>",
 )
 ws_b_conversation.last_message_at = Message.objects.filter(conversation=ws_b_conversation).latest(
     "created_at"
