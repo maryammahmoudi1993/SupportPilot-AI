@@ -51,36 +51,42 @@ frontend/
         app/         The real authenticated landing route (/app)
           customers/          Customers list (/app/customers)
             [customerId]/     Customer detail (/app/customers/:id)
+          inbox/              Conversation list (/app/inbox)
+            [conversationId]/ Conversation detail + message timeline (/app/inbox/:id)
       login/         The public login route
     components/
       ui/           Design-system primitives (Button, Input, Card, DropdownMenu, Sheet, ...)
       shell/        Application shell chrome (Sidebar, Header, nav config/links, user menu, mobile nav)
       support/      Shared operational UI, reused across every business domain (EntityNotFound,
-                    ListError, Pagination, Timestamp) — see "Operational Support Workspace" below
+                    ListError, Pagination, Timestamp, EnumBadge) — see "Operational Support
+                    Workspace" below
     features/
       auth/          Login/logout/me operations, AuthProvider, LoginForm, redirect safety
       workspace/     Active-workspace state, selection persistence, the workspace switcher
       customers/     Customers domain: typed API boundary, query-key factory, React Query hooks,
                      URL-state (de)serialization, and the list/detail page components
+      conversations/ Conversations/messages domain: same shape as customers, plus the message
+                     timeline and status/channel badge components
     lib/            Framework-agnostic code: API transport, config, utils
       api/           Central HTTP client, token/session/CSRF handling, error normalization
       query/         Server-state (TanStack Query) client factory and provider — see
                      "Operational Support Workspace" below
     types/          Generated types only (api.ts) — never hand-edited
     tests/          Vitest specs, mirroring the src/ layout they cover
-      msw/           Request-level mocks for the auth and customers endpoints
+      msw/           Request-level mocks for the auth, customers, and conversations endpoints
       support/       Shared test helpers (e.g. renderAuthenticated)
   scripts/          Node scripts (API type generation, drift check)
   openapi.yaml      Generated OpenAPI schema snapshot (see below)
 ```
 
-Other feature domains (conversations, tickets, agents, approvals,
-knowledge, integrations, evaluations, settings) get their own directories
-under `src/features/` starting in the phase that implements them — `auth`,
-`workspace`, and (as of Phase 19 Chunk 1) `customers` establish the
-pattern: a feature owns its API calls, its own React state, and its own
-tests; transport-level concerns generic across features stay in `lib/api`
-(and, as of Chunk 1, `lib/query`); shell-chrome and cross-domain
+Other feature domains (tickets, agents, approvals, knowledge,
+integrations, evaluations, settings) get their own directories under
+`src/features/` starting in the phase that implements them — `auth`,
+`workspace`, `customers` (Phase 19 Chunk 1), and `conversations` (Phase 19
+Chunk 2) establish the pattern: a feature owns its API calls, its own
+React state, and its own tests; transport-level concerns generic across
+features stay in `lib/api` (and, as of Chunk 1, `lib/query`); shell-chrome
+and cross-domain
 operational UI concerns stay in `components/shell` and `components/support`
 respectively.
 
@@ -878,14 +884,146 @@ pages don't duplicate them.
 
 ### Navigation
 
-"Customers" is added to `NAV_ITEMS` (`components/shell/nav-config.ts`) now
-that `/app/customers` is a real route with real data. Conversations/Inbox
-and Tickets are **not** added yet — an unclickable nav entry for a route
-that doesn't exist yet is worse than a short sidebar. `NavLinks`'
-active-route matching (`components/shell/nav-links.tsx`) now treats every
-non-`/app` destination as active for its own path *and* any nested route
-under it (`startsWith`), so the sidebar stays highlighted while drilled
-into `/app/customers/[id]`.
+"Customers" was added to `NAV_ITEMS` (`components/shell/nav-config.ts`) in
+Chunk 1 once `/app/customers` became a real route with real data. Chunk 2
+adds "Inbox" the same way, now that `/app/inbox` is real too. Real
+navigation is now Overview → Inbox → Customers; Tickets is **not** added
+yet — an unclickable nav entry for a route that doesn't exist yet is worse
+than a short sidebar. `NavLinks`' active-route matching
+(`components/shell/nav-links.tsx`) treats every non-`/app` destination as
+active for its own path *and* any nested route under it (`startsWith`), so
+the sidebar stays highlighted while drilled into `/app/customers/[id]` or
+`/app/inbox/[id]`.
+
+### Inbox / Conversations + message timeline (Phase 19 Chunk 2)
+
+**Route model**: `/app/inbox` (list) and `/app/inbox/[conversationId]`
+(detail) — "Inbox" is the nav label; the route segment is `conversations`'
+close relative in spirit but literally `inbox`, chosen up front per the
+build prompt's preferred model rather than the `/app/conversations`
+alternative. No duplicate route exists for the same data.
+
+**Conversation API contract**:
+
+| Question   | Answer                                                                                                                                                                                                                    |
+| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| List       | `GET /api/v1/workspaces/{workspace_id}/conversations/` — any active member.                                                                                                                                            |
+| Detail     | `GET /api/v1/workspaces/{workspace_id}/conversations/{conversation_id}/` — 404s exactly like a nonexistent conversation for one belonging to a different workspace.                                                    |
+| Messages   | `GET /api/v1/workspaces/{workspace_id}/conversations/{conversation_id}/messages/` — scoped by **both** workspace and conversation (`conversations/selectors.py`): a foreign-workspace conversation ID 404s this endpoint too, not just conversation detail. |
+| Pagination | Backend-standard `PageNumberPagination` on both list and message endpoints — `{count, next, previous, results}`, default page size 50.                                                                                  |
+| Filters    | `status` (open/pending/closed), `channel` (web/chat/email/sms/api), `unassigned` (boolean) — all real and backend-tested (`conversations/selectors.py conversation_list_for_workspace`). `customer`/`assigned_to` (UUID) filters also exist backend-side but have no UI control in Chunk 2 — an operator-facing customer/assignee *picker* is a materially separate UX investment better scoped with assignment UI itself. |
+| Search     | **Not implemented on the backend** for either endpoint — see the schema-gap note below. No search control exists in the UI.                                                                                             |
+| Ordering   | Not implemented on the backend (same dead-parameter situation as `search`) — never sent.                                                                                                                                |
+| Mutations  | Real and backend-tested (`POST .../messages/` to send, `.../status/`, `.../close/`, `.../reopen/`, `.../assign/`) but **deferred** — see "Deferred: operator reply and status mutations" below.                        |
+
+**Schema gaps (Category A — typing deficiencies, same shape as Chunk 1's
+`is_active`/`ordering` findings)**:
+
+1. `status`/`channel`/`unassigned` (conversation list) are real,
+   backend-tested filters absent from the generated
+   `api_v1_workspaces_conversations_list` operation's query type — narrowed
+   explicitly in `features/conversations/api.ts`'s `ConversationListQuery`.
+2. `ordering`/`search` appear in the generated schema for **both**
+   `conversations_list` and `conversations_messages_list` (global
+   filter-backend inference) but neither view configures `ordering_fields`/
+   `search_fields`, and neither selector accepts a `search` argument —
+   completely dead parameters on the real backend. Never sent.
+3. `Conversation.assigned_to` and `Message.sender` are both nested
+   `MembershipSummary` fields the generated schema types as non-nullable,
+   but the backing foreign keys (`assigned_to`, `sender_membership`) are
+   nullable and DRF correctly serializes `null` for an unassigned
+   conversation or a non-human-agent message — `drf-spectacular` doesn't
+   infer nullability through a nested read-only serializer the way it does
+   for a plain scalar. Re-typed in `features/conversations/types.ts`.
+4. The generated request body for `POST .../messages/` is typed as
+   `Message` (the read-only response shape) rather than the real
+   `MessageCreateSerializer` shape (`direction`, `body`, `external_id?`,
+   `metadata?`) — the view's `create()` uses a different serializer than
+   its class-level `serializer_class`, which `drf-spectacular` can't see
+   without an explicit `@extend_schema` override. Not narrowed in this
+   chunk since message send is deferred (see below); flagged here for
+   whichever chunk implements it.
+
+**Customer identity in the inbox — an architectural limitation, not a
+design choice**: the conversation list/detail response includes only
+`customer_id` (a UUID), never a name/email summary
+(`conversations/serializers.py ConversationSerializer`). Fetching each
+row's customer individually to show a name would be a client-side N+1 (up
+to 50 extra requests for one page) — explicitly disallowed (see "No client
+N+1" below) — and there is no bulk-by-IDs customer endpoint to fetch all of
+a page's customers in one request either (`customers/selectors.py
+customer_list_for_workspace` only supports a single free-text `search`, not
+an `id__in` filter). Chunk 2 therefore links to the customer honestly, by
+ID (`Customer #<first 8 chars>` — `features/conversations/components/
+customer-ref-link.tsx`), rather than either an N+1 fetch or a fabricated
+name. The minimal backend change that would resolve this is adding a
+lightweight customer summary (e.g. `customer_display_name`) to
+`ConversationSerializer`, mirroring how `assigned_to` is already embedded
+— flagged for a human decision, not implemented here (see "Backend policy").
+
+**No client N+1**: the list page issues exactly one request per
+page/filter change — no per-row customer, assignee, or other detail
+fetches. Conversation detail issues exactly two requests in parallel (the
+conversation itself and its first page of messages — see `queries.ts`'s
+`useMessageListQuery` doc comment), never serially chained.
+
+**Message ordering**: the backend orders messages by `(created_at,
+sequence)` ascending — oldest first (`conversations/selectors.py
+message_list_for_conversation`). `sequence` is a strictly-increasing,
+DB-assigned insertion sequence introduced in Phase 16 specifically to
+break same-`created_at` ties deterministically (`Message.sequence`'s
+backend docstring) — two messages can legitimately share a `created_at`
+value (`auto_now_add`'s precision, or a fast burst of sends), and `id`
+(a random UUID) is not a safe tie-breaker. The frontend renders `results`
+in exactly the order the API returns it and never re-sorts — verified by a
+regression test seeding two same-`created_at` messages in a specific order
+and asserting the DOM renders them in that same order
+(`conversation-detail-page.test.tsx`).
+
+**Sender/source semantics**: `Message.sender_type` (`customer`,
+`human_agent`, `ai_agent`, `system`) picks the label; a `human_agent`
+message additionally shows the real sender's email
+(`message-timeline.tsx`). `direction === "internal"` (a support-only note,
+never customer-visible) is marked with a distinct "Internal note" badge and
+background tint — a real, backend-enforced distinction
+(`MessageCreateSerializer` only allows `outbound`/`internal` from this API;
+`internal` is never shown to the customer) that the UI must not blur.
+Speaker is never inferred from message body content.
+
+**Message content safety**: rendered as plain text
+(`whitespace-pre-wrap break-words`, preserving real newlines and wrapping
+long unbroken URLs/words) — no `dangerouslySetInnerHTML`, no custom
+HTML/markdown rendering, since the backend returns and stores raw text with
+no structured-content contract.
+
+**Timeline semantics**: a plain `<ol>`/`<li>` list, not `role="log"` — the
+timeline is a static page load (paginated, not live-updating), so `role="log"`
+(an assistive-tech live region) would misrepresent it. Each `<li>` exposes
+sender, timestamp, and content together, in reading order.
+
+**Status/channel badges**: semantic text + color via the shared
+`EnumBadge` (`components/support/enum-badge.tsx`, new in this chunk) —
+never color alone, and a documented **safe fallback for a status/channel
+value the frontend doesn't recognize**: the badge falls back to the raw
+enum string as its own label and a neutral color rather than crashing or
+rendering blank (covered by a dedicated test seeding an unrecognized
+future status/channel).
+
+**Deferred: operator reply and status mutations**. The backend genuinely
+supports sending a message (`POST .../messages/`, `direction: "outbound" |
+"internal"`) and conversation status changes (`.../status/`, `.../close/`,
+`.../reopen/`, `.../assign/`) — verified real, not assumed. Both are
+deliberately **out of Chunk 2's scope** ("Inbox / Conversations + Message
+Timeline" — a read-only viewing experience), consistent with Chunk 1's own
+precedent of shipping Customers read-only despite `PATCH` existing. Message
+send specifically has a safety wrinkle worth documenting for whichever
+chunk implements it: there is no idempotency key or `external_id`
+uniqueness constraint on `Message` (unlike `Customer`/`Conversation`, which
+do have one), so a naive automatic retry after a network-ambiguous send
+could create a real duplicate message — the query client's existing
+"mutations never retry" policy (Chunk 1) is necessary but not sufficient
+here; a future implementation needs its own explicit ambiguous-failure UI
+per the build prompt's Part G, not just "retry: false".
 
 ## Local development
 
@@ -1040,7 +1178,32 @@ via `src/tests/msw/customer-handlers.ts`, a workspace-scoped in-memory
 store mirroring the real backend's list/detail/pagination/search/`is_active`
 contract and 404 semantics).
 
-## End-to-end tests (`e2e/`, Phase 18 Chunk 4; extended Phase 19 Chunk 1)
+Added in Phase 19 Chunk 2 (`src/tests/features/conversations/`): the
+conversation query-key factory (disjoint per-workspace keys, message keys
+nesting under their conversation's own detail key); URL query-string
+parsing/serialization for status/channel/assignment filters (defaults,
+malformed input, round-tripping); the conversation/message API boundary's
+request shape (default params send no query string; `status`/`channel`/
+`unassigned` sent correctly; the backend-dead `search`/`ordering`
+parameters never sent on either endpoint); and the full list/detail/
+timeline matrix — real data rendering, empty vs. network-error (both with
+Retry), status/channel/assignment filters with pagination preserving them,
+a confirmed 404, a conversation belonging to a *different* workspace
+resolving to the same safe not-found UI, a malformed route ID rejected
+with zero network requests, an unrecognized future status/channel value
+rendering a safe fallback instead of crashing, the customer cross-link,
+long-content wrapping with no `dangerouslySetInnerHTML`, a zero-message
+empty state distinct from loading/error, sender/source rendering across
+all four `sender_type` values plus the internal-note distinction, the
+message-ordering regression (two same-`created_at` messages rendered in
+exact server order, never re-sorted), and — the workspace-isolation
+regression this chunk cares most about — switching the active workspace
+mid-session causing the old workspace's conversation to disappear from the
+DOM immediately (mocked via `src/tests/msw/conversation-handlers.ts`,
+scoping messages by *both* workspace and conversation like the real
+backend does).
+
+## End-to-end tests (`e2e/`, Phase 18 Chunk 4; extended Phase 19 Chunks 1-2)
 
 Playwright (`@playwright/test`), Chromium only — the mandatory acceptance
 browser for this phase; Firefox/WebKit weren't added (single-browser
@@ -1056,6 +1219,12 @@ leftovers from a prior aborted run before creating fresh ones). Extended in
 Phase 19 Chunk 1 to also seed real `Customer` rows in each of the two
 workspaces (including one inactive customer) — they need no separate
 cleanup, since `Customer.workspace` cascade-deletes with the workspace.
+Extended again in Chunk 2 with real `Conversation`/`Message` rows: one
+assigned, multi-message conversation in Workspace B (covering all four
+`sender_type` values and an internal note), one unassigned/closed
+conversation in Workspace B (for filter tests), and one conversation in
+Workspace A (for isolation/cross-workspace tests) — likewise no separate
+cleanup needed, since both cascade-delete with their workspace.
 `playwright.config.ts`'s `webServer` array starts both halves itself —
 Django (`manage.py runserver`) and the frontend built and started in
 **production mode** (`next build && next start`, not `next dev`) — so the
@@ -1103,8 +1272,18 @@ the real result set; a workspace switch swapping the visible customer list
 (the old workspace's customer is asserted gone, not just the new one
 present); a customer ID from a different workspace deep-linked directly
 resolving to the safe not-found UI, never leaking that the record exists
-elsewhere; and logout from the customers page. Conversations/Tickets get
-their own specs in later Phase 19 chunks once those routes exist.
+elsewhere; and logout from the customers page. Tickets gets its own spec in
+a later Phase 19 chunk once that route exists.
+
+**Added in Phase 19 Chunk 2** (`e2e/conversations.spec.ts`) — the same kind
+of real-backend smoke proof for Inbox/Conversations: listing the active
+workspace's real conversations and opening one to see the real message
+timeline (including the internal-note distinction); the status and
+assignment filters narrowing the real result set; the customer cross-link
+opening the real customer detail page; a workspace switch swapping the
+visible conversation list (the old workspace's conversation asserted gone);
+a conversation ID from a different workspace deep-linked directly
+resolving to the safe not-found UI; and logout from the inbox.
 
 **Login volume, deliberately kept realistic rather than exhaustive**: even
 with the throttle raised, a handful of tests (routing's `?next` cases, the
