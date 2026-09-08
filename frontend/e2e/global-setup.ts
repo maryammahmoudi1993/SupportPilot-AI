@@ -149,6 +149,19 @@ ws_a_ticket = Ticket.objects.create(
     priority=TicketPriority.NORMAL,
 )
 
+# Phase 19 Chunk 4A: a second real page of Workspace B tickets, so the
+# keyboard-only journey can prove real pagination (Next/Previous) rather
+# than asserting it only via a mocked page in a unit test. Low priority so
+# ws_b_ticket (urgent) always sorts first, on page 1, keeping every existing
+# spec's assumptions about what's visible on page 1 unaffected.
+Ticket.objects.bulk_create([
+    Ticket(
+        workspace=ws_b, customer=ws_b_customer, subject=f"Bulk ticket {i}",
+        priority=TicketPriority.LOW,
+    )
+    for i in range(55)
+])
+
 print(json.dumps({
     "primaryEmail": primary.email,
     "primaryPassword": PASSWORD,
