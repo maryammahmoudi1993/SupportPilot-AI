@@ -68,13 +68,11 @@ function ApprovalDetailContent({
   }
 
   if (approvalQuery.isError) {
-    // Checked via HTTP status, not `error.code === "not_found"`: verified
-    // against the real backend (Chunk 3 report, "DEFECTS") that
-    // `common/exceptions.py`'s `custom_exception_handler` mis-codes every
-    // `Http404`-raised response as `validation_error` — a real, pre-existing,
-    // cross-cutting backend defect, not introduced by this chunk. `status`
-    // is the actual HTTP status code and is unaffected by that mis-coding.
-    if (approvalQuery.error.status === 404) {
+    // P20-404-01 (Chunk 3A): the backend now stably codes every real
+    // Http404-raised response as `not_found` (common/exceptions.py). This
+    // matches the pattern used by every other detail page (Customer,
+    // Conversation, Ticket, AgentRun) — see frontend/README.md.
+    if (approvalQuery.error.code === "not_found") {
       return <ApprovalNotFound />;
     }
     return (

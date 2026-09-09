@@ -62,10 +62,10 @@ function HandoffDetailContent({
   }
 
   if (handoffQuery.isError) {
-    // Checked via HTTP status, not `error.code === "not_found"` — see the
-    // matching comment in approval-detail-page.tsx: the real backend
-    // mis-codes every Http404-raised response, but `status` is unaffected.
-    if (handoffQuery.error.status === 404) {
+    // P20-404-01 (Chunk 3A) — see the matching comment in
+    // approval-detail-page.tsx: the backend now stably codes every real
+    // Http404-raised response as `not_found`.
+    if (handoffQuery.error.code === "not_found") {
       return <HandoffNotFound />;
     }
     return (

@@ -1429,36 +1429,27 @@ reasoning, no arbitrary payload rendering needed here (unlike Approval's
 `safe_context`, which reuses the same `StructuredPayload` safe-viewer as
 Chunk 2's redacted tool payloads).
 
-**Known backend defect discovered this chunk** (real, pre-existing,
-cross-cutting — not introduced by Chunk 3, not fixed here since it requires
-a backend change and this chunk's scope is frontend-only): every view that
-raises a plain `django.http.Http404` (essentially every "get one resource
-or 404" selector across the whole backend — `agents/selectors.py`,
-`approvals/views.py`, `tickets/selectors.py`, etc.) gets mis-coded by
+**Backend defect discovered in Chunk 3, fixed in Chunk 3A** (real,
+pre-existing, cross-cutting): every view that raised a plain
+`django.http.Http404` (essentially every "get one resource or 404" selector
+across the whole backend — `agents/selectors.py`, `approvals/views.py`,
+`tickets/selectors.py`, etc.) used to get mis-coded by
 `common/exceptions.py`'s `custom_exception_handler` as
 `{"error": {"code": "validation_error", ...}}` instead of `"not_found"`,
-even though the real HTTP status is a genuine 404. Root cause: DRF's own
-`exception_handler` converts `Http404` → `NotFound` *inside its own call
-frame*; the outer `custom_exception_handler(exc, context)` still sees the
-original, un-converted `Http404` when it computes the stable error code, so
-`_stable_code_for(exc)`'s `isinstance(exc, NotFound)` check never matches.
-Verified directly against the real running backend (both for a fresh
-Approval 404 and, retroactively, for AgentRun's — the exact same defect,
-present since Phase 8/masked in Chunk 1's E2E suite only because the
-backend's auto-generated Http404 message text for that one route happened
-to still contain the literal substring the assertion checked for).
-**Frontend workaround** (this chunk's own components only, in scope):
-`ApprovalDetailPage`/`HandoffDetailPage` check `error.status === 404`
-(the real HTTP status, unaffected by the mis-coded envelope) instead of
-`error.code === "not_found"`. Chunk 1/2's equivalent checks
-(`AgentRunDetailPage`, `ConversationDetailPage`, `TicketDetailPage`,
-`CustomerDetailPage`) still use the fragile `error.code` check and are
-*not* touched here (out of this chunk's scope) — they remain correct in
-intent but rely on the same latent backend defect not mattering in
-practice for their own E2E assertions. A dedicated backend fix (making
-`custom_exception_handler` special-case `Http404` the same way DRF's own
-handler does) is recommended before the next phase that adds more
-not-found-sensitive UI.
+even though the real HTTP status was a genuine 404. Root cause: DRF's own
+`exception_handler` converts `Http404` → `NotFound` _inside its own call
+frame_; the outer `custom_exception_handler(exc, context)` still saw the
+original, un-converted `Http404` when it computed the stable error code, so
+`_stable_code_for(exc)`'s `isinstance(exc, NotFound)` check never matched.
+**Fixed** (Chunk 3A, `common/exceptions.py`): `_stable_code_for` now maps
+`django.http.Http404` directly to `"not_found"`, alongside DRF's own
+`NotFound`. Canonical invariant going forward: **HTTP 404 always implies
+`error.code === "not_found"`**, for every domain. `ApprovalDetailPage`/
+`HandoffDetailPage` were realigned from their Chunk 3 `error.status === 404`
+workaround to the same `error.code === "not_found"` check already used by
+`AgentRunDetailPage`, `ConversationDetailPage`, `TicketDetailPage`, and
+`CustomerDetailPage` — one consistent not-found pattern across every detail
+page. See defect `P20-404-01`.
 
 ## Local development
 
