@@ -48,6 +48,8 @@ export interface E2EData {
   workspaceAApprovalExpiredId: string;
   workspaceAApprovalDecidedId: string;
   workspaceBApprovalPendingId: string;
+  workspaceAApprovalKeyboardId: string;
+  workspaceAApprovalMobileId: string;
   workspaceBHandoffPendingId: string;
   workspaceBHandoffResolvedId: string;
   workspaceAHandoffPendingId: string;

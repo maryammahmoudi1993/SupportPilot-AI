@@ -56,6 +56,51 @@ for (const viewport of VIEWPORTS) {
         await assertNoHorizontalOverflow(page);
       });
     }
+
+    // Phase 20 Chunk 4 (final acceptance gate, Part H §26): the AI-operations
+    // surface, at every required viewport — Agent Runs/Approvals/Handoffs
+    // list and detail pages, plus the execution trace embedded in Agent Run
+    // detail. Approval/Handoff detail pages carry no h1/h2/h3 (see
+    // accessibility.spec.ts's AI_OPERATIONS_PAGES), so each page's own
+    // `role="status" aria-label="Loading ..."` region is the load signal.
+    const AI_OPERATIONS_PAGES: {
+      name: string;
+      path: (data: ReturnType<typeof e2eData>) => string;
+      loadingLabel: string;
+    }[] = [
+      {
+        name: "Agent Runs list",
+        path: () => "/app/agent-runs",
+        loadingLabel: "Loading agent runs",
+      },
+      {
+        name: "Agent Run detail (with execution trace)",
+        path: (data) => `/app/agent-runs/${data.workspaceBAgentRunSucceededId}`,
+        loadingLabel: "Loading agent run",
+      },
+      { name: "Approvals list", path: () => "/app/approvals", loadingLabel: "Loading approvals" },
+      {
+        name: "Approval detail",
+        path: (data) => `/app/approvals/${data.workspaceBApprovalPendingId}`,
+        loadingLabel: "Loading approval",
+      },
+      { name: "Handoffs list", path: () => "/app/handoffs", loadingLabel: "Loading handoffs" },
+      {
+        name: "Handoff detail",
+        path: (data) => `/app/handoffs/${data.workspaceBHandoffPendingId}`,
+        loadingLabel: "Loading handoff",
+      },
+    ];
+
+    for (const { name, path, loadingLabel } of AI_OPERATIONS_PAGES) {
+      test(`${name} has no horizontal overflow`, async ({ page }) => {
+        const data = e2eData();
+        await login(page, data.primaryEmail, data.primaryPassword);
+        await page.goto(path(data));
+        await expect(page.getByRole("status", { name: loadingLabel })).toBeHidden();
+        await assertNoHorizontalOverflow(page);
+      });
+    }
   });
 }
 
@@ -149,6 +194,59 @@ test.describe("Mobile shell (375px)", () => {
       page.getByRole("link", { name: `Customer #${data.workspaceBCustomerId.slice(0, 8)}` }),
     ).toBeVisible();
     await expect(page.getByRole("link", { name: "View originating conversation" })).toBeVisible();
+  });
+
+  // Phase 20 Chunk 4 (final acceptance gate, Part H §27): at 375px, the
+  // execution trace's structured payload viewer is usable, long values
+  // scroll internally (not the page), and status/timestamps/cross-links
+  // stay readable/reachable.
+  test("Agent Run detail's execution trace is usable: structured payload readable, long values scroll internally, cross-links reachable", async ({
+    page,
+  }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+    await page.goto(`/app/agent-runs/${data.workspaceBAgentRunSucceededId}`);
+
+    await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Tool executions" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "View originating conversation" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "View related ticket" })).toBeVisible();
+
+    // The real echo tool execution's redacted arguments/result — StructuredPayload
+    // defaults open, so its <pre> (own overflow-auto, bounded max-height) is
+    // already visible; assert it, not the page, is the scrolling container.
+    const argumentsPayload = page.getByText(/"message": "hello"/);
+    await expect(argumentsPayload).toBeVisible();
+    const overflowsInternally = await argumentsPayload.evaluate((el) => {
+      const style = getComputedStyle(el);
+      return style.overflow === "auto" || style.overflowX === "auto";
+    });
+    expect(overflowsInternally).toBe(true);
+    await assertNoHorizontalOverflow(page);
+  });
+
+  // Phase 20 Chunk 4 (final acceptance gate, Part H §28): at 375px, the
+  // frozen Approval payload is readable, Approve/Reject are reachable, and
+  // pending/decided state is visible.
+  test("Approval detail is usable: frozen payload readable, Approve/Reject reachable, decision result visible", async ({
+    page,
+  }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+    await page.getByRole("button", { name: data.defaultWorkspaceName }).click();
+    await page.getByRole("menuitem", { name: new RegExp(data.otherWorkspaceName) }).click();
+
+    await page.goto(`/app/approvals/${data.workspaceAApprovalMobileId}`);
+    await expect(page.getByText("Pending", { exact: true })).toBeVisible();
+    await expect(page.getByText(/"amount_minor": 10000/)).toBeVisible();
+
+    const rejectButton = page.getByRole("button", { name: "Reject" });
+    await expect(rejectButton).toBeVisible();
+    await rejectButton.click();
+
+    await expect(page.getByText("Rejected", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Reject" })).toHaveCount(0);
+    await assertNoHorizontalOverflow(page);
   });
 });
 

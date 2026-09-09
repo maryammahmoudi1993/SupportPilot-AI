@@ -396,6 +396,23 @@ ws_b_approval_pending = make_pending_approval(
     binding=ws_b_refund_binding, required_role=WorkspaceRole.SUPPORT_MANAGER,
     summary="payment.refund: amount_minor=10000, currency=usd (permission test)",
 )
+# Phase 20 Chunk 4: a dedicated fixture for the keyboard-only AI-operations
+# journey (e2e/keyboard-journey.spec.ts) — never reused by any other spec's
+# Approve/Reject, so that test's own decision doesn't race or collide with
+# approvals.spec.ts's mutation of ws_a_approval_approve/ws_a_approval_reject.
+ws_a_approval_keyboard = make_pending_approval(
+    workspace=ws_a, agent_run=ws_a_approvals_run, agent_version=ws_a_agent_version,
+    binding=ws_a_refund_binding, required_role=WorkspaceRole.ADMIN,
+    summary="payment.refund: amount_minor=10000, currency=usd (keyboard journey)",
+)
+# Phase 20 Chunk 4: a dedicated fixture for the mobile (375px) Approval
+# usability test (e2e/responsive.spec.ts) — never reused by approvals.spec.ts,
+# for the same collision-avoidance reason as ws_a_approval_keyboard above.
+ws_a_approval_mobile = make_pending_approval(
+    workspace=ws_a, agent_run=ws_a_approvals_run, agent_version=ws_a_agent_version,
+    binding=ws_a_refund_binding, required_role=WorkspaceRole.ADMIN,
+    summary="payment.refund: amount_minor=10000, currency=usd (mobile)",
+)
 
 # Human Handoff domain (Phase 20 Chunk 3) — real HumanHandoff rows with real
 # Conversation/AgentRun/Ticket relations, so the real-backend smoke can prove
@@ -465,6 +482,8 @@ print(json.dumps({
     "workspaceAApprovalExpiredId": str(ws_a_approval_expired.id),
     "workspaceAApprovalDecidedId": str(ws_a_approval_decided.id),
     "workspaceBApprovalPendingId": str(ws_b_approval_pending.id),
+    "workspaceAApprovalKeyboardId": str(ws_a_approval_keyboard.id),
+    "workspaceAApprovalMobileId": str(ws_a_approval_mobile.id),
     "workspaceBHandoffPendingId": str(ws_b_handoff_pending.id),
     "workspaceBHandoffResolvedId": str(ws_b_handoff_resolved.id),
     "workspaceAHandoffPendingId": str(ws_a_handoff_pending.id),
