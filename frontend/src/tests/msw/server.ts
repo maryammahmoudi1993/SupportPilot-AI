@@ -5,6 +5,7 @@ import { authHandlers } from "@/tests/msw/handlers";
 import { customerHandlers } from "@/tests/msw/customer-handlers";
 import { conversationHandlers } from "@/tests/msw/conversation-handlers";
 import { ticketHandlers } from "@/tests/msw/ticket-handlers";
+import { toolExecutionHandlers } from "@/tests/msw/tool-execution-handlers";
 
 export const server = setupServer(
   ...authHandlers,
@@ -12,4 +13,5 @@ export const server = setupServer(
   ...conversationHandlers,
   ...ticketHandlers,
   ...agentRunHandlers,
+  ...toolExecutionHandlers,
 );

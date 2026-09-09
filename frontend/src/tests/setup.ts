@@ -11,6 +11,7 @@ import { resetAuthMockState } from "@/tests/msw/handlers";
 import { resetCustomerMockState } from "@/tests/msw/customer-handlers";
 import { resetConversationMockState } from "@/tests/msw/conversation-handlers";
 import { resetTicketMockState } from "@/tests/msw/ticket-handlers";
+import { resetToolExecutionMockState } from "@/tests/msw/tool-execution-handlers";
 import { server } from "@/tests/msw/server";
 
 // `globals: false` in vitest.config.ts means @testing-library/react's
@@ -41,6 +42,7 @@ beforeEach(() => {
   resetConversationMockState();
   resetTicketMockState();
   resetAgentRunMockState();
+  resetToolExecutionMockState();
   localStorage.clear();
   sessionStorage.clear();
 });
