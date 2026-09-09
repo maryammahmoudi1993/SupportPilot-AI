@@ -39,6 +39,9 @@ export interface E2EData {
   workspaceBAgentRunRunningId: string;
   workspaceAAgentRunId: string;
   workspaceAAgentRunResponse: string;
+  workspaceBToolExecutionSucceededId: string;
+  workspaceBToolExecutionFailedId: string;
+  workspaceBToolExecutionWaitingId: string;
 }
 
 let cached: E2EData | null = null;
