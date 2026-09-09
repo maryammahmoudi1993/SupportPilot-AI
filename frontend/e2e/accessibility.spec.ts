@@ -119,6 +119,112 @@ test.describe("Accessibility (axe)", () => {
       [],
     );
   });
+
+  // Phase 20 Chunk 4: the AI-operations surface (Agent Runs, Tool
+  // Executions embedded in Agent Run detail, Approvals, Handoffs) — scanned
+  // separately from the Phase 18/19 pages above, per the final acceptance
+  // gate's explicit requirement (agent-runs.spec.ts and approvals.spec.ts
+  // deliberately deferred full accessibility acceptance to this gate).
+  const AI_OPERATIONS_PAGES: {
+    name: string;
+    path: (data: ReturnType<typeof e2eData>) => string;
+    loadingLabel: string;
+  }[] = [
+    { name: "Agent Runs list", path: () => "/app/agent-runs", loadingLabel: "Loading agent runs" },
+    {
+      name: "Agent Run detail (succeeded)",
+      path: (data) => `/app/agent-runs/${data.workspaceBAgentRunSucceededId}`,
+      loadingLabel: "Loading agent run",
+    },
+    {
+      name: "Agent Run detail (running, non-terminal, with a waiting tool execution)",
+      path: (data) => `/app/agent-runs/${data.workspaceBAgentRunRunningId}`,
+      loadingLabel: "Loading agent run",
+    },
+    { name: "Approvals list", path: () => "/app/approvals", loadingLabel: "Loading approvals" },
+    {
+      name: "Approval detail (pending)",
+      path: (data) => `/app/approvals/${data.workspaceBApprovalPendingId}`,
+      loadingLabel: "Loading approval",
+    },
+    { name: "Handoffs list", path: () => "/app/handoffs", loadingLabel: "Loading handoffs" },
+    {
+      name: "Handoff detail (pending)",
+      path: (data) => `/app/handoffs/${data.workspaceBHandoffPendingId}`,
+      loadingLabel: "Loading handoff",
+    },
+    {
+      name: "Handoff detail (resolved)",
+      path: (data) => `/app/handoffs/${data.workspaceBHandoffResolvedId}`,
+      loadingLabel: "Loading handoff",
+    },
+  ];
+
+  for (const { name, path, loadingLabel } of AI_OPERATIONS_PAGES) {
+    test(`${name} has no serious/critical violations`, async ({ page }) => {
+      const data = e2eData();
+      await login(page, data.primaryEmail, data.primaryPassword);
+      await page.goto(path(data));
+      // Every one of these pages renders a role="status" region with this
+      // exact aria-label only while its real query is pending — wait for it
+      // to disappear so axe scans the loaded content, never a skeleton.
+      await expect(page.getByRole("status", { name: loadingLabel })).toBeHidden();
+
+      const results = await new AxeBuilder({ page }).analyze();
+      expect(
+        seriousOrCritical(results),
+        JSON.stringify(seriousOrCritical(results), null, 2),
+      ).toEqual([]);
+    });
+  }
+
+  test("an expired Approval (non-actionable, terminal) has no serious/critical violations", async ({
+    page,
+  }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+    // The expired-approval fixture belongs to Workspace A (default active is B).
+    await page.getByRole("button", { name: data.defaultWorkspaceName }).click();
+    await page.getByRole("menuitem", { name: new RegExp(data.otherWorkspaceName) }).click();
+
+    await page.goto(`/app/approvals/${data.workspaceAApprovalExpiredId}`);
+    await expect(page.getByText("Expired", { exact: true })).toBeVisible();
+
+    const results = await new AxeBuilder({ page }).analyze();
+    expect(seriousOrCritical(results), JSON.stringify(seriousOrCritical(results), null, 2)).toEqual(
+      [],
+    );
+  });
+
+  test("an Agent Runs list network-error state has no serious/critical violations", async ({
+    page,
+  }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+    await page.route("**/api/v1/workspaces/*/agent-runs/*", (route) => route.abort("failed"));
+    await page.goto("/app/agent-runs");
+    await expect(page.getByText("Something went wrong")).toBeVisible();
+
+    const results = await new AxeBuilder({ page }).analyze();
+    expect(seriousOrCritical(results), JSON.stringify(seriousOrCritical(results), null, 2)).toEqual(
+      [],
+    );
+  });
+
+  test("a foreign-workspace Approval not-found state has no serious/critical violations", async ({
+    page,
+  }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+    // Active workspace defaults to B; this approval belongs to A — real 404.
+    await page.goto(`/app/approvals/${data.workspaceAApprovalApproveId}`);
+    await expect(page.getByText("Approval not found")).toBeVisible();
+
+    const results = await new AxeBuilder({ page }).analyze();
+    expect(seriousOrCritical(results), JSON.stringify(seriousOrCritical(results), null, 2)).toEqual(
+      [],
+    );
+  });
 });
 
 test.describe("Keyboard-only pass", () => {

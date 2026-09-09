@@ -6,10 +6,14 @@ import { afterAll, afterEach, beforeAll, beforeEach } from "vitest";
 import { __setTimeoutOverrideForTests } from "@/lib/api/request";
 import { __resetSessionForTests } from "@/lib/api/session";
 import { __resetTokenStoreForTests } from "@/lib/api/token-store";
+import { resetAgentRunMockState } from "@/tests/msw/agent-run-handlers";
+import { resetApprovalMockState } from "@/tests/msw/approval-handlers";
 import { resetAuthMockState } from "@/tests/msw/handlers";
 import { resetCustomerMockState } from "@/tests/msw/customer-handlers";
 import { resetConversationMockState } from "@/tests/msw/conversation-handlers";
+import { resetHandoffMockState } from "@/tests/msw/handoff-handlers";
 import { resetTicketMockState } from "@/tests/msw/ticket-handlers";
+import { resetToolExecutionMockState } from "@/tests/msw/tool-execution-handlers";
 import { server } from "@/tests/msw/server";
 
 // `globals: false` in vitest.config.ts means @testing-library/react's
@@ -39,6 +43,10 @@ beforeEach(() => {
   resetCustomerMockState();
   resetConversationMockState();
   resetTicketMockState();
+  resetAgentRunMockState();
+  resetToolExecutionMockState();
+  resetApprovalMockState();
+  resetHandoffMockState();
   localStorage.clear();
   sessionStorage.clear();
 });

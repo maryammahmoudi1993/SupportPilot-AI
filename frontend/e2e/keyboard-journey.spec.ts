@@ -18,15 +18,25 @@ import { e2eData, login } from "./fixtures";
  * business navigation graph, not just isolated widgets.
  */
 
-/** Presses Tab until `target` is the focused element, or fails with a clear message. */
-async function tabUntilFocused(page: Page, target: Locator, maxPresses = 35): Promise<void> {
+/** Presses `key` until `target` is the focused element, or fails with a clear message. */
+async function keyUntilFocused(
+  page: Page,
+  target: Locator,
+  key: string,
+  maxPresses = 35,
+): Promise<void> {
   for (let i = 0; i < maxPresses; i++) {
     if (await target.evaluate((el) => el === document.activeElement).catch(() => false)) {
       return;
     }
-    await page.keyboard.press("Tab");
+    await page.keyboard.press(key);
   }
-  await expect(target, `did not reach focus within ${maxPresses} Tab presses`).toBeFocused();
+  await expect(target, `did not reach focus within ${maxPresses} ${key} presses`).toBeFocused();
+}
+
+/** Presses Tab until `target` is the focused element, or fails with a clear message. */
+async function tabUntilFocused(page: Page, target: Locator, maxPresses = 35): Promise<void> {
+  return keyUntilFocused(page, target, "Tab", maxPresses);
 }
 
 test.describe("Keyboard-only operational journey", () => {
@@ -219,5 +229,121 @@ test.describe("Keyboard-only operational journey", () => {
     await page.keyboard.press("Escape");
     await expect(dialog).toBeHidden();
     await expect(trigger).toBeFocused();
+  });
+
+  // Phase 20 Chunk 4 (final acceptance gate, Part I §30): the full
+  // AI-operations journey — Agent Runs -> Run Detail -> Tool trace
+  // disclosure -> Conversation link -> Approvals -> Approval detail ->
+  // Approve -> Handoffs -> Handoff detail -> relation link -> logout —
+  // entirely via keyboard activation, never `locator.click()`.
+  test("navigates the full Agent Runs -> Approvals -> Handoffs graph, decides a real Approval, and logs out, entirely via keyboard", async ({
+    page,
+  }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+    await expect(page.getByRole("navigation", { name: "Primary" })).toBeVisible();
+
+    // --- Agent Runs: reach and open the succeeded run via keyboard ---
+    const agentRunsLink = page
+      .getByRole("navigation", { name: "Primary" })
+      .getByRole("link", { name: "Agent Runs" });
+    await tabUntilFocused(page, agentRunsLink);
+    await page.keyboard.press("Enter");
+    await page.waitForURL("**/app/agent-runs");
+
+    const runLink = page.getByRole("link", {
+      name: `Run #${data.workspaceBAgentRunSucceededId.slice(0, 8)}`,
+    });
+    await tabUntilFocused(page, runLink);
+    await page.keyboard.press("Enter");
+    await page.waitForURL(`**/app/agent-runs/${data.workspaceBAgentRunSucceededId}`);
+
+    // --- Tool trace: reach the real "Arguments" disclosure via keyboard and
+    // toggle it with Enter (native <details>/<summary> semantics). Real
+    // backend ordering is `-created_at, -id` (most recent first), so the
+    // first "Arguments" disclosure on this run belongs to the later-created,
+    // failed demo.flaky execution (real `fail_attempts` argument) —
+    // StructuredPayload defaults `open`, so it is visible before any
+    // interaction; a real keyboard Enter proves it collapses, and a second
+    // Enter proves it reopens — genuine toggle behavior, not a one-way check. ---
+    const argumentsDisclosure = page.getByText("Arguments", { exact: true }).first();
+    await tabUntilFocused(page, argumentsDisclosure);
+    await expect(page.getByText(/"fail_attempts": 5/)).toBeVisible();
+    await page.keyboard.press("Enter");
+    await expect(page.getByText(/"fail_attempts": 5/)).toBeHidden();
+    await page.keyboard.press("Enter");
+    await expect(page.getByText(/"fail_attempts": 5/)).toBeVisible();
+
+    // --- Conversation link: reach and activate via keyboard ---
+    const conversationLink = page.getByRole("link", { name: "View originating conversation" });
+    await tabUntilFocused(page, conversationLink);
+    await page.keyboard.press("Enter");
+    await page.waitForURL(`**/app/inbox/${data.workspaceBConversationId}`);
+
+    // --- Switch to Workspace A via keyboard (the keyboard-journey Approval
+    // fixture — a dedicated fixture no other spec decides — lives there) ---
+    const workspaceSwitcher = page.getByRole("button", { name: data.defaultWorkspaceName });
+    await tabUntilFocused(page, workspaceSwitcher);
+    await page.keyboard.press("Enter");
+    const otherWorkspaceItem = page.getByRole("menuitem", {
+      name: new RegExp(data.otherWorkspaceName),
+    });
+    await keyUntilFocused(page, otherWorkspaceItem, "ArrowDown");
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("button", { name: data.otherWorkspaceName })).toBeVisible();
+
+    // --- Approvals: reach the list, then the real pending keyboard-journey
+    // Approval, via keyboard ---
+    const approvalsLink = page
+      .getByRole("navigation", { name: "Primary" })
+      .getByRole("link", { name: "Approvals" });
+    await tabUntilFocused(page, approvalsLink);
+    await page.keyboard.press("Enter");
+    await page.waitForURL("**/app/approvals");
+
+    const approvalLink = page.getByRole("link", { name: /keyboard journey/ });
+    await tabUntilFocused(page, approvalLink);
+    await page.keyboard.press("Enter");
+    await page.waitForURL(`**/app/approvals/${data.workspaceAApprovalKeyboardId}`);
+    await expect(page.getByText("Pending", { exact: true })).toBeVisible();
+
+    // --- Approve via keyboard: primary is Owner in Workspace A, satisfying
+    // this fixture's required_role=ADMIN, so the real controls are present ---
+    const approveButton = page.getByRole("button", { name: "Approve" });
+    await tabUntilFocused(page, approveButton);
+    await page.keyboard.press("Enter");
+    await expect(page.getByText("Approved", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Approve" })).toHaveCount(0);
+
+    // --- Handoffs: reach the list, then a real Handoff, via keyboard ---
+    const handoffsLink = page
+      .getByRole("navigation", { name: "Primary" })
+      .getByRole("link", { name: "Handoffs" });
+    await tabUntilFocused(page, handoffsLink);
+    await page.keyboard.press("Enter");
+    await page.waitForURL("**/app/handoffs");
+
+    const handoffLink = page.getByRole("link", { name: "Low-confidence retrieval/response" });
+    await tabUntilFocused(page, handoffLink);
+    await page.keyboard.press("Enter");
+    await page.waitForURL(`**/app/handoffs/${data.workspaceAHandoffPendingId}`);
+
+    // --- Handoff -> relation link, via keyboard ---
+    const handoffConversationLink = page.getByRole("link", { name: "View conversation" });
+    await tabUntilFocused(page, handoffConversationLink);
+    await page.keyboard.press("Enter");
+    await page.waitForURL(`**/app/inbox/${data.workspaceAConversationId}`);
+
+    // --- Logout, entirely via keyboard ---
+    const accountMenuButton = page.getByRole("button", { name: /Account menu/i });
+    await tabUntilFocused(page, accountMenuButton);
+    await page.keyboard.press("Enter");
+    const signOutItem = page.getByRole("menuitem", { name: "Sign out" });
+    await expect(signOutItem).toBeVisible();
+    await expect(signOutItem).toBeFocused();
+    await page.keyboard.press("Enter");
+
+    await page.waitForURL("**/login");
+    await expect(page.getByRole("button", { name: "Sign in" })).toBeVisible();
   });
 });

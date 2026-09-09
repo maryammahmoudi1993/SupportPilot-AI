@@ -21,10 +21,19 @@ export const DATA_FILE = path.resolve(__dirname, ".e2e-data.json");
 
 const SETUP_SCRIPT = `
 import json
+from datetime import timedelta
+from django.utils import timezone
 from accounts.models import User
+from agents.models import AgentDefinition, AgentProvider, AgentRun, AgentRunStatus, AgentRunTrigger, AgentStep, AgentStepStatus, AgentStepType, AgentVersion, AgentVersionStatus
+from approvals.models import ApprovalDecision, ApprovalDecisionValue, ApprovalRequest, ApprovalStatus
+from common.redaction import redact
 from conversations.models import Conversation, ConversationChannel, ConversationStatus, Message, MessageDirection, MessageSenderType
 from customers.models import Customer
-from tickets.models import Ticket, TicketPriority, TicketStatus
+from policies.models import PolicyEffect, PolicyEvaluation, RiskAssessment
+from tickets.models import HumanHandoff, HumanHandoffReason, HumanHandoffStatus, Ticket, TicketPriority, TicketStatus
+from tools.contracts import RiskLevel, SideEffectType
+from tools.models import ToolBinding, ToolDefinition, ToolExecution, ToolExecutionStatus
+from tools.services import sync_tool_definitions
 from workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole
 
 PASSWORD = "e2e-Test-Passw0rd!"
@@ -36,6 +45,14 @@ def make_user(username, email, first, last):
     return u
 
 User.objects.filter(email__startswith="e2e-").delete()
+# See global-teardown.ts for why ApprovalRequest/ToolExecution/AgentRun
+# (on_delete=PROTECT chains through ToolBinding/AgentVersion/RiskAssessment)
+# must be cleared before a Workspace cascade delete, and in that order.
+# HumanHandoff has no PROTECT relations (workspace CASCADE, agent_run/ticket
+# SET_NULL) so it needs no special ordering.
+ApprovalRequest.objects.filter(workspace__name__startswith="E2E ").delete()
+ToolExecution.objects.filter(workspace__name__startswith="E2E ").delete()
+AgentRun.objects.filter(workspace__name__startswith="E2E ").delete()
 Workspace.objects.filter(name__startswith="E2E ").delete()
 
 primary = make_user("e2e-primary", "e2e-primary@example.com", "E2E", "Primary")
@@ -162,6 +179,264 @@ Ticket.objects.bulk_create([
     for i in range(55)
 ])
 
+# Agent Runs domain (Phase 20 Chunk 1) — real cross-workspace AgentDefinition
+# / AgentVersion / AgentRun / AgentStep rows, created directly (not via the
+# orchestration service — that would make real, billed provider calls) so the
+# real-backend smoke can prove tenant isolation, status/lifecycle rendering,
+# real Run -> Conversation/Ticket cross-links, and non-terminal-run polling
+# against the actual API. Rows cascade/PROTECT per agents/models.py; deleted
+# by AgentDefinition.workspace CASCADE except AgentVersion (PROTECT from
+# AgentRun) — cleaned up in dependency order in global-teardown.ts.
+ws_b_agent_def = AgentDefinition.objects.create(workspace=ws_b, name="E2E Support Agent")
+ws_b_agent_version = AgentVersion.objects.create(
+    agent_definition=ws_b_agent_def, version=1, status=AgentVersionStatus.PUBLISHED,
+    provider=AgentProvider.FAKE, model="fake-v1", published_at=timezone.now(),
+)
+ws_b_agent_run_succeeded = AgentRun.objects.create(
+    workspace=ws_b, agent_version=ws_b_agent_version, conversation=ws_b_conversation,
+    ticket=ws_b_ticket, trigger=AgentRunTrigger.CONVERSATION, status=AgentRunStatus.SUCCEEDED,
+    input_message="My order hasn't arrived yet.",
+    final_response="Your refund has been processed.",
+    started_at=timezone.now(), completed_at=timezone.now(),
+    model_call_count=1, step_count=2, tool_call_count=0,
+    input_tokens=120, output_tokens=64, total_tokens=184,
+)
+AgentStep.objects.bulk_create([
+    AgentStep(
+        run=ws_b_agent_run_succeeded, workspace=ws_b, sequence=1,
+        step_type=AgentStepType.RUN_STARTED, status=AgentStepStatus.SUCCEEDED,
+    ),
+    AgentStep(
+        run=ws_b_agent_run_succeeded, workspace=ws_b, sequence=2,
+        step_type=AgentStepType.RUN_COMPLETED, status=AgentStepStatus.SUCCEEDED,
+        provider="fake", model="fake-v1", latency_ms=42,
+    ),
+])
+# Non-terminal (running) — real-backend smoke proves it renders correctly and
+# is the one status eligible for the frontend's polling behavior.
+ws_b_agent_run_running = AgentRun.objects.create(
+    workspace=ws_b, agent_version=ws_b_agent_version, trigger=AgentRunTrigger.MANUAL,
+    status=AgentRunStatus.RUNNING, input_message="Looking up account status.",
+    started_at=timezone.now(),
+)
+ws_a_agent_def = AgentDefinition.objects.create(workspace=ws_a, name="E2E Workspace A Agent")
+ws_a_agent_version = AgentVersion.objects.create(
+    agent_definition=ws_a_agent_def, version=1, status=AgentVersionStatus.PUBLISHED,
+    provider=AgentProvider.FAKE, model="fake-v1", published_at=timezone.now(),
+)
+ws_a_agent_run = AgentRun.objects.create(
+    workspace=ws_a, agent_version=ws_a_agent_version, trigger=AgentRunTrigger.MANUAL,
+    status=AgentRunStatus.SUCCEEDED, input_message="Workspace A only run.",
+    final_response="Workspace A only response.",
+    started_at=timezone.now(), completed_at=timezone.now(),
+)
+
+# Tool Executions domain (Phase 20 Chunk 2) — real ToolDefinition/ToolBinding/
+# ToolExecution rows on the Workspace B succeeded/running runs, so the
+# real-backend smoke can prove tenant-scoped trace visibility, redaction,
+# attempt counts, and non-terminal polling against the actual API.
+# sync_tool_definitions() is the same idempotent call the real data
+# migration/seed_demo command makes (tools/services.py) — never a live
+# provider call, just mirroring the code-owned tool registry into the DB.
+sync_tool_definitions()
+echo_def = ToolDefinition.objects.get(key="demo.echo")
+flaky_def = ToolDefinition.objects.get(key="demo.flaky")
+echo_binding = ToolBinding.objects.create(
+    agent_version=ws_b_agent_version, tool_definition=echo_def, enabled=True,
+)
+flaky_binding = ToolBinding.objects.create(
+    agent_version=ws_b_agent_version, tool_definition=flaky_def, enabled=True,
+)
+ws_b_tool_execution_succeeded = ToolExecution.objects.create(
+    workspace=ws_b, agent_run=ws_b_agent_run_succeeded, agent_version=ws_b_agent_version,
+    tool_definition=echo_def, tool_binding=echo_binding, status=ToolExecutionStatus.SUCCEEDED,
+    # Real backend redaction (common/redaction.py redact()) applied here
+    # exactly as tools/execution.py applies it before persisting — a FAKE
+    # secret-shaped value, never a real one, proving the actual contract
+    # rather than a frontend-invented placeholder.
+    arguments_redacted=redact({"message": "hello", "api_key": "fake-not-a-real-secret"}),
+    result_redacted={"echoed": "hello"},
+    attempt_count=1, timeout_seconds=5,
+    started_at=timezone.now(), completed_at=timezone.now(), duration_ms=42,
+)
+# A second, failed tool execution on the same run — multiple real attempts
+# (demo.flaky's own deterministic retry semantics, tools/demo_tools.py),
+# and a safe, non-traceback error message.
+ws_b_tool_execution_failed = ToolExecution.objects.create(
+    workspace=ws_b, agent_run=ws_b_agent_run_succeeded, agent_version=ws_b_agent_version,
+    tool_definition=flaky_def, tool_binding=flaky_binding, status=ToolExecutionStatus.FAILED,
+    arguments_redacted={"fail_attempts": 5}, result_redacted={},
+    attempt_count=4, timeout_seconds=1,
+    started_at=timezone.now(), completed_at=timezone.now(),
+    error_code="tool_execution_failed", error_message_safe="Deterministic demo failure.",
+)
+# A read-only approval-context fixture on the non-terminal (running) run —
+# a real ToolExecutionStatus value; the underlying ApprovalRequest/
+# PolicyEvaluation/RiskAssessment rows a real Phase 8 approval gate would
+# also create are intentionally not replicated here (Chunk 2 renders only
+# ToolExecution's own status/error_code — see frontend/README.md).
+ws_b_tool_execution_waiting = ToolExecution.objects.create(
+    workspace=ws_b, agent_run=ws_b_agent_run_running, agent_version=ws_b_agent_version,
+    tool_definition=echo_def, tool_binding=echo_binding,
+    status=ToolExecutionStatus.WAITING_FOR_APPROVAL,
+    arguments_redacted={"message": "please refund order #4821"}, result_redacted={},
+    attempt_count=0, timeout_seconds=5, started_at=timezone.now(),
+)
+
+# Approvals domain (Phase 20 Chunk 3) — real ApprovalRequest rows, built
+# directly via the ORM rather than through the orchestration/policy-gate
+# path (which would require a live-or-faked payment provider call), exactly
+# mirroring the real fields approvals.services.create_or_reuse_approval_request
+# persists for an actual payment.refund gate — verified empirically against
+# the real ApprovalRequestSerializer before writing this fixture (see the
+# Chunk 3 report). Workspace A's primary membership is OWNER (rank 3,
+# satisfies any required_role), used for the real Approve/Reject/expiry/
+# concurrent-decision E2E; Workspace B's is SUPPORT_AGENT (rank 0, outside
+# the approval-authority ranking entirely), used for the real
+# permission-denial E2E. A dedicated AgentRun per workspace (never
+# ws_a_agent_run/ws_b_agent_run_running) — Chunk 2's own E2E spec asserts
+# ws_a_agent_run has NO tool executions, and ws_b_agent_run_running already
+# carries its own Chunk 2 waiting-approval ToolExecution fixture; reusing
+# either would silently break that chunk's invariant.
+refund_def = ToolDefinition.objects.get(key="payment.refund")
+ws_a_approvals_run = AgentRun.objects.create(
+    workspace=ws_a, agent_version=ws_a_agent_version, trigger=AgentRunTrigger.MANUAL,
+    status=AgentRunStatus.RUNNING, input_message="Process a batch of refund requests.",
+    started_at=timezone.now(),
+)
+ws_b_approvals_run = AgentRun.objects.create(
+    workspace=ws_b, agent_version=ws_b_agent_version, trigger=AgentRunTrigger.MANUAL,
+    status=AgentRunStatus.RUNNING, input_message="Process a refund request.",
+    started_at=timezone.now(),
+)
+ws_a_refund_binding = ToolBinding.objects.create(
+    agent_version=ws_a_agent_version, tool_definition=refund_def, enabled=True,
+)
+ws_b_refund_binding = ToolBinding.objects.create(
+    agent_version=ws_b_agent_version, tool_definition=refund_def, enabled=True,
+)
+
+def make_pending_approval(*, workspace, agent_run, agent_version, binding, required_role, summary):
+    execution = ToolExecution.objects.create(
+        workspace=workspace, agent_run=agent_run, agent_version=agent_version,
+        tool_definition=refund_def, tool_binding=binding,
+        status=ToolExecutionStatus.WAITING_FOR_APPROVAL,
+        arguments_redacted=redact({
+            "payment_reference": "pi_1", "amount_minor": 10000, "currency": "usd",
+            "api_key": "fake-not-a-real-secret",
+        }),
+        result_redacted={}, attempt_count=0, timeout_seconds=10, started_at=timezone.now(),
+    )
+    risk = RiskAssessment.objects.create(
+        workspace=workspace, tool_execution=execution, tool_key="payment.refund",
+        base_risk=RiskLevel.CRITICAL, effective_risk=RiskLevel.CRITICAL,
+        side_effect_type=SideEffectType.FINANCIAL,
+    )
+    evaluation = PolicyEvaluation.objects.create(
+        workspace=workspace, tool_execution=execution, risk_assessment=risk, policy_version=None,
+        decision=PolicyEffect.REQUIRE_APPROVAL,
+        decision_code="system_default_financial_requires_approval",
+        safe_reason="Financial actions require approval.",
+    )
+    return ApprovalRequest.objects.create(
+        workspace=workspace, tool_execution=execution, policy_evaluation=evaluation, risk_assessment=risk,
+        requested_by=None, required_role=required_role, summary=summary,
+        safe_context={
+            "tool_key": "payment.refund", "tool_display_name": "Payment refund",
+            "risk_level": RiskLevel.CRITICAL, "side_effect_type": SideEffectType.FINANCIAL,
+            "policy_reason": "Financial actions require approval.",
+            "arguments": redact({
+                "payment_reference": "pi_1", "amount_minor": 10000, "currency": "usd",
+                "api_key": "fake-not-a-real-secret",
+            }),
+        },
+        expires_at=timezone.now() + timedelta(hours=1),
+    )
+
+ws_a_approval_approve = make_pending_approval(
+    workspace=ws_a, agent_run=ws_a_approvals_run, agent_version=ws_a_agent_version,
+    binding=ws_a_refund_binding, required_role=WorkspaceRole.ADMIN,
+    summary="payment.refund: amount_minor=10000, currency=usd (approve)",
+)
+ws_a_approval_reject = make_pending_approval(
+    workspace=ws_a, agent_run=ws_a_approvals_run, agent_version=ws_a_agent_version,
+    binding=ws_a_refund_binding, required_role=WorkspaceRole.ADMIN,
+    summary="payment.refund: amount_minor=10000, currency=usd (reject)",
+)
+ws_a_approval_concurrent = make_pending_approval(
+    workspace=ws_a, agent_run=ws_a_approvals_run, agent_version=ws_a_agent_version,
+    binding=ws_a_refund_binding, required_role=WorkspaceRole.ADMIN,
+    summary="payment.refund: amount_minor=10000, currency=usd (concurrent)",
+)
+ws_a_approval_expired = make_pending_approval(
+    workspace=ws_a, agent_run=ws_a_approvals_run, agent_version=ws_a_agent_version,
+    binding=ws_a_refund_binding, required_role=WorkspaceRole.ADMIN,
+    summary="payment.refund: amount_minor=10000, currency=usd (expired)",
+)
+ApprovalRequest.objects.filter(pk=ws_a_approval_expired.id).update(
+    status=ApprovalStatus.EXPIRED,
+    created_at=timezone.now() - timedelta(hours=3),
+    expires_at=timezone.now() - timedelta(hours=2),
+    resolved_at=timezone.now() - timedelta(hours=2),
+)
+ws_a_approval_decided = make_pending_approval(
+    workspace=ws_a, agent_run=ws_a_approvals_run, agent_version=ws_a_agent_version,
+    binding=ws_a_refund_binding, required_role=WorkspaceRole.ADMIN,
+    summary="payment.refund: amount_minor=10000, currency=usd (already decided)",
+)
+ApprovalDecision.objects.create(
+    approval_request=ws_a_approval_decided, decision=ApprovalDecisionValue.APPROVE,
+    decided_by=primary, safe_comment="Confirmed with customer.",
+)
+ApprovalRequest.objects.filter(pk=ws_a_approval_decided.id).update(
+    status=ApprovalStatus.APPROVED, resolved_at=timezone.now(),
+)
+ws_b_approval_pending = make_pending_approval(
+    workspace=ws_b, agent_run=ws_b_approvals_run, agent_version=ws_b_agent_version,
+    binding=ws_b_refund_binding, required_role=WorkspaceRole.SUPPORT_MANAGER,
+    summary="payment.refund: amount_minor=10000, currency=usd (permission test)",
+)
+# Phase 20 Chunk 4: a dedicated fixture for the keyboard-only AI-operations
+# journey (e2e/keyboard-journey.spec.ts) — never reused by any other spec's
+# Approve/Reject, so that test's own decision doesn't race or collide with
+# approvals.spec.ts's mutation of ws_a_approval_approve/ws_a_approval_reject.
+ws_a_approval_keyboard = make_pending_approval(
+    workspace=ws_a, agent_run=ws_a_approvals_run, agent_version=ws_a_agent_version,
+    binding=ws_a_refund_binding, required_role=WorkspaceRole.ADMIN,
+    summary="payment.refund: amount_minor=10000, currency=usd (keyboard journey)",
+)
+# Phase 20 Chunk 4: a dedicated fixture for the mobile (375px) Approval
+# usability test (e2e/responsive.spec.ts) — never reused by approvals.spec.ts,
+# for the same collision-avoidance reason as ws_a_approval_keyboard above.
+ws_a_approval_mobile = make_pending_approval(
+    workspace=ws_a, agent_run=ws_a_approvals_run, agent_version=ws_a_agent_version,
+    binding=ws_a_refund_binding, required_role=WorkspaceRole.ADMIN,
+    summary="payment.refund: amount_minor=10000, currency=usd (mobile)",
+)
+
+# Human Handoff domain (Phase 20 Chunk 3) — real HumanHandoff rows with real
+# Conversation/AgentRun/Ticket relations, so the real-backend smoke can prove
+# tenant-scoped visibility and the real cross-links (never a guessed join —
+# HumanHandoffSerializer exposes conversation_id/agent_run_id/ticket_id
+# directly, unlike ApprovalRequest, which exposes none).
+ws_b_handoff_pending = HumanHandoff.objects.create(
+    workspace=ws_b, conversation=ws_b_unassigned_conversation, agent_run=ws_b_agent_run_running,
+    status=HumanHandoffStatus.PENDING, reason_code=HumanHandoffReason.CUSTOMER_REQUESTED,
+    safe_summary="Customer explicitly asked to speak with a human agent.",
+)
+ws_b_handoff_resolved = HumanHandoff.objects.create(
+    workspace=ws_b, conversation=ws_b_conversation, agent_run=ws_b_agent_run_succeeded,
+    ticket=ws_b_ticket, status=HumanHandoffStatus.RESOLVED,
+    reason_code=HumanHandoffReason.POLICY_ESCALATION,
+    safe_summary="Refund required manager sign-off before this workspace's policy allowed it.",
+    assigned_to=membership_b, resolved_at=timezone.now(),
+)
+ws_a_handoff_pending = HumanHandoff.objects.create(
+    workspace=ws_a, conversation=ws_a_conversation, status=HumanHandoffStatus.PENDING,
+    reason_code=HumanHandoffReason.LOW_CONFIDENCE,
+    safe_summary="Retrieval confidence was too low to answer safely.",
+)
+
 print(json.dumps({
     "primaryEmail": primary.email,
     "primaryPassword": PASSWORD,
@@ -194,6 +469,24 @@ print(json.dumps({
     "workspaceBResolvedTicketSubject": ws_b_resolved_ticket.subject,
     "workspaceATicketId": str(ws_a_ticket.id),
     "workspaceATicketSubject": ws_a_ticket.subject,
+    "workspaceBAgentRunSucceededId": str(ws_b_agent_run_succeeded.id),
+    "workspaceBAgentRunRunningId": str(ws_b_agent_run_running.id),
+    "workspaceAAgentRunId": str(ws_a_agent_run.id),
+    "workspaceAAgentRunResponse": ws_a_agent_run.final_response,
+    "workspaceBToolExecutionSucceededId": str(ws_b_tool_execution_succeeded.id),
+    "workspaceBToolExecutionFailedId": str(ws_b_tool_execution_failed.id),
+    "workspaceBToolExecutionWaitingId": str(ws_b_tool_execution_waiting.id),
+    "workspaceAApprovalApproveId": str(ws_a_approval_approve.id),
+    "workspaceAApprovalRejectId": str(ws_a_approval_reject.id),
+    "workspaceAApprovalConcurrentId": str(ws_a_approval_concurrent.id),
+    "workspaceAApprovalExpiredId": str(ws_a_approval_expired.id),
+    "workspaceAApprovalDecidedId": str(ws_a_approval_decided.id),
+    "workspaceBApprovalPendingId": str(ws_b_approval_pending.id),
+    "workspaceAApprovalKeyboardId": str(ws_a_approval_keyboard.id),
+    "workspaceAApprovalMobileId": str(ws_a_approval_mobile.id),
+    "workspaceBHandoffPendingId": str(ws_b_handoff_pending.id),
+    "workspaceBHandoffResolvedId": str(ws_b_handoff_resolved.id),
+    "workspaceAHandoffPendingId": str(ws_a_handoff_pending.id),
 }))
 `;
 

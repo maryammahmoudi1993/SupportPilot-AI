@@ -35,6 +35,24 @@ export interface E2EData {
   workspaceBResolvedTicketSubject: string;
   workspaceATicketId: string;
   workspaceATicketSubject: string;
+  workspaceBAgentRunSucceededId: string;
+  workspaceBAgentRunRunningId: string;
+  workspaceAAgentRunId: string;
+  workspaceAAgentRunResponse: string;
+  workspaceBToolExecutionSucceededId: string;
+  workspaceBToolExecutionFailedId: string;
+  workspaceBToolExecutionWaitingId: string;
+  workspaceAApprovalApproveId: string;
+  workspaceAApprovalRejectId: string;
+  workspaceAApprovalConcurrentId: string;
+  workspaceAApprovalExpiredId: string;
+  workspaceAApprovalDecidedId: string;
+  workspaceBApprovalPendingId: string;
+  workspaceAApprovalKeyboardId: string;
+  workspaceAApprovalMobileId: string;
+  workspaceBHandoffPendingId: string;
+  workspaceBHandoffResolvedId: string;
+  workspaceAHandoffPendingId: string;
 }
 
 let cached: E2EData | null = null;

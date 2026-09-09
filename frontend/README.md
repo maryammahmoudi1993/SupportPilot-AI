@@ -1163,6 +1163,294 @@ test seeding an unrecognized future value on both list and detail pages).
 No Phase 20+ destination (Agents, Approvals, Knowledge, Integrations,
 Evaluations) is present.
 
+### Agent Runs + lifecycle visibility (Phase 20 Chunk 1)
+
+**Route model**: `/app/agent-runs` (list) and `/app/agent-runs/[runId]`
+(detail) — same pattern as Tickets/Customers/Inbox. No duplicate route.
+"Agent Runs" is now the fifth clickable sidebar entry
+(`components/shell/nav-config.ts`) — Overview, Inbox, Customers, Tickets,
+Agent Runs. No Tool Execution/Approval/Handoff top-level destination exists
+yet (Chunks 2-3's job); Tool Executions/Approvals/Handoff, where real, will
+live inside Agent Run detail rather than as separate nav items, per the
+build prompt's Part E guidance.
+
+**Agent Run API contract**:
+
+| Question | Answer |
+| --- | --- |
+| List | `GET /api/v1/workspaces/{workspace_id}/agent-runs/` — any active member. |
+| Detail | `GET .../agent-runs/{run_id}/` — 404s exactly like a nonexistent run for one belonging to a different workspace (`agents/selectors.py agent_run_get_for_workspace_or_404`). |
+| Steps (execution trace) | `GET .../agent-runs/{run_id}/steps/` — safe, structured trace events only (`AgentStepSerializer`); never hidden chain-of-thought. |
+| Create | `POST .../agent-runs/` — starts a real run (`CanRunAgents` role, rate-limited). Not implemented — Chunk 1 is visibility-only, no run-triggering UI. |
+| Cancel | `POST .../agent-runs/{run_id}/cancel/` — real and backend-tested (`agents/orchestration.py cancel_support_agent_run`), 409 if not cancellable. **Deferred** (see below), not "not supported." |
+| Pagination | Backend-standard `PageNumberPagination` — `{count, next, previous, results}`, default page size 50. |
+| Filters | `status` (all 8 real enum values) and `agent_id` — both real (`agents/selectors.py agent_run_list_for_workspace`). Only `status` has a UI select; `agent_id` has no picker in Chunk 1 (no Agent Definition management UI exists) but is typed for a future caller. |
+| Ordering | Fixed backend order, `-created_at, -id` — no client sort control. |
+| Status enum | `pending`, `running`, `succeeded`, `failed`, `cancelled`, `budget_exceeded`, `waiting_for_approval`, `handed_off` (`AgentRunStatusEnum`). |
+| Terminal states | `succeeded`, `failed`, `cancelled`, `budget_exceeded`, `handed_off` — mirrored in the frontend as `AGENT_RUN_TERMINAL_STATUSES` (`features/agent-runs/types.ts`), not imported (separate deployables). `pending`/`running`/`waiting_for_approval` are non-terminal. |
+| Conversation relation | `conversation_id` — nullable. Links to the existing `/app/inbox/[conversationId]` route when present. |
+| Customer relation | **Not real on `AgentRun` itself** — no `customer_id` field exists on the serializer. Not inferred through Conversation (would require a second fetch per row/detail; the build prompt's Part F §55 rule against inferring un-exposed relationships applies the same way it did for Conversation → Ticket in Chunk 3). |
+| Ticket relation | `ticket_id` — nullable. Links to the existing `/app/tickets/[ticketId]` route when present. |
+| Tool execution relation | Real (`ToolExecution.agent_run` FK), but no `GET` list-by-run endpoint is exposed yet on `tools/urls.py` — Chunk 2's job. Not surfaced here beyond the run's own `tool_call_count` counter. |
+| Approval relation | Real (`ApprovalRequest.tool_execution` → `ToolExecution.agent_run`), transitively — no direct run-level approval list endpoint. Chunk 3's job. The run's `waiting_for_approval` status is visible today; the approval record itself is not. |
+| Handoff relation | Not surfaced — `AgentRun` carries no handoff FK/field in the current serializer. The `handed_off` terminal status is visible; the underlying `HumanHandoff` record is Chunk 3's job. |
+| Permissions | List/detail/steps: any `IsWorkspaceMember`. Create/cancel: `CanRunAgents` (owner/admin/support_manager/support_agent) — irrelevant to this read-only chunk. |
+
+**Schema gap (Category A)**: `status`/`agent_id` are real, backend-tested
+list filters absent from the generated `api_v1_workspaces_agent_runs_list`
+operation's query type (same global-filter-backend-inference gap as every
+prior domain) — narrowed explicitly in `features/agent-runs/api.ts`'s
+`AgentRunListQuery`. `ordering`/`search` are dead parameters; never sent.
+
+**Cancellation — explicitly deferred, not "unsupported"**: `POST
+.../cancel/` is a real, backend-tested capability. It is not implemented in
+Chunk 1 because (a) no other write/mutation pattern exists anywhere in this
+frontend yet to build on, and (b) the master prompt's Part F §28 explicitly
+sanctions deferring it ("If uncertain: DEFER"). Wiring it up requires the
+full required test matrix (duplicate-submission-blocked, `retry: 0`,
+terminal/conflict-state handling, invalidation-after-success) that Approve/
+Reject in Chunk 3 will need anyway — better built once, consistently, than
+half-built here.
+
+**Polling strategy** (`features/agent-runs/queries.ts`): there is no
+WebSocket/push channel on this backend for run progress, so a **non-terminal
+run's detail and step trace** are polled at a fixed `AGENT_RUN_POLL_INTERVAL_MS`
+(5000ms) via TanStack Query's `refetchInterval`, which re-evaluates against
+the *latest fetched status* on every scheduling decision — so polling stops
+on the very next check once a run turns terminal, not one cycle late. The
+**list is never polled** — Chunk 1 is a detail-first workflow (an operator
+opens one run to watch it); polling every row of a list would be a much
+heavier request volume for a lower-value signal. `refetchIntervalInBackground:
+false` additionally pauses polling for a backgrounded browser tab. Covered by
+`src/tests/features/agent-runs/polling.test.tsx`: a pure-logic test of the
+terminal/non-terminal decision function, plus a fake-timer integration test
+proving a real component stops issuing detail requests once the backend
+reports a terminal status.
+
+**No client N+1**: the Agent Runs list issues exactly one request per
+page/filter change. Run detail issues exactly two requests (the run itself,
+and its step trace) — no per-step or per-tool-execution fetch.
+
+**Query-key / cache consistency**: `agentRunKeys` follows the same
+`["workspaces", workspaceId, "agent-runs", ...]` shape as every other
+domain (`features/agent-runs/query-keys.ts`), with a dedicated `steps(...)`
+leaf nested under `detail(...)` so a run's step-trace cache entry is
+disjoint per workspace and per run, exactly like every other key.
+
+**Untrusted payload handling**: `AgentStep.safe_metadata` (JSON) is rendered
+via a bounded, independently `overflow-auto` `<pre>` block — plain text via
+`JSON.stringify`, never `dangerouslySetInnerHTML` — so it can never force
+page-level horizontal overflow or be interpreted as markup, per the build
+prompt's Part C §16-18.
+
+**Deferred to later Phase 20 chunks** (explicitly, not silently): Tool
+Execution detail UI, Approval list/detail + Approve/Reject, Human Handoff
+visibility, run cancellation, and any top-level nav destination for those
+domains.
+
+### Tool Executions + Execution Trace (Phase 20 Chunk 2)
+
+**Architecture decision — embedded, not standalone** (build prompt Part I
+§26): Tool Executions render inside Agent Run detail, in their own "Tool
+executions" card alongside the existing "Agent steps" card — no
+`/app/agent-runs/[runId]/tools/[executionId]` or `/app/tool-executions/...`
+route exists. The two are deliberately separate sections, not merged into
+one interleaved timeline: `AgentStep` and `ToolExecution` share no explicit
+join key (a step records `tool_requested`/`tool_execution_*` step *types*,
+but never a `tool_execution_id` FK) closer than "both belong to the same
+run," so fabricating a merged order would be inventing a relationship the
+backend doesn't expose. Both lists preserve their own backend-authoritative
+order verbatim (`AgentStep.sequence` ascending; `ToolExecution` list
+`-created_at, -id` descending) — never client-sorted.
+
+**Tool Execution API contract**:
+
+| Question | Answer |
+| --- | --- |
+| List | `GET /api/v1/workspaces/{workspace_id}/tools/tool-executions/` — any active member (`ToolExecutionListView`, no explicit permission override beyond workspace membership). |
+| Detail | `GET .../tools/tool-executions/{execution_id}/` — real, but **unused in Chunk 2**: the list, filtered by `agent_run_id`, already returns every field the detail endpoint would (same `ToolExecutionSerializer`), so fetching each row's detail individually would be a pure N+1 with zero additional information. |
+| Catalog | `GET /api/v1/workspaces/{workspace_id}/tools/` — code-owned, workspace-independent `ToolDefinition` metadata (same rows for every workspace). Fetched once per Agent Run detail view to attach each execution's real `risk_level`/`side_effect_type`/`display_name` (absent from `ToolExecution` itself). |
+| Pagination | Backend-standard `PageNumberPagination`, page size 50. Never paginated client-side in Chunk 2: an `AgentVersion.max_tool_calls` is server-capped at 20 (`agents/serializers.py`), so one run's tool-execution list is provably always a single page. |
+| Filters | `status` and `agent_run_id` — both real (`tools/selectors.py tool_execution_list_for_workspace`). Only `agent_run_id` is sent (this chunk has no standalone list UI to offer a `status` picker on). |
+| Ordering | Fixed backend order, `-created_at, -id` — rendered exactly as returned. |
+| Status enum | `pending`, `running`, `succeeded`, `failed`, `timed_out`, `cancelled`, `waiting_for_approval`, `blocked_by_policy`, `approval_terminated` (`ToolExecutionStatusEnum`). |
+| Terminal states | `succeeded`, `failed`, `timed_out`, `cancelled`, `blocked_by_policy`, `approval_terminated` — mirrored as `TOOL_EXECUTION_TERMINAL_STATUSES` (`features/tool-executions/types.ts`), matching `tools/models.py`. |
+| Attempts/retries | `attempt_count` — a single integer counter on the one `ToolExecution` row (Phase 6's idempotency model: one logical invocation, not one row per attempt). There is no per-attempt history (timestamp/output per retry) in the persisted schema, so none is fabricated — "Attempts: N" is rendered as exactly that, a count. |
+| Idempotency | `idempotency_key` (may be blank — a tool opted out) rendered as a plain field when present. No idempotency *behavior* is exposed or claimed beyond what the field itself says. |
+| Side-effect honesty | `ToolDefinition.side_effect_type` (`none`/`read`/`internal_write`/`external_write`/`financial`/`destructive`) is shown via `SideEffectBadge`, straight from the catalog — never a claim of "exactly once." Phase 10's real external-delivery guarantee is at-least-once; nothing in this UI says otherwise. |
+| Approval relation | **No direct FK** on `ToolExecution` to an `ApprovalRequest`. A real, read-only approval context is still derivable honestly from `ToolExecution`'s own fields: `status="waiting_for_approval"`/`"blocked_by_policy"` are already fully conveyed by the status badge; `status="approval_terminated"` additionally decodes its real `error_code` (`approval_rejected`/`approval_expired`/`approval_cancelled`, per `tools/models.py`'s `APPROVAL_TERMINATED` docstring) into a specific label via `deriveApprovalContext`. No Approve/Reject action, no link to a not-yet-existing Approval route (Chunk 3). |
+| Retry endpoint | Not supported by the public API (no manual retry is exposed to a client) — no Retry Tool action exists, matching the build prompt's Part G default. |
+| Redaction | Backend-primary: `arguments_redacted`/`result_redacted` are already redacted server-side before being persisted (`common/redaction.py redact()`, applied in `tools/execution.py`) — sensitive-looking keys (password/secret/token/api_key/authorization/…) are replaced with the literal string `"***REDACTED***"` before the row is ever written. The frontend renders exactly what it receives and never attempts to reconstruct a redacted value; the only frontend-side defense-in-depth is that payloads are never interpreted as markup (see below). |
+
+**Payload safety** (`components/support/structured-payload.tsx`, shared by
+`AgentStep.safe_metadata` and both `ToolExecution.arguments_redacted`/
+`result_redacted`): every value is `JSON.stringify`'d into a `<pre>` text
+node — never `dangerouslySetInnerHTML`, `eval`, or `new Function` — so
+HTML/script-looking content (a customer-supplied `<script>...</script>`, a
+prompt-injection string) is always inert plain text. A native
+`<details>`/`<summary>` disclosure gives correct keyboard/AT semantics for
+free (no hand-rolled `aria-expanded`). Bounded presentation: a fixed
+`max-h-64 overflow-auto` box so a large/deep value scrolls in place rather
+than stretching page layout, plus a defensive hard truncation past 20,000
+serialized characters (backend payloads are already size-capped upstream —
+this is a last-resort guard). No object key or string value is ever
+auto-linked as a URL, and no untrusted object is ever spread into an
+application/config object.
+
+**Network pattern** (Agent Run detail, one page):
+
+- Terminal run: 4 requests total, once — run detail, steps, tool-execution
+  list (filtered by `agent_run_id`), tool catalog. No further requests.
+- Non-terminal run: the same 4 requests initially, then run detail, steps,
+  and the tool-execution list each re-fetch every `AGENT_RUN_POLL_INTERVAL_MS`
+  (5000ms) while non-terminal — 3 requests per interval, never N (one per
+  tool execution). The catalog is never re-fetched (code-owned, static for
+  the session; default 30s query staleTime already covers a return visit).
+  All polling shares the same non-terminal-run condition — one coherent
+  policy, not independent timers — and stops for good on the same poll
+  cycle a fetch observes the run reach a terminal status.
+
+**Workspace isolation**: `toolExecutionKeys` follows the same
+`["workspaces", workspaceId, "tool-executions", "for-run", runId]` /
+`["workspaces", workspaceId, "tools", "catalog"]` shape as every other
+domain. No standalone Tool Execution route exists to deep-link into a
+foreign workspace's execution directly; the only real access path is
+through an Agent Run already scoped to the active workspace (a run ID from
+another workspace already resolves to the run-detail not-found state — see
+Chunk 1 — so its tool executions are unreachable by construction, not by a
+separate check).
+
+**Known schema gap**: `ToolDefinition.status` is generated as
+`WebhookEndpointStatusEnum` (`"active" | "disabled"`) rather than a
+tool-specific enum name — a drf-spectacular component-naming collision
+(two unrelated two-value status enums with identical literal values). The
+values are correct; only the generated name is misleading. Re-typed as
+`ToolDefinitionStatusValue` in `features/tool-executions/types.ts` so no
+calling code ever references the confusing generated name. Not blocking.
+
+**Deferred to Chunk 3**: Approval list/detail, Approve/Reject actions,
+Human Handoff visibility, and any top-level nav destination for those
+domains. Chunk 2 adds no new route and no new nav entry.
+
+### Approvals + Human Handoff (Phase 20 Chunk 3)
+
+The first Chunk with a sensitive mutation: Approve/Reject a real, pending
+`ApprovalRequest`. Human Handoff is read-only this chunk (see below).
+
+**Approval API contract**:
+
+| Question | Answer |
+| --- | --- |
+| List | `GET /api/v1/workspaces/{workspace_id}/approvals/` — any active member (`ApprovalRequestListView`). Ordered `created_at, id` (pending-first, oldest first) — never client-sorted. |
+| Detail | `GET .../approvals/{approval_id}/` — any active member. |
+| Approve | `POST .../approvals/{approval_id}/approve/` — the URL is the decision; body is `{comment?: string}` only (`ApprovalDecisionInputSerializer`). No client-suppliable `decision`/`decided_by`/`required_role`. |
+| Reject | `POST .../approvals/{approval_id}/reject/` — same shape. |
+| Pagination | Backend-standard `PageNumberPagination`, page size 50. |
+| Filters | `status`, `required_role`, `tool_key` are all real (`approvals/views.py`); only `status` is surfaced in this chunk's list UI. |
+| Statuses | `pending`, `approved`, `rejected`, `expired`, `cancelled` (`ApprovalStatusEnum`). Only `pending` is actionable; every other value — including any future one this frontend doesn't recognize — is treated as non-actionable, never assumed decidable (safe fallback, `isActionableApprovalStatus`). |
+| Expiry | Server-authoritative: `expires_at` is a real field, but the frontend's clock is never treated as the source of truth for whether a decision will be honored — an already-expired-server-side `pending`-looking row still gets a real 409 from a decide call, handled the same as any other conflict (see "Decision safety" below). |
+| Requester/decider identity | `requested_by`/`decision.decided_by` are raw `accounts.User` numeric IDs — no membership/email expansion exists on either serializer. Rendered honestly as `User #<id>`, never resolved to a name/email the API doesn't provide (no guessing via a separate broad members query). |
+| AgentRun / ToolExecution / Conversation relation | **None.** `ApprovalRequestSerializer` exposes no `tool_execution_id`, `agent_run_id`, or `conversation_id` field at all (verified directly against the real serializer before building this UI) — only `safe_context` (an opaque JSON blob with `tool_key`/`tool_display_name`/`risk_level`/`side_effect_type`/`policy_reason`/`arguments`). This is why Approval detail carries no "View run"/"View execution" link, and why AgentRun/ToolExecution detail (Chunk 1/2) carry no "pending approval" section — no real, filtered join exists in either direction (master prompt Part H, "no relationship inference"). |
+| Frozen action | `safe_context` is the frozen, already-redacted context the decision is made against — rendered read-only via the shared `StructuredPayload` viewer, never re-derived from the gated action's *current* state. |
+| Audit | Every decision emits a real `AuditAction.APPROVAL_APPROVED`/`APPROVAL_REJECTED` event server-side (`approvals/services.py decide_approval`) — not surfaced in any UI here (no Audit UI exists), but real and verifiable via a direct DB check. |
+
+**Decision safety** (master prompt Part B, the reason this is the first
+Chunk with mutations):
+
+- **No blind retry.** `useDecideApprovalMutation` sets `retry: 0` explicitly
+  (TanStack Query v5's own mutation default is already 0 — asserted here,
+  not just relied on).
+- **Duplicate-submit blocked.** Both Approve and Reject are disabled the
+  instant a decision is in flight (`mutation.isPending`), reset only by the
+  mutation settling — never optimistically re-enabled before the server
+  responds.
+- **No optimistic state.** The UI never marks "Approved"/"Rejected" before
+  the server confirms; on success, the server's *returned* row replaces the
+  cached detail directly (`setQueryData`), and the list cache is invalidated
+  — never a locally-guessed status.
+- **Already-decided / expired / self-approval-forbidden / permission-denied
+  conflicts** (backend: `ApprovalAlreadyResolvedError`, `ApprovalExpiredError`,
+  `ApprovalSelfApprovalForbiddenError`, `ApprovalPermissionDeniedError`, all
+  surfaced as 409/403 with a safe message) are handled uniformly: the
+  mutation's `onError` refetches the approval detail, so the real, current
+  server state — not a guess — always redraws the page. The failed
+  attempt's safe message is also shown inline, verbatim, never swallowed.
+- **Consequence honesty.** A successful decision never claims "Action
+  executed successfully" — Approve only means the decision was accepted;
+  the gated action may still resume asynchronously. The UI says exactly
+  that ("...may still be completing asynchronously") rather than implying
+  completion.
+- **Concurrent decisions converge.** Proven end-to-end (`e2e/approvals.spec.ts`):
+  two real sessions racing Approve vs. Reject on the same request always
+  converge to the same single, real, server-persisted outcome — enforced by
+  the backend's `select_for_update` + one-decision-per-request DB constraint
+  (`approvals/models.py`), never a frontend-side lock.
+
+**Permission model**: Approval authority is a linear escalation
+(`support_manager` < `admin` < `owner`) distinct from the workspace's
+general capability RBAC — mirrored client-side as `roleSatisfiesRequirement`
+(`features/approvals/types.ts`) purely to decide whether to *show* Approve/
+Reject at all, using the caller's own real, already-fetched workspace role
+(`useWorkspace().activeWorkspace.role`, from `/auth/me/`) — never inferred
+from email/name. The backend remains fully authoritative and re-derives
+this from the caller's *current* DB membership on every decide call
+regardless of what the UI renders (proven directly: `e2e/approvals.spec.ts`'s
+permission-denial case attempts a real decide call as a `support_agent`,
+which the backend genuinely rejects).
+
+**Approval routes**: `/app/approvals` (list, defaults to `status=pending`)
+and `/app/approvals/[approvalId]` (detail, with Approve/Reject when
+actionable and permitted). Both are new top-level nav entries.
+
+**Human Handoff API contract** (read-only this chunk):
+
+| Question | Answer |
+| --- | --- |
+| List | `GET /api/v1/workspaces/{workspace_id}/handoffs/` — any active member. |
+| Detail | `GET .../handoffs/{handoff_id}/` — any active member. |
+| Assign / Resolve | Real endpoints exist (`HumanHandoffAssignView`/`HumanHandoffResolveView`, manager-role-gated) but are **not implemented in this chunk** — master prompt Part G explicitly allows read-only-only ("Read-only is acceptable"), and mutating a handoff pulls in a second manager-only RBAC surface this chunk's scope didn't budget for. Documented here, not silently omitted. |
+| Statuses | `pending`, `assigned`, `resolved`, `cancelled`. |
+| Conversation / AgentRun / Ticket relation | **Real** — `HumanHandoffSerializer` exposes `conversation_id`, `agent_run_id` (nullable), `ticket_id` (nullable) directly, unlike `ApprovalRequest`. Every real relation gets a real link; a null one gets an honest "— (not tied to a …)" note, never a guessed link. |
+| Filters | `status` and `conversation` are both real (`tickets/selectors.py handoff_list_for_workspace`) — notably **not** `agent_run`, which is why AgentRun detail carries no "related handoff" section (no real filtered join exists for that direction either). |
+
+**Placement**: a standalone `/app/handoffs` + `/app/handoffs/[handoffId]`
+route (justified — `HumanHandoffListView` is a real, filterable, paginated
+operational queue, the same shape as Approvals) **and** a compact "Human
+handoff" section embedded in Conversation detail (`/app/inbox/[id]`), using
+the real `conversation` filter — never a guessed join. A conversation may
+have at most one *active* handoff at a time
+(`handoff_one_active_per_conversation`), but the section renders whatever
+real rows the filter returns (including a resolved, non-active one), never
+hard-codes "only the active one."
+
+**Security/redaction**: Handoff carries only `safe_summary` (a bounded,
+pre-written string) and structured status/reason fields — no raw model
+reasoning, no arbitrary payload rendering needed here (unlike Approval's
+`safe_context`, which reuses the same `StructuredPayload` safe-viewer as
+Chunk 2's redacted tool payloads).
+
+**Backend defect discovered in Chunk 3, fixed in Chunk 3A** (real,
+pre-existing, cross-cutting): every view that raised a plain
+`django.http.Http404` (essentially every "get one resource or 404" selector
+across the whole backend — `agents/selectors.py`, `approvals/views.py`,
+`tickets/selectors.py`, etc.) used to get mis-coded by
+`common/exceptions.py`'s `custom_exception_handler` as
+`{"error": {"code": "validation_error", ...}}` instead of `"not_found"`,
+even though the real HTTP status was a genuine 404. Root cause: DRF's own
+`exception_handler` converts `Http404` → `NotFound` _inside its own call
+frame_; the outer `custom_exception_handler(exc, context)` still saw the
+original, un-converted `Http404` when it computed the stable error code, so
+`_stable_code_for(exc)`'s `isinstance(exc, NotFound)` check never matched.
+**Fixed** (Chunk 3A, `common/exceptions.py`): `_stable_code_for` now maps
+`django.http.Http404` directly to `"not_found"`, alongside DRF's own
+`NotFound`. Canonical invariant going forward: **HTTP 404 always implies
+`error.code === "not_found"`**, for every domain. `ApprovalDetailPage`/
+`HandoffDetailPage` were realigned from their Chunk 3 `error.status === 404`
+workaround to the same `error.code === "not_found"` check already used by
+`AgentRunDetailPage`, `ConversationDetailPage`, `TicketDetailPage`, and
+`CustomerDetailPage` — one consistent not-found pattern across every detail
+page. See defect `P20-404-01`.
+
 ## Local development
 
 1. Start the backend (see `../README.md`) so `NEXT_PUBLIC_API_BASE_URL`
@@ -1368,7 +1656,81 @@ customer-detail-page.test.tsx` with the new `RelatedTicketsPanel`/
 detail routes, the real `?customer=` "View all" links, and a distinct empty
 state per panel when the customer has no related records yet.
 
-## End-to-end tests (`e2e/`, Phase 18 Chunk 4; extended Phase 19 Chunks 1-3)
+Added in Phase 20 Chunk 1 (`src/tests/features/agent-runs/`): the agent-run
+query-key factory (disjoint per-workspace, per-status-filter, and
+per-run-ID `detail`/`steps` keys); URL query-string parsing/serialization
+for the status filter (defaults, malformed input, round-tripping); the
+agent-run API boundary's request shape (default params send no query
+string; `status` sent correctly; the backend-dead `search`/`ordering` never
+sent); the full list/detail matrix — real data rendering, empty vs.
+network-error (both with Retry), the status filter with pagination
+preserving it, a confirmed 404, a run belonging to a *different* workspace
+resolving to the same safe not-found UI, a malformed route ID rejected with
+zero network requests, an unrecognized future status value rendering a safe
+fallback, the real Conversation and Ticket cross-links (and the honest
+"not tied to a conversation/ticket" case when either is null), a rendered
+failure block for a failed run, and the workspace-isolation regression
+(switching the active workspace mid-session causing the old workspace's run
+to disappear from the DOM immediately); and a dedicated
+`polling.test.tsx` covering the terminal/non-terminal polling decision as
+pure logic plus a fake-timer integration test proving a real
+`AgentRunDetailPage` stops issuing detail requests the moment the backend
+reports a terminal status.
+
+Added in Phase 20 Chunk 2 (`src/tests/features/tool-executions/`,
+`src/tests/components/support/structured-payload.test.tsx`): the
+tool-execution query-key factory (disjoint per-workspace, per-run, and
+catalog keys); the API boundary's real request shape (`agent_run_id` sent,
+`search`/`ordering` never sent); `deriveApprovalContext`'s pure decision
+logic for every real status/`error_code` combination, including an
+unrecognized future `error_code` falling back safely; the shared
+`StructuredPayload` viewer (null/empty-object → dash, empty array rendered
+as real content, structured object/array/primitive payloads, long-string
+wrapping, pathological-length truncation, HTML/script-looking content
+proven inert via a real `window` marker check, a redacted placeholder
+rendered verbatim, and the native disclosure semantics); and the full
+`ToolExecutionList` matrix — empty state, a successful execution with real
+catalog-derived risk/side-effect badges, a failed execution's safe error
+fields, honest multi-attempt rendering, the read-only
+waiting/approval-terminated-with-reason states with no Approve/Reject
+control anywhere in the DOM, a redacted argument rendered exactly as sent,
+verbatim (never re-sorted) ordering for two same-timestamp executions,
+an unrecognized future status value, network-error-with-retry, and a
+regression asserting no manual Retry Tool/Run Tool/Execute action exists.
+A dedicated `polling.test.tsx` proves the run's *entire* tool-execution
+list is polled as one request per interval while non-terminal (never one
+request per execution), that polling stops once the owning run turns
+terminal, and that the tool catalog is never polled.
+
+Added in Phase 20 Chunk 3 (`src/tests/features/approvals/`,
+`src/tests/features/handoffs/`): the approval/handoff query-key factories
+(disjoint per-workspace, per-list-params, per-detail-ID, and — for
+handoffs — per-conversation-filter keys); `isTerminalApprovalStatus`/
+`isActionableApprovalStatus`/`roleSatisfiesRequirement`'s pure decision
+logic, including an unrecognized future role/status falling back safely;
+the API boundary's real request shapes (`status` sent, `search`/`ordering`
+never sent; `approveApproval`/`rejectApproval` POSTing only `{comment}`);
+and the full `ApprovalDetailPage` matrix — pending/approved/rejected/
+expired/unknown-status rendering, frozen `safe_context` rendered via
+`StructuredPayload` (redaction preserved verbatim), a real Approve and a
+real Reject each ending with the honest "may still be completing
+asynchronously" wording and no lingering controls, duplicate-submit
+blocked via a delayed-response mock proving both controls are disabled
+mid-flight and a second click is inert, an already-decided 409 conflict
+refetching to show the real terminal state (never a catastrophic error),
+a backend permission-denial showing the safe message without corrupting
+local state, terminal-state fields (outcome/decided-by/comment) for an
+already-resolved approval, a confirmed 404, and a foreign-workspace
+approval resolving to the same safe not-found UI. A dedicated
+`polling.test.tsx` proves the approval detail polls every interval only
+while `pending`, picks up another operator's real decision, and stops
+polling once terminal. `ApprovalsListPage`/`HandoffsListPage`/
+`HandoffDetailPage`/`ConversationHandoffSection` get the same list/detail/
+empty/error/workspace-isolation/unknown-status coverage as every other
+domain, plus a conversation-scoped test proving only the real
+`conversation`-filtered rows render.
+
+## End-to-end tests (`e2e/`, Phase 18 Chunk 4; extended Phase 19 Chunks 1-3, Phase 20 Chunks 1-3)
 
 Playwright (`@playwright/test`), Chromium only — the mandatory acceptance
 browser for this phase; Firefox/WebKit weren't added (single-browser
@@ -1466,6 +1828,100 @@ landing on the same contextual, filtered Tickets list); a workspace switch
 swapping the visible ticket list; a ticket ID from a different workspace
 deep-linked directly resolving to the safe not-found UI; and logout from
 Tickets.
+
+**Added in Phase 20 Chunk 1** (`e2e/agent-runs.spec.ts`) — the same kind of
+real-backend smoke proof for Agent Runs: listing the active workspace's real
+runs (created directly via Django ORM fixtures in `global-setup.ts` —
+`AgentDefinition`/`AgentVersion`/`AgentRun`/`AgentStep` rows, deliberately
+not through the orchestration service, since that would make real provider
+calls) and filtering by status (including a real `running`, non-terminal
+row); opening a run to see real fields, its safe execution trace
+(`run_started`/`run_completed` steps), and its final response; the real
+Agent Run → Conversation and Agent Run → Ticket navigation; the honest
+no-conversation/no-ticket case for a manually-triggered run; a workspace
+switch swapping the visible run list; a run ID from a different workspace
+deep-linked directly resolving to the safe not-found UI, with its response
+text asserted absent (never leaked); and logout from Agent Runs.
+`AgentRun.agent_version` is `on_delete=PROTECT` (`agents/models.py`), so
+`global-teardown.ts` deletes E2E `AgentRun` rows explicitly before the
+`Workspace` cascade delete — Django's cascade collector does not resolve a
+`PROTECT` FK against a same-transaction cascade on its own.
+
+**Added in Phase 20 Chunk 2** (`e2e/tool-executions.spec.ts`) — the same
+kind of real-backend smoke proof for Tool Executions, embedded in Agent Run
+detail: a real successful `demo.echo` execution with its catalog-derived
+`risk_level`/`side_effect_type` badges and structured JSON result visible
+without needing to expand a disclosure (defaults open); a real failed
+`demo.flaky` execution's safe error code/message with no
+traceback/`File "..."` text anywhere on the page; a real backend-redacted
+argument (`***REDACTED***`, from a FAKE seeded secret-shaped value — the
+seeded fake secret string itself is asserted absent, proving the actual
+backend redaction contract rather than a frontend guess); the real
+read-only `waiting_for_approval` status on a non-terminal run with no
+Approve/Reject control; a regression asserting no manual
+Retry/Run/Execute tool action exists anywhere; and a workspace switch
+proving a foreign run's tool executions are never visible (the run itself
+already resolves to its own real, empty-for-that-workspace list).
+`global-setup.ts` also calls the real, idempotent `sync_tool_definitions()`
+(the same call the `seed_demo` management command and data migration make)
+to populate the code-owned `ToolDefinition` catalog, then creates real
+`ToolBinding`/`ToolExecution` rows directly via the ORM — never through the
+execution runtime, which would require a real bounded worker
+call. `ToolExecution.tool_binding`/`tool_definition`/`agent_version` are
+all `on_delete=PROTECT` too, so `global-teardown.ts` deletes E2E
+`ToolExecution` rows before `AgentRun` rows, before the `Workspace` cascade
+— the same ordering constraint as Chunk 1's `AgentRun` fix, one level
+deeper.
+
+**Added in Phase 20 Chunk 3** (`e2e/approvals.spec.ts`,
+`e2e/handoffs.spec.ts`) — the first real-backend acceptance proof of a
+sensitive mutation: the real pending queue and a pending approval's frozen,
+already-redacted context; a real Approve and a real Reject each verified
+to persist across a page reload (not just local state); a genuine
+concurrent-decision race between two independent logged-in browser
+contexts (Approve vs. Reject on the same request, fired near-simultaneously)
+proven to converge to one real, identical, server-persisted outcome in
+both tabs; an already-expired approval with no Approve/Reject anywhere; an
+already-decided approval rendering its real terminal decision (outcome,
+decided-by, comment); a genuine permission denial — a real `support_agent`
+membership can view but the backend truly refuses to let it decide, proven
+by attempting the real decide call, not just hiding the button; a
+foreign-workspace approval deep-link resolving to the same safe not-found
+UI; and a regression asserting no manual tool-execution or handoff mutation
+control exists anywhere on the Approval screen. The handoff spec proves the
+real queue, a resolved handoff's real Ticket link and assignee, the
+conversation-embedded handoff section via the real `conversation` filter
+(including a resolved, non-active row — proving real data, not an
+"active-only" shortcut), workspace isolation, and that no Assign/Resolve
+control exists (read-only this chunk). `global-setup.ts` builds real
+`ApprovalRequest` rows directly via the ORM — `RiskAssessment`/
+`PolicyEvaluation` alongside them, mirroring exactly what
+`approvals.services.create_or_reuse_approval_request` persists for a real
+`payment.refund` gate (verified empirically against the real serializer
+before writing the fixture) — never through the orchestration/policy-gate
+path, which would require a live-or-faked payment provider call.
+`ApprovalRequest.risk_assessment` is `on_delete=PROTECT` against
+`RiskAssessment`, which itself cascades from `ToolExecution` — one level
+deeper than Chunk 2's `ToolExecution`-before-`AgentRun` ordering —
+so `global-teardown.ts` deletes `ApprovalRequest` (and its cascaded
+`ApprovalDecision`) before `ToolExecution`, before `AgentRun`, before the
+`Workspace` cascade. The approval fixtures deliberately use dedicated
+`AgentRun` rows (`ws_a_approvals_run`/`ws_b_approvals_run`), never
+`ws_a_agent_run`/`ws_b_agent_run_running` — reusing either broke Chunk 2's
+own "this run has zero tool executions" / "this run has exactly one
+waiting-for-approval execution" fixture invariants, caught by Chunk 2's own
+E2E spec failing during this chunk's full-suite regression run.
+
+**Real backend defect found via this chunk's own E2E assertions**: the
+foreign-workspace-approval not-found case initially failed against the real
+backend — not a test bug, but the mis-coded-404 backend defect documented
+above ("Approvals + Human Handoff", "Known backend defect discovered this
+chunk"). Root-caused by inspecting the real response body (Playwright
+response listener, not a mock), confirmed to affect AgentRun's equivalent
+route too (masked there only because that route's Http404 message text
+happens to overlap the E2E assertion's substring match). Fixed at the
+frontend layer only, in this chunk's own new components; no backend file
+was modified.
 
 **Login volume, deliberately kept realistic rather than exhaustive**: even
 with the throttle raised, a handful of tests (routing's `?next` cases, the
