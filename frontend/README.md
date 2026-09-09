@@ -1332,6 +1332,134 @@ calling code ever references the confusing generated name. Not blocking.
 Human Handoff visibility, and any top-level nav destination for those
 domains. Chunk 2 adds no new route and no new nav entry.
 
+### Approvals + Human Handoff (Phase 20 Chunk 3)
+
+The first Chunk with a sensitive mutation: Approve/Reject a real, pending
+`ApprovalRequest`. Human Handoff is read-only this chunk (see below).
+
+**Approval API contract**:
+
+| Question | Answer |
+| --- | --- |
+| List | `GET /api/v1/workspaces/{workspace_id}/approvals/` — any active member (`ApprovalRequestListView`). Ordered `created_at, id` (pending-first, oldest first) — never client-sorted. |
+| Detail | `GET .../approvals/{approval_id}/` — any active member. |
+| Approve | `POST .../approvals/{approval_id}/approve/` — the URL is the decision; body is `{comment?: string}` only (`ApprovalDecisionInputSerializer`). No client-suppliable `decision`/`decided_by`/`required_role`. |
+| Reject | `POST .../approvals/{approval_id}/reject/` — same shape. |
+| Pagination | Backend-standard `PageNumberPagination`, page size 50. |
+| Filters | `status`, `required_role`, `tool_key` are all real (`approvals/views.py`); only `status` is surfaced in this chunk's list UI. |
+| Statuses | `pending`, `approved`, `rejected`, `expired`, `cancelled` (`ApprovalStatusEnum`). Only `pending` is actionable; every other value — including any future one this frontend doesn't recognize — is treated as non-actionable, never assumed decidable (safe fallback, `isActionableApprovalStatus`). |
+| Expiry | Server-authoritative: `expires_at` is a real field, but the frontend's clock is never treated as the source of truth for whether a decision will be honored — an already-expired-server-side `pending`-looking row still gets a real 409 from a decide call, handled the same as any other conflict (see "Decision safety" below). |
+| Requester/decider identity | `requested_by`/`decision.decided_by` are raw `accounts.User` numeric IDs — no membership/email expansion exists on either serializer. Rendered honestly as `User #<id>`, never resolved to a name/email the API doesn't provide (no guessing via a separate broad members query). |
+| AgentRun / ToolExecution / Conversation relation | **None.** `ApprovalRequestSerializer` exposes no `tool_execution_id`, `agent_run_id`, or `conversation_id` field at all (verified directly against the real serializer before building this UI) — only `safe_context` (an opaque JSON blob with `tool_key`/`tool_display_name`/`risk_level`/`side_effect_type`/`policy_reason`/`arguments`). This is why Approval detail carries no "View run"/"View execution" link, and why AgentRun/ToolExecution detail (Chunk 1/2) carry no "pending approval" section — no real, filtered join exists in either direction (master prompt Part H, "no relationship inference"). |
+| Frozen action | `safe_context` is the frozen, already-redacted context the decision is made against — rendered read-only via the shared `StructuredPayload` viewer, never re-derived from the gated action's *current* state. |
+| Audit | Every decision emits a real `AuditAction.APPROVAL_APPROVED`/`APPROVAL_REJECTED` event server-side (`approvals/services.py decide_approval`) — not surfaced in any UI here (no Audit UI exists), but real and verifiable via a direct DB check. |
+
+**Decision safety** (master prompt Part B, the reason this is the first
+Chunk with mutations):
+
+- **No blind retry.** `useDecideApprovalMutation` sets `retry: 0` explicitly
+  (TanStack Query v5's own mutation default is already 0 — asserted here,
+  not just relied on).
+- **Duplicate-submit blocked.** Both Approve and Reject are disabled the
+  instant a decision is in flight (`mutation.isPending`), reset only by the
+  mutation settling — never optimistically re-enabled before the server
+  responds.
+- **No optimistic state.** The UI never marks "Approved"/"Rejected" before
+  the server confirms; on success, the server's *returned* row replaces the
+  cached detail directly (`setQueryData`), and the list cache is invalidated
+  — never a locally-guessed status.
+- **Already-decided / expired / self-approval-forbidden / permission-denied
+  conflicts** (backend: `ApprovalAlreadyResolvedError`, `ApprovalExpiredError`,
+  `ApprovalSelfApprovalForbiddenError`, `ApprovalPermissionDeniedError`, all
+  surfaced as 409/403 with a safe message) are handled uniformly: the
+  mutation's `onError` refetches the approval detail, so the real, current
+  server state — not a guess — always redraws the page. The failed
+  attempt's safe message is also shown inline, verbatim, never swallowed.
+- **Consequence honesty.** A successful decision never claims "Action
+  executed successfully" — Approve only means the decision was accepted;
+  the gated action may still resume asynchronously. The UI says exactly
+  that ("...may still be completing asynchronously") rather than implying
+  completion.
+- **Concurrent decisions converge.** Proven end-to-end (`e2e/approvals.spec.ts`):
+  two real sessions racing Approve vs. Reject on the same request always
+  converge to the same single, real, server-persisted outcome — enforced by
+  the backend's `select_for_update` + one-decision-per-request DB constraint
+  (`approvals/models.py`), never a frontend-side lock.
+
+**Permission model**: Approval authority is a linear escalation
+(`support_manager` < `admin` < `owner`) distinct from the workspace's
+general capability RBAC — mirrored client-side as `roleSatisfiesRequirement`
+(`features/approvals/types.ts`) purely to decide whether to *show* Approve/
+Reject at all, using the caller's own real, already-fetched workspace role
+(`useWorkspace().activeWorkspace.role`, from `/auth/me/`) — never inferred
+from email/name. The backend remains fully authoritative and re-derives
+this from the caller's *current* DB membership on every decide call
+regardless of what the UI renders (proven directly: `e2e/approvals.spec.ts`'s
+permission-denial case attempts a real decide call as a `support_agent`,
+which the backend genuinely rejects).
+
+**Approval routes**: `/app/approvals` (list, defaults to `status=pending`)
+and `/app/approvals/[approvalId]` (detail, with Approve/Reject when
+actionable and permitted). Both are new top-level nav entries.
+
+**Human Handoff API contract** (read-only this chunk):
+
+| Question | Answer |
+| --- | --- |
+| List | `GET /api/v1/workspaces/{workspace_id}/handoffs/` — any active member. |
+| Detail | `GET .../handoffs/{handoff_id}/` — any active member. |
+| Assign / Resolve | Real endpoints exist (`HumanHandoffAssignView`/`HumanHandoffResolveView`, manager-role-gated) but are **not implemented in this chunk** — master prompt Part G explicitly allows read-only-only ("Read-only is acceptable"), and mutating a handoff pulls in a second manager-only RBAC surface this chunk's scope didn't budget for. Documented here, not silently omitted. |
+| Statuses | `pending`, `assigned`, `resolved`, `cancelled`. |
+| Conversation / AgentRun / Ticket relation | **Real** — `HumanHandoffSerializer` exposes `conversation_id`, `agent_run_id` (nullable), `ticket_id` (nullable) directly, unlike `ApprovalRequest`. Every real relation gets a real link; a null one gets an honest "— (not tied to a …)" note, never a guessed link. |
+| Filters | `status` and `conversation` are both real (`tickets/selectors.py handoff_list_for_workspace`) — notably **not** `agent_run`, which is why AgentRun detail carries no "related handoff" section (no real filtered join exists for that direction either). |
+
+**Placement**: a standalone `/app/handoffs` + `/app/handoffs/[handoffId]`
+route (justified — `HumanHandoffListView` is a real, filterable, paginated
+operational queue, the same shape as Approvals) **and** a compact "Human
+handoff" section embedded in Conversation detail (`/app/inbox/[id]`), using
+the real `conversation` filter — never a guessed join. A conversation may
+have at most one *active* handoff at a time
+(`handoff_one_active_per_conversation`), but the section renders whatever
+real rows the filter returns (including a resolved, non-active one), never
+hard-codes "only the active one."
+
+**Security/redaction**: Handoff carries only `safe_summary` (a bounded,
+pre-written string) and structured status/reason fields — no raw model
+reasoning, no arbitrary payload rendering needed here (unlike Approval's
+`safe_context`, which reuses the same `StructuredPayload` safe-viewer as
+Chunk 2's redacted tool payloads).
+
+**Known backend defect discovered this chunk** (real, pre-existing,
+cross-cutting — not introduced by Chunk 3, not fixed here since it requires
+a backend change and this chunk's scope is frontend-only): every view that
+raises a plain `django.http.Http404` (essentially every "get one resource
+or 404" selector across the whole backend — `agents/selectors.py`,
+`approvals/views.py`, `tickets/selectors.py`, etc.) gets mis-coded by
+`common/exceptions.py`'s `custom_exception_handler` as
+`{"error": {"code": "validation_error", ...}}` instead of `"not_found"`,
+even though the real HTTP status is a genuine 404. Root cause: DRF's own
+`exception_handler` converts `Http404` → `NotFound` *inside its own call
+frame*; the outer `custom_exception_handler(exc, context)` still sees the
+original, un-converted `Http404` when it computes the stable error code, so
+`_stable_code_for(exc)`'s `isinstance(exc, NotFound)` check never matches.
+Verified directly against the real running backend (both for a fresh
+Approval 404 and, retroactively, for AgentRun's — the exact same defect,
+present since Phase 8/masked in Chunk 1's E2E suite only because the
+backend's auto-generated Http404 message text for that one route happened
+to still contain the literal substring the assertion checked for).
+**Frontend workaround** (this chunk's own components only, in scope):
+`ApprovalDetailPage`/`HandoffDetailPage` check `error.status === 404`
+(the real HTTP status, unaffected by the mis-coded envelope) instead of
+`error.code === "not_found"`. Chunk 1/2's equivalent checks
+(`AgentRunDetailPage`, `ConversationDetailPage`, `TicketDetailPage`,
+`CustomerDetailPage`) still use the fragile `error.code` check and are
+*not* touched here (out of this chunk's scope) — they remain correct in
+intent but rely on the same latent backend defect not mattering in
+practice for their own E2E assertions. A dedicated backend fix (making
+`custom_exception_handler` special-case `Http404` the same way DRF's own
+handler does) is recommended before the next phase that adds more
+not-found-sensitive UI.
+
 ## Local development
 
 1. Start the backend (see `../README.md`) so `NEXT_PUBLIC_API_BASE_URL`
@@ -1583,7 +1711,35 @@ list is polled as one request per interval while non-terminal (never one
 request per execution), that polling stops once the owning run turns
 terminal, and that the tool catalog is never polled.
 
-## End-to-end tests (`e2e/`, Phase 18 Chunk 4; extended Phase 19 Chunks 1-3, Phase 20 Chunks 1-2)
+Added in Phase 20 Chunk 3 (`src/tests/features/approvals/`,
+`src/tests/features/handoffs/`): the approval/handoff query-key factories
+(disjoint per-workspace, per-list-params, per-detail-ID, and — for
+handoffs — per-conversation-filter keys); `isTerminalApprovalStatus`/
+`isActionableApprovalStatus`/`roleSatisfiesRequirement`'s pure decision
+logic, including an unrecognized future role/status falling back safely;
+the API boundary's real request shapes (`status` sent, `search`/`ordering`
+never sent; `approveApproval`/`rejectApproval` POSTing only `{comment}`);
+and the full `ApprovalDetailPage` matrix — pending/approved/rejected/
+expired/unknown-status rendering, frozen `safe_context` rendered via
+`StructuredPayload` (redaction preserved verbatim), a real Approve and a
+real Reject each ending with the honest "may still be completing
+asynchronously" wording and no lingering controls, duplicate-submit
+blocked via a delayed-response mock proving both controls are disabled
+mid-flight and a second click is inert, an already-decided 409 conflict
+refetching to show the real terminal state (never a catastrophic error),
+a backend permission-denial showing the safe message without corrupting
+local state, terminal-state fields (outcome/decided-by/comment) for an
+already-resolved approval, a confirmed 404, and a foreign-workspace
+approval resolving to the same safe not-found UI. A dedicated
+`polling.test.tsx` proves the approval detail polls every interval only
+while `pending`, picks up another operator's real decision, and stops
+polling once terminal. `ApprovalsListPage`/`HandoffsListPage`/
+`HandoffDetailPage`/`ConversationHandoffSection` get the same list/detail/
+empty/error/workspace-isolation/unknown-status coverage as every other
+domain, plus a conversation-scoped test proving only the real
+`conversation`-filtered rows render.
+
+## End-to-end tests (`e2e/`, Phase 18 Chunk 4; extended Phase 19 Chunks 1-3, Phase 20 Chunks 1-3)
 
 Playwright (`@playwright/test`), Chromium only — the mandatory acceptance
 browser for this phase; Firefox/WebKit weren't added (single-browser
@@ -1725,6 +1881,56 @@ all `on_delete=PROTECT` too, so `global-teardown.ts` deletes E2E
 `ToolExecution` rows before `AgentRun` rows, before the `Workspace` cascade
 — the same ordering constraint as Chunk 1's `AgentRun` fix, one level
 deeper.
+
+**Added in Phase 20 Chunk 3** (`e2e/approvals.spec.ts`,
+`e2e/handoffs.spec.ts`) — the first real-backend acceptance proof of a
+sensitive mutation: the real pending queue and a pending approval's frozen,
+already-redacted context; a real Approve and a real Reject each verified
+to persist across a page reload (not just local state); a genuine
+concurrent-decision race between two independent logged-in browser
+contexts (Approve vs. Reject on the same request, fired near-simultaneously)
+proven to converge to one real, identical, server-persisted outcome in
+both tabs; an already-expired approval with no Approve/Reject anywhere; an
+already-decided approval rendering its real terminal decision (outcome,
+decided-by, comment); a genuine permission denial — a real `support_agent`
+membership can view but the backend truly refuses to let it decide, proven
+by attempting the real decide call, not just hiding the button; a
+foreign-workspace approval deep-link resolving to the same safe not-found
+UI; and a regression asserting no manual tool-execution or handoff mutation
+control exists anywhere on the Approval screen. The handoff spec proves the
+real queue, a resolved handoff's real Ticket link and assignee, the
+conversation-embedded handoff section via the real `conversation` filter
+(including a resolved, non-active row — proving real data, not an
+"active-only" shortcut), workspace isolation, and that no Assign/Resolve
+control exists (read-only this chunk). `global-setup.ts` builds real
+`ApprovalRequest` rows directly via the ORM — `RiskAssessment`/
+`PolicyEvaluation` alongside them, mirroring exactly what
+`approvals.services.create_or_reuse_approval_request` persists for a real
+`payment.refund` gate (verified empirically against the real serializer
+before writing the fixture) — never through the orchestration/policy-gate
+path, which would require a live-or-faked payment provider call.
+`ApprovalRequest.risk_assessment` is `on_delete=PROTECT` against
+`RiskAssessment`, which itself cascades from `ToolExecution` — one level
+deeper than Chunk 2's `ToolExecution`-before-`AgentRun` ordering —
+so `global-teardown.ts` deletes `ApprovalRequest` (and its cascaded
+`ApprovalDecision`) before `ToolExecution`, before `AgentRun`, before the
+`Workspace` cascade. The approval fixtures deliberately use dedicated
+`AgentRun` rows (`ws_a_approvals_run`/`ws_b_approvals_run`), never
+`ws_a_agent_run`/`ws_b_agent_run_running` — reusing either broke Chunk 2's
+own "this run has zero tool executions" / "this run has exactly one
+waiting-for-approval execution" fixture invariants, caught by Chunk 2's own
+E2E spec failing during this chunk's full-suite regression run.
+
+**Real backend defect found via this chunk's own E2E assertions**: the
+foreign-workspace-approval not-found case initially failed against the real
+backend — not a test bug, but the mis-coded-404 backend defect documented
+above ("Approvals + Human Handoff", "Known backend defect discovered this
+chunk"). Root-caused by inspecting the real response body (Playwright
+response listener, not a mock), confirmed to affect AgentRun's equivalent
+route too (masked there only because that route's Http404 message text
+happens to overlap the E2E assertion's substring match). Fixed at the
+frontend layer only, in this chunk's own new components; no backend file
+was modified.
 
 **Login volume, deliberately kept realistic rather than exhaustive**: even
 with the throttle raised, a handful of tests (routing's `?next` cases, the
