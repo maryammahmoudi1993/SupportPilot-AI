@@ -12,6 +12,7 @@ import {
 import { CustomerRefLink } from "@/components/support/customer-ref-link";
 import { MessageTimeline } from "@/features/conversations/components/message-timeline";
 import { useConversationDetailQuery, useMessageListQuery } from "@/features/conversations/queries";
+import { ConversationHandoffSection } from "@/features/handoffs/components/conversation-handoff-section";
 import { parseMessagePage } from "@/features/conversations/url-params";
 import { useWorkspace } from "@/features/workspace/workspace-provider";
 import { EntityNotFound } from "@/components/support/entity-not-found";
@@ -184,6 +185,15 @@ function ConversationDetailContent({
               )}
             </div>
           )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Human handoff</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <ConversationHandoffSection workspaceId={workspaceId} conversationId={conversationId} />
         </CardContent>
       </Card>
     </div>
