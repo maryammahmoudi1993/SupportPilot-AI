@@ -1248,6 +1248,90 @@ Execution detail UI, Approval list/detail + Approve/Reject, Human Handoff
 visibility, run cancellation, and any top-level nav destination for those
 domains.
 
+### Tool Executions + Execution Trace (Phase 20 Chunk 2)
+
+**Architecture decision — embedded, not standalone** (build prompt Part I
+§26): Tool Executions render inside Agent Run detail, in their own "Tool
+executions" card alongside the existing "Agent steps" card — no
+`/app/agent-runs/[runId]/tools/[executionId]` or `/app/tool-executions/...`
+route exists. The two are deliberately separate sections, not merged into
+one interleaved timeline: `AgentStep` and `ToolExecution` share no explicit
+join key (a step records `tool_requested`/`tool_execution_*` step *types*,
+but never a `tool_execution_id` FK) closer than "both belong to the same
+run," so fabricating a merged order would be inventing a relationship the
+backend doesn't expose. Both lists preserve their own backend-authoritative
+order verbatim (`AgentStep.sequence` ascending; `ToolExecution` list
+`-created_at, -id` descending) — never client-sorted.
+
+**Tool Execution API contract**:
+
+| Question | Answer |
+| --- | --- |
+| List | `GET /api/v1/workspaces/{workspace_id}/tools/tool-executions/` — any active member (`ToolExecutionListView`, no explicit permission override beyond workspace membership). |
+| Detail | `GET .../tools/tool-executions/{execution_id}/` — real, but **unused in Chunk 2**: the list, filtered by `agent_run_id`, already returns every field the detail endpoint would (same `ToolExecutionSerializer`), so fetching each row's detail individually would be a pure N+1 with zero additional information. |
+| Catalog | `GET /api/v1/workspaces/{workspace_id}/tools/` — code-owned, workspace-independent `ToolDefinition` metadata (same rows for every workspace). Fetched once per Agent Run detail view to attach each execution's real `risk_level`/`side_effect_type`/`display_name` (absent from `ToolExecution` itself). |
+| Pagination | Backend-standard `PageNumberPagination`, page size 50. Never paginated client-side in Chunk 2: an `AgentVersion.max_tool_calls` is server-capped at 20 (`agents/serializers.py`), so one run's tool-execution list is provably always a single page. |
+| Filters | `status` and `agent_run_id` — both real (`tools/selectors.py tool_execution_list_for_workspace`). Only `agent_run_id` is sent (this chunk has no standalone list UI to offer a `status` picker on). |
+| Ordering | Fixed backend order, `-created_at, -id` — rendered exactly as returned. |
+| Status enum | `pending`, `running`, `succeeded`, `failed`, `timed_out`, `cancelled`, `waiting_for_approval`, `blocked_by_policy`, `approval_terminated` (`ToolExecutionStatusEnum`). |
+| Terminal states | `succeeded`, `failed`, `timed_out`, `cancelled`, `blocked_by_policy`, `approval_terminated` — mirrored as `TOOL_EXECUTION_TERMINAL_STATUSES` (`features/tool-executions/types.ts`), matching `tools/models.py`. |
+| Attempts/retries | `attempt_count` — a single integer counter on the one `ToolExecution` row (Phase 6's idempotency model: one logical invocation, not one row per attempt). There is no per-attempt history (timestamp/output per retry) in the persisted schema, so none is fabricated — "Attempts: N" is rendered as exactly that, a count. |
+| Idempotency | `idempotency_key` (may be blank — a tool opted out) rendered as a plain field when present. No idempotency *behavior* is exposed or claimed beyond what the field itself says. |
+| Side-effect honesty | `ToolDefinition.side_effect_type` (`none`/`read`/`internal_write`/`external_write`/`financial`/`destructive`) is shown via `SideEffectBadge`, straight from the catalog — never a claim of "exactly once." Phase 10's real external-delivery guarantee is at-least-once; nothing in this UI says otherwise. |
+| Approval relation | **No direct FK** on `ToolExecution` to an `ApprovalRequest`. A real, read-only approval context is still derivable honestly from `ToolExecution`'s own fields: `status="waiting_for_approval"`/`"blocked_by_policy"` are already fully conveyed by the status badge; `status="approval_terminated"` additionally decodes its real `error_code` (`approval_rejected`/`approval_expired`/`approval_cancelled`, per `tools/models.py`'s `APPROVAL_TERMINATED` docstring) into a specific label via `deriveApprovalContext`. No Approve/Reject action, no link to a not-yet-existing Approval route (Chunk 3). |
+| Retry endpoint | Not supported by the public API (no manual retry is exposed to a client) — no Retry Tool action exists, matching the build prompt's Part G default. |
+| Redaction | Backend-primary: `arguments_redacted`/`result_redacted` are already redacted server-side before being persisted (`common/redaction.py redact()`, applied in `tools/execution.py`) — sensitive-looking keys (password/secret/token/api_key/authorization/…) are replaced with the literal string `"***REDACTED***"` before the row is ever written. The frontend renders exactly what it receives and never attempts to reconstruct a redacted value; the only frontend-side defense-in-depth is that payloads are never interpreted as markup (see below). |
+
+**Payload safety** (`components/support/structured-payload.tsx`, shared by
+`AgentStep.safe_metadata` and both `ToolExecution.arguments_redacted`/
+`result_redacted`): every value is `JSON.stringify`'d into a `<pre>` text
+node — never `dangerouslySetInnerHTML`, `eval`, or `new Function` — so
+HTML/script-looking content (a customer-supplied `<script>...</script>`, a
+prompt-injection string) is always inert plain text. A native
+`<details>`/`<summary>` disclosure gives correct keyboard/AT semantics for
+free (no hand-rolled `aria-expanded`). Bounded presentation: a fixed
+`max-h-64 overflow-auto` box so a large/deep value scrolls in place rather
+than stretching page layout, plus a defensive hard truncation past 20,000
+serialized characters (backend payloads are already size-capped upstream —
+this is a last-resort guard). No object key or string value is ever
+auto-linked as a URL, and no untrusted object is ever spread into an
+application/config object.
+
+**Network pattern** (Agent Run detail, one page):
+
+- Terminal run: 4 requests total, once — run detail, steps, tool-execution
+  list (filtered by `agent_run_id`), tool catalog. No further requests.
+- Non-terminal run: the same 4 requests initially, then run detail, steps,
+  and the tool-execution list each re-fetch every `AGENT_RUN_POLL_INTERVAL_MS`
+  (5000ms) while non-terminal — 3 requests per interval, never N (one per
+  tool execution). The catalog is never re-fetched (code-owned, static for
+  the session; default 30s query staleTime already covers a return visit).
+  All polling shares the same non-terminal-run condition — one coherent
+  policy, not independent timers — and stops for good on the same poll
+  cycle a fetch observes the run reach a terminal status.
+
+**Workspace isolation**: `toolExecutionKeys` follows the same
+`["workspaces", workspaceId, "tool-executions", "for-run", runId]` /
+`["workspaces", workspaceId, "tools", "catalog"]` shape as every other
+domain. No standalone Tool Execution route exists to deep-link into a
+foreign workspace's execution directly; the only real access path is
+through an Agent Run already scoped to the active workspace (a run ID from
+another workspace already resolves to the run-detail not-found state — see
+Chunk 1 — so its tool executions are unreachable by construction, not by a
+separate check).
+
+**Known schema gap**: `ToolDefinition.status` is generated as
+`WebhookEndpointStatusEnum` (`"active" | "disabled"`) rather than a
+tool-specific enum name — a drf-spectacular component-naming collision
+(two unrelated two-value status enums with identical literal values). The
+values are correct; only the generated name is misleading. Re-typed as
+`ToolDefinitionStatusValue` in `features/tool-executions/types.ts` so no
+calling code ever references the confusing generated name. Not blocking.
+
+**Deferred to Chunk 3**: Approval list/detail, Approve/Reject actions,
+Human Handoff visibility, and any top-level nav destination for those
+domains. Chunk 2 adds no new route and no new nav entry.
+
 ## Local development
 
 1. Start the backend (see `../README.md`) so `NEXT_PUBLIC_API_BASE_URL`
@@ -1474,7 +1558,32 @@ pure logic plus a fake-timer integration test proving a real
 `AgentRunDetailPage` stops issuing detail requests the moment the backend
 reports a terminal status.
 
-## End-to-end tests (`e2e/`, Phase 18 Chunk 4; extended Phase 19 Chunks 1-3, Phase 20 Chunk 1)
+Added in Phase 20 Chunk 2 (`src/tests/features/tool-executions/`,
+`src/tests/components/support/structured-payload.test.tsx`): the
+tool-execution query-key factory (disjoint per-workspace, per-run, and
+catalog keys); the API boundary's real request shape (`agent_run_id` sent,
+`search`/`ordering` never sent); `deriveApprovalContext`'s pure decision
+logic for every real status/`error_code` combination, including an
+unrecognized future `error_code` falling back safely; the shared
+`StructuredPayload` viewer (null/empty-object → dash, empty array rendered
+as real content, structured object/array/primitive payloads, long-string
+wrapping, pathological-length truncation, HTML/script-looking content
+proven inert via a real `window` marker check, a redacted placeholder
+rendered verbatim, and the native disclosure semantics); and the full
+`ToolExecutionList` matrix — empty state, a successful execution with real
+catalog-derived risk/side-effect badges, a failed execution's safe error
+fields, honest multi-attempt rendering, the read-only
+waiting/approval-terminated-with-reason states with no Approve/Reject
+control anywhere in the DOM, a redacted argument rendered exactly as sent,
+verbatim (never re-sorted) ordering for two same-timestamp executions,
+an unrecognized future status value, network-error-with-retry, and a
+regression asserting no manual Retry Tool/Run Tool/Execute action exists.
+A dedicated `polling.test.tsx` proves the run's *entire* tool-execution
+list is polled as one request per interval while non-terminal (never one
+request per execution), that polling stops once the owning run turns
+terminal, and that the tool catalog is never polled.
+
+## End-to-end tests (`e2e/`, Phase 18 Chunk 4; extended Phase 19 Chunks 1-3, Phase 20 Chunks 1-2)
 
 Playwright (`@playwright/test`), Chromium only — the mandatory acceptance
 browser for this phase; Firefox/WebKit weren't added (single-browser
@@ -1590,6 +1699,32 @@ text asserted absent (never leaked); and logout from Agent Runs.
 `global-teardown.ts` deletes E2E `AgentRun` rows explicitly before the
 `Workspace` cascade delete — Django's cascade collector does not resolve a
 `PROTECT` FK against a same-transaction cascade on its own.
+
+**Added in Phase 20 Chunk 2** (`e2e/tool-executions.spec.ts`) — the same
+kind of real-backend smoke proof for Tool Executions, embedded in Agent Run
+detail: a real successful `demo.echo` execution with its catalog-derived
+`risk_level`/`side_effect_type` badges and structured JSON result visible
+without needing to expand a disclosure (defaults open); a real failed
+`demo.flaky` execution's safe error code/message with no
+traceback/`File "..."` text anywhere on the page; a real backend-redacted
+argument (`***REDACTED***`, from a FAKE seeded secret-shaped value — the
+seeded fake secret string itself is asserted absent, proving the actual
+backend redaction contract rather than a frontend guess); the real
+read-only `waiting_for_approval` status on a non-terminal run with no
+Approve/Reject control; a regression asserting no manual
+Retry/Run/Execute tool action exists anywhere; and a workspace switch
+proving a foreign run's tool executions are never visible (the run itself
+already resolves to its own real, empty-for-that-workspace list).
+`global-setup.ts` also calls the real, idempotent `sync_tool_definitions()`
+(the same call the `seed_demo` management command and data migration make)
+to populate the code-owned `ToolDefinition` catalog, then creates real
+`ToolBinding`/`ToolExecution` rows directly via the ORM — never through the
+execution runtime, which would require a real bounded worker
+call. `ToolExecution.tool_binding`/`tool_definition`/`agent_version` are
+all `on_delete=PROTECT` too, so `global-teardown.ts` deletes E2E
+`ToolExecution` rows before `AgentRun` rows, before the `Workspace` cascade
+— the same ordering constraint as Chunk 1's `AgentRun` fix, one level
+deeper.
 
 **Login volume, deliberately kept realistic rather than exhaustive**: even
 with the throttle raised, a handful of tests (routing's `?next` cases, the
