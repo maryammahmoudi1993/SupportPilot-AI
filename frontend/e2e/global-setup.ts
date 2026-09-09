@@ -21,7 +21,9 @@ export const DATA_FILE = path.resolve(__dirname, ".e2e-data.json");
 
 const SETUP_SCRIPT = `
 import json
+from django.utils import timezone
 from accounts.models import User
+from agents.models import AgentDefinition, AgentProvider, AgentRun, AgentRunStatus, AgentRunTrigger, AgentStep, AgentStepStatus, AgentStepType, AgentVersion, AgentVersionStatus
 from conversations.models import Conversation, ConversationChannel, ConversationStatus, Message, MessageDirection, MessageSenderType
 from customers.models import Customer
 from tickets.models import Ticket, TicketPriority, TicketStatus
@@ -36,6 +38,9 @@ def make_user(username, email, first, last):
     return u
 
 User.objects.filter(email__startswith="e2e-").delete()
+# See global-teardown.ts for why AgentRun (on_delete=PROTECT from
+# AgentVersion) must be cleared before a Workspace cascade delete.
+AgentRun.objects.filter(workspace__name__startswith="E2E ").delete()
 Workspace.objects.filter(name__startswith="E2E ").delete()
 
 primary = make_user("e2e-primary", "e2e-primary@example.com", "E2E", "Primary")
@@ -162,6 +167,58 @@ Ticket.objects.bulk_create([
     for i in range(55)
 ])
 
+# Agent Runs domain (Phase 20 Chunk 1) — real cross-workspace AgentDefinition
+# / AgentVersion / AgentRun / AgentStep rows, created directly (not via the
+# orchestration service — that would make real, billed provider calls) so the
+# real-backend smoke can prove tenant isolation, status/lifecycle rendering,
+# real Run -> Conversation/Ticket cross-links, and non-terminal-run polling
+# against the actual API. Rows cascade/PROTECT per agents/models.py; deleted
+# by AgentDefinition.workspace CASCADE except AgentVersion (PROTECT from
+# AgentRun) — cleaned up in dependency order in global-teardown.ts.
+ws_b_agent_def = AgentDefinition.objects.create(workspace=ws_b, name="E2E Support Agent")
+ws_b_agent_version = AgentVersion.objects.create(
+    agent_definition=ws_b_agent_def, version=1, status=AgentVersionStatus.PUBLISHED,
+    provider=AgentProvider.FAKE, model="fake-v1", published_at=timezone.now(),
+)
+ws_b_agent_run_succeeded = AgentRun.objects.create(
+    workspace=ws_b, agent_version=ws_b_agent_version, conversation=ws_b_conversation,
+    ticket=ws_b_ticket, trigger=AgentRunTrigger.CONVERSATION, status=AgentRunStatus.SUCCEEDED,
+    input_message="My order hasn't arrived yet.",
+    final_response="Your refund has been processed.",
+    started_at=timezone.now(), completed_at=timezone.now(),
+    model_call_count=1, step_count=2, tool_call_count=0,
+    input_tokens=120, output_tokens=64, total_tokens=184,
+)
+AgentStep.objects.bulk_create([
+    AgentStep(
+        run=ws_b_agent_run_succeeded, workspace=ws_b, sequence=1,
+        step_type=AgentStepType.RUN_STARTED, status=AgentStepStatus.SUCCEEDED,
+    ),
+    AgentStep(
+        run=ws_b_agent_run_succeeded, workspace=ws_b, sequence=2,
+        step_type=AgentStepType.RUN_COMPLETED, status=AgentStepStatus.SUCCEEDED,
+        provider="fake", model="fake-v1", latency_ms=42,
+    ),
+])
+# Non-terminal (running) — real-backend smoke proves it renders correctly and
+# is the one status eligible for the frontend's polling behavior.
+ws_b_agent_run_running = AgentRun.objects.create(
+    workspace=ws_b, agent_version=ws_b_agent_version, trigger=AgentRunTrigger.MANUAL,
+    status=AgentRunStatus.RUNNING, input_message="Looking up account status.",
+    started_at=timezone.now(),
+)
+ws_a_agent_def = AgentDefinition.objects.create(workspace=ws_a, name="E2E Workspace A Agent")
+ws_a_agent_version = AgentVersion.objects.create(
+    agent_definition=ws_a_agent_def, version=1, status=AgentVersionStatus.PUBLISHED,
+    provider=AgentProvider.FAKE, model="fake-v1", published_at=timezone.now(),
+)
+ws_a_agent_run = AgentRun.objects.create(
+    workspace=ws_a, agent_version=ws_a_agent_version, trigger=AgentRunTrigger.MANUAL,
+    status=AgentRunStatus.SUCCEEDED, input_message="Workspace A only run.",
+    final_response="Workspace A only response.",
+    started_at=timezone.now(), completed_at=timezone.now(),
+)
+
 print(json.dumps({
     "primaryEmail": primary.email,
     "primaryPassword": PASSWORD,
@@ -194,6 +251,10 @@ print(json.dumps({
     "workspaceBResolvedTicketSubject": ws_b_resolved_ticket.subject,
     "workspaceATicketId": str(ws_a_ticket.id),
     "workspaceATicketSubject": ws_a_ticket.subject,
+    "workspaceBAgentRunSucceededId": str(ws_b_agent_run_succeeded.id),
+    "workspaceBAgentRunRunningId": str(ws_b_agent_run_running.id),
+    "workspaceAAgentRunId": str(ws_a_agent_run.id),
+    "workspaceAAgentRunResponse": ws_a_agent_run.final_response,
 }))
 `;
 

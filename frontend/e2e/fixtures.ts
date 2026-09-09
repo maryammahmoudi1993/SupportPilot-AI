@@ -35,6 +35,10 @@ export interface E2EData {
   workspaceBResolvedTicketSubject: string;
   workspaceATicketId: string;
   workspaceATicketSubject: string;
+  workspaceBAgentRunSucceededId: string;
+  workspaceBAgentRunRunningId: string;
+  workspaceAAgentRunId: string;
+  workspaceAAgentRunResponse: string;
 }
 
 let cached: E2EData | null = null;
