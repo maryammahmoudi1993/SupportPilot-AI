@@ -5,7 +5,8 @@
  * "Overview" entry. Phase 19 Chunk 1 added "Customers" once `/app/customers`
  * became a real route with real data. Phase 19 Chunk 2 added "Inbox" once
  * `/app/inbox` was real too. Phase 19 Chunk 3 adds "Tickets" now that
- * `/app/tickets` is real — see frontend/README.md, "Navigation". A stable
+ * `/app/tickets` is real. Phase 20 Chunk 1 adds "Agent Runs" now that
+ * `/app/agent-runs` is real — see frontend/README.md, "Navigation". A stable
  * `id`/`path` per entry lets feature code (e.g. workspace-scoped query-key
  * conventions) reference a destination without coupling to its label or
  * position. Do not add a destination whose route does not yet exist — an
@@ -23,4 +24,5 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { id: "inbox", label: "Inbox", path: "/app/inbox" },
   { id: "customers", label: "Customers", path: "/app/customers" },
   { id: "tickets", label: "Tickets", path: "/app/tickets" },
+  { id: "agent-runs", label: "Agent Runs", path: "/app/agent-runs" },
 ];
