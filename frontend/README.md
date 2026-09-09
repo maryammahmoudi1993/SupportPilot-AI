@@ -1163,6 +1163,91 @@ test seeding an unrecognized future value on both list and detail pages).
 No Phase 20+ destination (Agents, Approvals, Knowledge, Integrations,
 Evaluations) is present.
 
+### Agent Runs + lifecycle visibility (Phase 20 Chunk 1)
+
+**Route model**: `/app/agent-runs` (list) and `/app/agent-runs/[runId]`
+(detail) — same pattern as Tickets/Customers/Inbox. No duplicate route.
+"Agent Runs" is now the fifth clickable sidebar entry
+(`components/shell/nav-config.ts`) — Overview, Inbox, Customers, Tickets,
+Agent Runs. No Tool Execution/Approval/Handoff top-level destination exists
+yet (Chunks 2-3's job); Tool Executions/Approvals/Handoff, where real, will
+live inside Agent Run detail rather than as separate nav items, per the
+build prompt's Part E guidance.
+
+**Agent Run API contract**:
+
+| Question | Answer |
+| --- | --- |
+| List | `GET /api/v1/workspaces/{workspace_id}/agent-runs/` — any active member. |
+| Detail | `GET .../agent-runs/{run_id}/` — 404s exactly like a nonexistent run for one belonging to a different workspace (`agents/selectors.py agent_run_get_for_workspace_or_404`). |
+| Steps (execution trace) | `GET .../agent-runs/{run_id}/steps/` — safe, structured trace events only (`AgentStepSerializer`); never hidden chain-of-thought. |
+| Create | `POST .../agent-runs/` — starts a real run (`CanRunAgents` role, rate-limited). Not implemented — Chunk 1 is visibility-only, no run-triggering UI. |
+| Cancel | `POST .../agent-runs/{run_id}/cancel/` — real and backend-tested (`agents/orchestration.py cancel_support_agent_run`), 409 if not cancellable. **Deferred** (see below), not "not supported." |
+| Pagination | Backend-standard `PageNumberPagination` — `{count, next, previous, results}`, default page size 50. |
+| Filters | `status` (all 8 real enum values) and `agent_id` — both real (`agents/selectors.py agent_run_list_for_workspace`). Only `status` has a UI select; `agent_id` has no picker in Chunk 1 (no Agent Definition management UI exists) but is typed for a future caller. |
+| Ordering | Fixed backend order, `-created_at, -id` — no client sort control. |
+| Status enum | `pending`, `running`, `succeeded`, `failed`, `cancelled`, `budget_exceeded`, `waiting_for_approval`, `handed_off` (`AgentRunStatusEnum`). |
+| Terminal states | `succeeded`, `failed`, `cancelled`, `budget_exceeded`, `handed_off` — mirrored in the frontend as `AGENT_RUN_TERMINAL_STATUSES` (`features/agent-runs/types.ts`), not imported (separate deployables). `pending`/`running`/`waiting_for_approval` are non-terminal. |
+| Conversation relation | `conversation_id` — nullable. Links to the existing `/app/inbox/[conversationId]` route when present. |
+| Customer relation | **Not real on `AgentRun` itself** — no `customer_id` field exists on the serializer. Not inferred through Conversation (would require a second fetch per row/detail; the build prompt's Part F §55 rule against inferring un-exposed relationships applies the same way it did for Conversation → Ticket in Chunk 3). |
+| Ticket relation | `ticket_id` — nullable. Links to the existing `/app/tickets/[ticketId]` route when present. |
+| Tool execution relation | Real (`ToolExecution.agent_run` FK), but no `GET` list-by-run endpoint is exposed yet on `tools/urls.py` — Chunk 2's job. Not surfaced here beyond the run's own `tool_call_count` counter. |
+| Approval relation | Real (`ApprovalRequest.tool_execution` → `ToolExecution.agent_run`), transitively — no direct run-level approval list endpoint. Chunk 3's job. The run's `waiting_for_approval` status is visible today; the approval record itself is not. |
+| Handoff relation | Not surfaced — `AgentRun` carries no handoff FK/field in the current serializer. The `handed_off` terminal status is visible; the underlying `HumanHandoff` record is Chunk 3's job. |
+| Permissions | List/detail/steps: any `IsWorkspaceMember`. Create/cancel: `CanRunAgents` (owner/admin/support_manager/support_agent) — irrelevant to this read-only chunk. |
+
+**Schema gap (Category A)**: `status`/`agent_id` are real, backend-tested
+list filters absent from the generated `api_v1_workspaces_agent_runs_list`
+operation's query type (same global-filter-backend-inference gap as every
+prior domain) — narrowed explicitly in `features/agent-runs/api.ts`'s
+`AgentRunListQuery`. `ordering`/`search` are dead parameters; never sent.
+
+**Cancellation — explicitly deferred, not "unsupported"**: `POST
+.../cancel/` is a real, backend-tested capability. It is not implemented in
+Chunk 1 because (a) no other write/mutation pattern exists anywhere in this
+frontend yet to build on, and (b) the master prompt's Part F §28 explicitly
+sanctions deferring it ("If uncertain: DEFER"). Wiring it up requires the
+full required test matrix (duplicate-submission-blocked, `retry: 0`,
+terminal/conflict-state handling, invalidation-after-success) that Approve/
+Reject in Chunk 3 will need anyway — better built once, consistently, than
+half-built here.
+
+**Polling strategy** (`features/agent-runs/queries.ts`): there is no
+WebSocket/push channel on this backend for run progress, so a **non-terminal
+run's detail and step trace** are polled at a fixed `AGENT_RUN_POLL_INTERVAL_MS`
+(5000ms) via TanStack Query's `refetchInterval`, which re-evaluates against
+the *latest fetched status* on every scheduling decision — so polling stops
+on the very next check once a run turns terminal, not one cycle late. The
+**list is never polled** — Chunk 1 is a detail-first workflow (an operator
+opens one run to watch it); polling every row of a list would be a much
+heavier request volume for a lower-value signal. `refetchIntervalInBackground:
+false` additionally pauses polling for a backgrounded browser tab. Covered by
+`src/tests/features/agent-runs/polling.test.tsx`: a pure-logic test of the
+terminal/non-terminal decision function, plus a fake-timer integration test
+proving a real component stops issuing detail requests once the backend
+reports a terminal status.
+
+**No client N+1**: the Agent Runs list issues exactly one request per
+page/filter change. Run detail issues exactly two requests (the run itself,
+and its step trace) — no per-step or per-tool-execution fetch.
+
+**Query-key / cache consistency**: `agentRunKeys` follows the same
+`["workspaces", workspaceId, "agent-runs", ...]` shape as every other
+domain (`features/agent-runs/query-keys.ts`), with a dedicated `steps(...)`
+leaf nested under `detail(...)` so a run's step-trace cache entry is
+disjoint per workspace and per run, exactly like every other key.
+
+**Untrusted payload handling**: `AgentStep.safe_metadata` (JSON) is rendered
+via a bounded, independently `overflow-auto` `<pre>` block — plain text via
+`JSON.stringify`, never `dangerouslySetInnerHTML` — so it can never force
+page-level horizontal overflow or be interpreted as markup, per the build
+prompt's Part C §16-18.
+
+**Deferred to later Phase 20 chunks** (explicitly, not silently): Tool
+Execution detail UI, Approval list/detail + Approve/Reject, Human Handoff
+visibility, run cancellation, and any top-level nav destination for those
+domains.
+
 ## Local development
 
 1. Start the backend (see `../README.md`) so `NEXT_PUBLIC_API_BASE_URL`
@@ -1368,7 +1453,28 @@ customer-detail-page.test.tsx` with the new `RelatedTicketsPanel`/
 detail routes, the real `?customer=` "View all" links, and a distinct empty
 state per panel when the customer has no related records yet.
 
-## End-to-end tests (`e2e/`, Phase 18 Chunk 4; extended Phase 19 Chunks 1-3)
+Added in Phase 20 Chunk 1 (`src/tests/features/agent-runs/`): the agent-run
+query-key factory (disjoint per-workspace, per-status-filter, and
+per-run-ID `detail`/`steps` keys); URL query-string parsing/serialization
+for the status filter (defaults, malformed input, round-tripping); the
+agent-run API boundary's request shape (default params send no query
+string; `status` sent correctly; the backend-dead `search`/`ordering` never
+sent); the full list/detail matrix — real data rendering, empty vs.
+network-error (both with Retry), the status filter with pagination
+preserving it, a confirmed 404, a run belonging to a *different* workspace
+resolving to the same safe not-found UI, a malformed route ID rejected with
+zero network requests, an unrecognized future status value rendering a safe
+fallback, the real Conversation and Ticket cross-links (and the honest
+"not tied to a conversation/ticket" case when either is null), a rendered
+failure block for a failed run, and the workspace-isolation regression
+(switching the active workspace mid-session causing the old workspace's run
+to disappear from the DOM immediately); and a dedicated
+`polling.test.tsx` covering the terminal/non-terminal polling decision as
+pure logic plus a fake-timer integration test proving a real
+`AgentRunDetailPage` stops issuing detail requests the moment the backend
+reports a terminal status.
+
+## End-to-end tests (`e2e/`, Phase 18 Chunk 4; extended Phase 19 Chunks 1-3, Phase 20 Chunk 1)
 
 Playwright (`@playwright/test`), Chromium only — the mandatory acceptance
 browser for this phase; Firefox/WebKit weren't added (single-browser
@@ -1466,6 +1572,24 @@ landing on the same contextual, filtered Tickets list); a workspace switch
 swapping the visible ticket list; a ticket ID from a different workspace
 deep-linked directly resolving to the safe not-found UI; and logout from
 Tickets.
+
+**Added in Phase 20 Chunk 1** (`e2e/agent-runs.spec.ts`) — the same kind of
+real-backend smoke proof for Agent Runs: listing the active workspace's real
+runs (created directly via Django ORM fixtures in `global-setup.ts` —
+`AgentDefinition`/`AgentVersion`/`AgentRun`/`AgentStep` rows, deliberately
+not through the orchestration service, since that would make real provider
+calls) and filtering by status (including a real `running`, non-terminal
+row); opening a run to see real fields, its safe execution trace
+(`run_started`/`run_completed` steps), and its final response; the real
+Agent Run → Conversation and Agent Run → Ticket navigation; the honest
+no-conversation/no-ticket case for a manually-triggered run; a workspace
+switch swapping the visible run list; a run ID from a different workspace
+deep-linked directly resolving to the safe not-found UI, with its response
+text asserted absent (never leaked); and logout from Agent Runs.
+`AgentRun.agent_version` is `on_delete=PROTECT` (`agents/models.py`), so
+`global-teardown.ts` deletes E2E `AgentRun` rows explicitly before the
+`Workspace` cascade delete — Django's cascade collector does not resolve a
+`PROTECT` FK against a same-transaction cascade on its own.
 
 **Login volume, deliberately kept realistic rather than exhaustive**: even
 with the throttle raised, a handful of tests (routing's `?next` cases, the
