@@ -6,6 +6,7 @@ import { afterAll, afterEach, beforeAll, beforeEach } from "vitest";
 import { __setTimeoutOverrideForTests } from "@/lib/api/request";
 import { __resetSessionForTests } from "@/lib/api/session";
 import { __resetTokenStoreForTests } from "@/lib/api/token-store";
+import { resetAgentRunMockState } from "@/tests/msw/agent-run-handlers";
 import { resetAuthMockState } from "@/tests/msw/handlers";
 import { resetCustomerMockState } from "@/tests/msw/customer-handlers";
 import { resetConversationMockState } from "@/tests/msw/conversation-handlers";
@@ -39,6 +40,7 @@ beforeEach(() => {
   resetCustomerMockState();
   resetConversationMockState();
   resetTicketMockState();
+  resetAgentRunMockState();
   localStorage.clear();
   sessionStorage.clear();
 });
