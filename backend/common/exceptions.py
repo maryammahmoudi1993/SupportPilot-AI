@@ -2,6 +2,7 @@
 
 import logging
 
+from django.http import Http404
 from rest_framework import status
 from rest_framework.exceptions import (
     APIException,
@@ -20,11 +21,23 @@ logger = logging.getLogger("supportpilot")
 # otherwise all collapse into the generic "validation_error" fallback below.
 # Order matters: the first matching class (via isinstance) wins, so more
 # specific exceptions must precede their base classes.
+#
+# `Http404` is listed separately from (and before) `NotFound`: DRF's own
+# `exception_handler()` (called below) converts a raised `django.http.Http404`
+# into `rest_framework.exceptions.NotFound` to build the Response, but that
+# conversion happens to a *local* variable inside DRF's own function — it
+# never reaches back to the `exc` this module receives, which still holds
+# the original `Http404`. Without this entry, every selector that raises
+# `Http404` directly (the codebase's normal not-found idiom — see e.g.
+# `workspaces/selectors.py`, `agents/selectors.py`, `approvals/selectors.py`)
+# would fall through to the generic "validation_error" fallback below despite
+# a correct 404 status code.
 _STABLE_CODE_BY_EXCEPTION = (
     (Throttled, "rate_limited"),
     (NotAuthenticated, "authentication_failed"),
     (AuthenticationFailed, "authentication_failed"),
     (PermissionDenied, "permission_denied"),
+    (Http404, "not_found"),
     (NotFound, "not_found"),
 )
 

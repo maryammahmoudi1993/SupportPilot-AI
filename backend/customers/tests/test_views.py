@@ -124,6 +124,14 @@ class TestCustomerDetailView:
         )
 
         assert response.status_code == status.HTTP_404_NOT_FOUND
+        # P20-404-01 regression: a real cross-workspace Http404 must produce
+        # the stable "not_found" envelope code (previously mis-coded as
+        # "validation_error" — see common/exceptions.py `_stable_code_for`),
+        # without leaking the foreign customer's name, workspace, or id.
+        assert response.data["error"]["code"] == "not_found"
+        body = str(response.data)
+        assert str(foreign_customer.id) not in body
+        assert foreign_customer.first_name not in body
 
     def test_viewer_cannot_update_customer(self, workspace):
         membership = WorkspaceMembershipFactory(workspace=workspace, role=WorkspaceRole.VIEWER)

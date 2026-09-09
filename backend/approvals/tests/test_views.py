@@ -57,12 +57,19 @@ class TestApprovalCrossTenant:
         other = WorkspaceMembershipFactory(role=WorkspaceRole.OWNER)
         response = _client(other.user).get(f"{_base(other.workspace)}/{approval.id}/")
         assert response.status_code == 404
+        # P20-404-01 regression: real cross-workspace Http404 for a Phase 20
+        # domain must produce the stable "not_found" envelope code, and
+        # never leak the approval's id/summary/context to the foreign caller.
+        assert response.data["error"]["code"] == "not_found"
+        body = str(response.data)
+        assert str(approval.id) not in body
 
     def test_foreign_workspace_approve_is_404(self, monkeypatch):
         run, approval, fake = pending_refund_approval(monkeypatch)
         other = WorkspaceMembershipFactory(role=WorkspaceRole.OWNER)
         response = _client(other.user).post(f"{_base(other.workspace)}/{approval.id}/approve/")
         assert response.status_code == 404
+        assert response.data["error"]["code"] == "not_found"
 
 
 @pytest.mark.django_db(transaction=True)

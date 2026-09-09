@@ -1,5 +1,6 @@
 """Tests for the standardized `{"error": {...}}` API error envelope."""
 
+from django.http import Http404
 from rest_framework.exceptions import (
     APIException,
     AuthenticationFailed,
@@ -53,6 +54,34 @@ class TestCustomExceptionHandler:
 
         assert response.status_code == 401
         assert response.data["error"]["code"] == "authentication_failed"
+
+    def test_django_http404_maps_to_stable_not_found_code(self):
+        # P20-404-01 regression: `django.http.Http404` — the codebase's normal
+        # not-found idiom in selectors (`workspaces/selectors.py`,
+        # `agents/selectors.py`, `approvals/selectors.py`, etc.) — must
+        # produce the same stable envelope as DRF's own `NotFound`, not fall
+        # through to the generic "validation_error" fallback. DRF's own
+        # `exception_handler()` converts `Http404` to `NotFound` only inside
+        # its own local scope while building the Response body/status; this
+        # asserts the *code* survives that same round trip through the real
+        # `custom_exception_handler` entry point, not `_stable_code_for` in
+        # isolation.
+        response = custom_exception_handler(Http404("Approval request not found."), _context())
+
+        assert response is not None
+        assert response.status_code == 404
+        assert response.data["error"]["code"] == "not_found"
+        # The raw Http404 message becomes the safe "detail" text DRF itself
+        # produces — never leaked verbatim beyond what NotFound already sends.
+        assert "error" in response.data and "code" in response.data["error"]
+
+    def test_django_http404_with_no_message_still_maps_to_not_found(self):
+        # A bare `raise Http404()` (no message) is also common — must not
+        # crash or regress to the generic fallback.
+        response = custom_exception_handler(Http404(), _context())
+
+        assert response.status_code == 404
+        assert response.data["error"]["code"] == "not_found"
 
     def test_permission_denied_maps_to_stable_permission_denied_code(self):
         response = custom_exception_handler(PermissionDenied(), _context())
