@@ -9,9 +9,11 @@ import {
 } from "@/features/agent-runs/components/agent-run-badges";
 import { useAgentRunDetailQuery, useAgentRunStepsQuery } from "@/features/agent-runs/queries";
 import type { AgentStep } from "@/features/agent-runs/types";
+import { ToolExecutionList } from "@/features/tool-executions/components/tool-execution-list";
 import { useWorkspace } from "@/features/workspace/workspace-provider";
 import { EntityNotFound } from "@/components/support/entity-not-found";
 import { ListError } from "@/components/support/list-error";
+import { StructuredPayload } from "@/components/support/structured-payload";
 import { Timestamp } from "@/components/support/timestamp";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -40,27 +42,6 @@ function Field({ label, value }: { label: string; value: ReactNode }) {
       <dt className="text-text-muted text-xs font-medium uppercase">{label}</dt>
       <dd className="text-text-primary text-sm">{value}</dd>
     </div>
-  );
-}
-
-/**
- * Tool execution input/output/safe_metadata payloads are untrusted data
- * (master prompt Part C-16/18): rendered as inert preformatted text inside a
- * bounded, independently scrollable box — never `dangerouslySetInnerHTML`,
- * never allowed to force page-level horizontal overflow.
- */
-function SafeMetadata({ value }: { value: unknown }) {
-  const isEmpty =
-    value === null ||
-    value === undefined ||
-    (typeof value === "object" && !Object.keys(value as object).length);
-  if (isEmpty) {
-    return <span className="text-text-secondary text-xs">—</span>;
-  }
-  return (
-    <pre className="bg-surface-2 border-border-subtle max-h-64 overflow-auto rounded-md border p-2 text-xs break-words whitespace-pre-wrap">
-      {JSON.stringify(value, null, 2)}
-    </pre>
   );
 }
 
@@ -95,12 +76,9 @@ function StepRow({ step }: { step: AgentStep }) {
           <Field label="Completed" value={<Timestamp value={step.completed_at} />} />
         )}
       </dl>
-      {step.safe_metadata !== undefined && (
-        <div className="mt-2">
-          <p className="text-text-muted text-xs font-medium uppercase">Safe metadata</p>
-          <SafeMetadata value={step.safe_metadata} />
-        </div>
-      )}
+      <div className="mt-2">
+        <StructuredPayload value={step.safe_metadata} label="Safe metadata" />
+      </div>
     </li>
   );
 }
@@ -228,7 +206,7 @@ function AgentRunDetailContent({ workspaceId, runId }: { workspaceId: string; ru
 
       <Card>
         <CardHeader>
-          <CardTitle>Execution trace</CardTitle>
+          <CardTitle>Agent steps</CardTitle>
         </CardHeader>
         <CardContent>
           {stepsQuery.isPending && (
@@ -254,6 +232,15 @@ function AgentRunDetailContent({ workspaceId, runId }: { workspaceId: string; ru
               ))}
             </ol>
           )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Tool executions</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <ToolExecutionList workspaceId={workspaceId} runId={runId} runStatus={run.status} />
         </CardContent>
       </Card>
     </div>
