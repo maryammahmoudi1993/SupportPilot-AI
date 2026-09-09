@@ -42,6 +42,15 @@ export interface E2EData {
   workspaceBToolExecutionSucceededId: string;
   workspaceBToolExecutionFailedId: string;
   workspaceBToolExecutionWaitingId: string;
+  workspaceAApprovalApproveId: string;
+  workspaceAApprovalRejectId: string;
+  workspaceAApprovalConcurrentId: string;
+  workspaceAApprovalExpiredId: string;
+  workspaceAApprovalDecidedId: string;
+  workspaceBApprovalPendingId: string;
+  workspaceBHandoffPendingId: string;
+  workspaceBHandoffResolvedId: string;
+  workspaceAHandoffPendingId: string;
 }
 
 let cached: E2EData | null = null;
