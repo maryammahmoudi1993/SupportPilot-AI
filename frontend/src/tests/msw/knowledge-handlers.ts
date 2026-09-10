@@ -4,11 +4,14 @@
  * knowledge/serializers.py, knowledge/services.py): workspace-scoped
  * storage, `source_id`/`status` filtering for documents, `search`/
  * `is_active` filtering for sources, DRF `PageNumberPagination`'s
- * `{count,next,previous,results}` envelope, and (Phase 21 Chunk 2) document
+ * `{count,next,previous,results}` envelope, (Phase 21 Chunk 2) document
  * upload, source creation, and document retry — including the real
- * inactive-source/not-failed-document 409 `conflict` responses.
+ * inactive-source/not-failed-document 409 `conflict` responses — and
+ * (Phase 21 Chunk 3) knowledge search/retrieval.
  */
 import { HttpResponse, http } from "msw";
+
+import type { KnowledgeSearchHit, KnowledgeSearchResponse } from "@/features/knowledge/types";
 
 const BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 
@@ -89,6 +92,32 @@ function generateId(prefix: string): string {
   return `${prefix}-${nextId}`;
 }
 
+export function makeKnowledgeSearchHitFixture(
+  overrides: Partial<KnowledgeSearchHit> & { chunk_id: string; document_id: string },
+): KnowledgeSearchHit {
+  return {
+    document_title: "Refund policy",
+    source_id: "source-1",
+    source_name: "Support Macros",
+    rank: 1,
+    score: 0.5,
+    text: "Refunds are issued within five business days.",
+    citation: { page_start: null, page_end: null, start_offset: 0, end_offset: 40, chunk_ordinal: 0 },
+    ...overrides,
+  };
+}
+
+export function makeKnowledgeSearchResponseFixture(
+  overrides: Partial<KnowledgeSearchResponse> & { results: KnowledgeSearchHit[] },
+): KnowledgeSearchResponse {
+  return {
+    event_id: generateId("event"),
+    query: "refund",
+    sufficient_context: overrides.results.length > 0,
+    ...overrides,
+  };
+}
+
 export const knowledgeMockState = {
   documentsByWorkspace: {} as Record<string, KnowledgeDocumentFixture[]>,
   sourcesByWorkspace: {} as Record<string, KnowledgeSourceFixture[]>,
@@ -107,6 +136,22 @@ export const knowledgeMockState = {
    * `KNOWLEDGE_ALLOWED_CONTENT_TYPES` (Phase 21 Chunk 2A §3).
    */
   uploadUnsupportedType: false,
+
+  /**
+   * Phase 21 Chunk 3 (search/retrieval). `searchResponse` is the fixture
+   * returned for the *next* successful call (settable per test, since the
+   * real per-request result shape varies by scenario far more than any
+   * other knowledge fixture); `searchNetworkError` simulates a transport
+   * failure; `searchDelayMs` mirrors `uploadDelayMs`'s pending-window
+   * pattern; `lastSearchRequestBody` lets a test assert the exact real
+   * request shape (`query`/`top_k`/`source_ids`) without re-implementing
+   * request parsing in every test.
+   */
+  searchResponse: null as KnowledgeSearchResponse | null,
+  searchNetworkError: false,
+  searchDelayMs: 0,
+  searchCallCount: 0,
+  lastSearchRequestBody: null as Record<string, unknown> | null,
 };
 
 export function seedKnowledgeDocuments(
@@ -129,6 +174,11 @@ export function resetKnowledgeMockState(): void {
   knowledgeMockState.uploadNetworkError = false;
   knowledgeMockState.uploadDelayMs = 0;
   knowledgeMockState.uploadUnsupportedType = false;
+  knowledgeMockState.searchResponse = null;
+  knowledgeMockState.searchNetworkError = false;
+  knowledgeMockState.searchDelayMs = 0;
+  knowledgeMockState.searchCallCount = 0;
+  knowledgeMockState.lastSearchRequestBody = null;
   nextId = 1;
 }
 
@@ -397,6 +447,37 @@ export const knowledgeHandlers = [
         );
       }
       return HttpResponse.json(source);
+    },
+  ),
+
+  http.post(
+    `${BASE}/api/v1/workspaces/:workspaceId/knowledge/search/`,
+    async ({ request }) => {
+      knowledgeMockState.searchCallCount += 1;
+      if (knowledgeMockState.searchDelayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, knowledgeMockState.searchDelayMs));
+      }
+      if (knowledgeMockState.searchNetworkError) {
+        return HttpResponse.error();
+      }
+      const body = (await request.json()) as Record<string, unknown>;
+      knowledgeMockState.lastSearchRequestBody = body;
+      const query = typeof body.query === "string" ? body.query : "";
+      if (query.trim().length === 0) {
+        return HttpResponse.json(
+          {
+            error: {
+              code: "knowledge_invalid_retrieval_query",
+              message: "The retrieval query is invalid.",
+            },
+          },
+          { status: 400 },
+        );
+      }
+      const response =
+        knowledgeMockState.searchResponse ??
+        makeKnowledgeSearchResponseFixture({ query, results: [] });
+      return HttpResponse.json({ ...response, query });
     },
   ),
 ];
