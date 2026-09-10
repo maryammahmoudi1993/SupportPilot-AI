@@ -1,4 +1,5 @@
-import { screen } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
 import { KnowledgeDocumentDetailPage } from "@/features/knowledge/components/knowledge-detail-page";
@@ -172,5 +173,103 @@ describe("KnowledgeDocumentDetailPage", () => {
 
     expect(await screen.findByText("Document not found")).toBeInTheDocument();
     expect(screen.queryByText("Globex-only document")).not.toBeInTheDocument();
+  });
+
+  describe("Retry (Phase 21 Chunk 2)", () => {
+    it("shows Retry for a failed document to an authorized (admin) manager, and it re-queues", async () => {
+      signIn([FIXTURE_WORKSPACE_GLOBEX]); // admin — canManageKnowledge
+      seedKnowledgeDocuments(FIXTURE_WORKSPACE_GLOBEX.id, [
+        makeKnowledgeDocumentFixture({
+          id: DOC_1,
+          source_id: SOURCE_1,
+          source_name: "Support Macros",
+          title: "Broken upload",
+          status: "failed",
+          last_error_code: "knowledge_malformed_pdf",
+          last_error_message_safe: "The PDF is malformed or unreadable.",
+        }),
+      ]);
+
+      renderAuthenticated(<KnowledgeDocumentDetailPage documentId={DOC_1} />);
+      const retryButton = await screen.findByRole("button", { name: "Retry" });
+
+      await userEvent.setup().click(retryButton);
+
+      await waitFor(() => expect(screen.getByText("Queued")).toBeInTheDocument());
+    });
+
+    it("never shows Retry to a read-only (support_agent) member", async () => {
+      signIn([FIXTURE_WORKSPACE_ACME]); // support_agent — not canManageKnowledge
+      seedKnowledgeDocuments(FIXTURE_WORKSPACE_ACME.id, [
+        makeKnowledgeDocumentFixture({
+          id: DOC_1,
+          source_id: SOURCE_1,
+          source_name: "Support Macros",
+          title: "Broken upload",
+          status: "failed",
+        }),
+      ]);
+
+      renderAuthenticated(<KnowledgeDocumentDetailPage documentId={DOC_1} />);
+      await screen.findByRole("heading", { name: "Broken upload" });
+
+      expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+    });
+
+    it("never shows Retry for a ready or processing document, even to a manager", async () => {
+      signIn([FIXTURE_WORKSPACE_GLOBEX]);
+      seedKnowledgeDocuments(FIXTURE_WORKSPACE_GLOBEX.id, [
+        makeKnowledgeDocumentFixture({
+          id: DOC_1,
+          source_id: SOURCE_1,
+          source_name: "Support Macros",
+          title: "Still processing",
+          status: "processing",
+        }),
+      ]);
+
+      renderAuthenticated(<KnowledgeDocumentDetailPage documentId={DOC_1} />);
+      await screen.findByRole("heading", { name: "Still processing" });
+
+      expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+    });
+
+    it("shows the real 409 conflict message and refetches instead of guessing when retry is rejected", async () => {
+      signIn([FIXTURE_WORKSPACE_GLOBEX]);
+      seedKnowledgeDocuments(FIXTURE_WORKSPACE_GLOBEX.id, [
+        makeKnowledgeDocumentFixture({
+          id: DOC_1,
+          source_id: SOURCE_1,
+          source_name: "Support Macros",
+          title: "Broken upload",
+          status: "failed",
+        }),
+      ]);
+
+      renderAuthenticated(<KnowledgeDocumentDetailPage documentId={DOC_1} />);
+      const retryButton = await screen.findByRole("button", { name: "Retry" });
+
+      // Simulate another tab/operator already re-processing this document
+      // between this page's last fetch and this click.
+      seedKnowledgeDocuments(FIXTURE_WORKSPACE_GLOBEX.id, [
+        makeKnowledgeDocumentFixture({
+          id: DOC_1,
+          source_id: SOURCE_1,
+          source_name: "Support Macros",
+          title: "Broken upload",
+          status: "processing",
+        }),
+      ]);
+
+      await userEvent.setup().click(retryButton);
+
+      expect(
+        await screen.findByText("This document could not be queued for retry"),
+      ).toBeInTheDocument();
+      // The real, current server state (processing, Retry no longer offered)
+      // wins — never a locally-guessed "queued" state.
+      await waitFor(() => expect(screen.getByText("Processing")).toBeInTheDocument());
+      expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+    });
   });
 });

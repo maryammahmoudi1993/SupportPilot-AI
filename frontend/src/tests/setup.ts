@@ -1,5 +1,7 @@
 import "@testing-library/jest-dom/vitest";
 
+import { File as NodeFile } from "node:buffer";
+
 import { cleanup } from "@testing-library/react";
 import { afterAll, afterEach, beforeAll, beforeEach } from "vitest";
 
@@ -16,6 +18,20 @@ import { resetKnowledgeMockState } from "@/tests/msw/knowledge-handlers";
 import { resetTicketMockState } from "@/tests/msw/ticket-handlers";
 import { resetToolExecutionMockState } from "@/tests/msw/tool-execution-handlers";
 import { server } from "@/tests/msw/server";
+
+// jsdom's own `File` class and Node's real `fetch` (undici, used by MSW's
+// interception — the actual network layer in this test environment) are
+// two different classes from two different realms: a real upload request's
+// `FormData` carrying a jsdom `File` fails undici's internal webidl
+// `File`/`Blob` type check with an opaque assertion error the moment MSW
+// tries to parse the multipart body (Phase 21 Chunk 2, discovered writing
+// the Knowledge upload tests — a jsdom/undici interop gap, not a product
+// bug). Replacing the global `File` with Node's own (`node:buffer`, the
+// same class undici itself resolves to) unifies both sides: React
+// components, `userEvent.upload`, and the real fetch/FormData/MSW path all
+// see the identical constructor, so a real multipart upload test actually
+// works end-to-end instead of only exercising the UI in isolation.
+globalThis.File = NodeFile as unknown as typeof File;
 
 // `globals: false` in vitest.config.ts means @testing-library/react's
 // automatic afterEach cleanup never registers itself — do it explicitly so

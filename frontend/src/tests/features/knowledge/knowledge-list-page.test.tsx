@@ -227,5 +227,51 @@ describe("KnowledgeListPage", () => {
         }),
       );
     });
+
+    it("creates a real source and closes the form on success", async () => {
+      signIn([FIXTURE_WORKSPACE_GLOBEX]); // admin — canManageKnowledge
+      setupNavigationMocks("tab=sources");
+
+      renderAuthenticated(<KnowledgeListPage />);
+      await screen.findByText("No knowledge sources yet");
+
+      const user = userEvent.setup();
+      await user.click(screen.getByRole("button", { name: "New source" }));
+      await user.type(screen.getByLabelText("Name"), "Support Macros");
+      await user.click(screen.getByRole("button", { name: "Create source" }));
+
+      expect(await screen.findByText("Support Macros")).toBeInTheDocument();
+      expect(screen.queryByLabelText("Name")).not.toBeInTheDocument();
+    });
+  });
+
+  describe("RBAC (Phase 21 Chunk 2)", () => {
+    it("shows Upload document and New source to an authorized (admin) manager", async () => {
+      signIn([FIXTURE_WORKSPACE_GLOBEX]);
+      setupNavigationMocks();
+
+      renderAuthenticated(<KnowledgeListPage />);
+      await screen.findByText("No knowledge documents yet");
+
+      expect(screen.getByRole("button", { name: "Upload document" })).toBeInTheDocument();
+    });
+
+    it("never shows Upload document to a read-only (support_agent) member", async () => {
+      signIn([FIXTURE_WORKSPACE_ACME]);
+      setupNavigationMocks();
+
+      renderAuthenticated(<KnowledgeListPage />);
+      await screen.findByText("No knowledge documents yet");
+      expect(screen.queryByRole("button", { name: "Upload document" })).not.toBeInTheDocument();
+    });
+
+    it("never shows New source to a read-only (support_agent) member", async () => {
+      signIn([FIXTURE_WORKSPACE_ACME]);
+      setupNavigationMocks("tab=sources");
+
+      renderAuthenticated(<KnowledgeListPage />);
+      await screen.findByText("No knowledge sources yet");
+      expect(screen.queryByRole("button", { name: "New source" })).not.toBeInTheDocument();
+    });
   });
 });
