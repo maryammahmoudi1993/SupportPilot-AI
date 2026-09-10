@@ -1752,6 +1752,110 @@ duplicate filenames are allowed, and the pre-existing dev-only
 `js-yaml`/`@redocly/openapi-core` audit advisory remains untouched
 (production dependencies: 0 vulnerabilities throughout).
 
+### Integration Connections (Phase 22 Chunk 1)
+
+Read-only foundation over the real, already-built backend integrations
+domain (`backend/integrations/`, a Phase 7 feature — nothing about provider
+adapters, credential encryption, or the connection lifecycle was redesigned
+or invented for the frontend). One real, workspace-scoped entity —
+`IntegrationConnection` — is exposed. Webhook endpoints/deliveries and
+notification delivery are real, separate backend domains
+(`backend/webhooks/`, `backend/notifications/`) explicitly **out of scope**
+for this chunk (Chunk 2/3) — see "Deferred Phase 22 capabilities" below.
+
+**Public API contract discovered** (verified against
+`integrations/views.py`, `integrations/selectors.py`,
+`integrations/serializers.py`, and `integrations/permissions.py` — never
+inferred from models/services alone):
+
+| Capability | Status |
+| --- | --- |
+| Connection list/detail | **Real**, implemented this chunk. `GET .../integrations/`, `GET .../integrations/{id}/`. Any active workspace member can read (no manage permission required). |
+| Create connection | Real endpoint (`POST .../integrations/`, owner/admin only) — **not implemented this chunk**. Accepts raw provider credentials directly; deferred to a later chunk once its credential-entry UI can be reviewed on its own (see "Mutation deferral decision" below). |
+| Update configuration | Real (`PATCH .../integrations/{id}/`, owner/admin only, non-secret `display_name`/`configuration` only) — **not implemented this chunk**. |
+| Rotate credentials | Real (`PUT .../integrations/{id}/credentials/`, owner/admin only, throttled as a sensitive mutation) — **not implemented this chunk**. Accepts raw credentials directly, same deferral reasoning as create. |
+| Enable/disable | Real (`PATCH .../integrations/{id}/enabled/`, owner/admin only) — **not implemented this chunk**. |
+| Test connection | Real (`POST .../integrations/{id}/test/`, owner/admin only) — **not implemented this chunk**. A genuine mutation (persists `last_checked_at`/`last_success_at`/`last_error_code`), not read-only metadata, so it doesn't qualify for this chunk's "embed as read-only detail metadata" allowance. |
+| OAuth | **Not supported at all.** No OAuth initiation/callback endpoint exists anywhere in `integrations/urls.py` — credentials are always submitted directly (API keys, tokens, refresh tokens, depending on provider). No "Connect with Stripe"-style flow was built or implied. |
+| Provider catalog | Server-owned enum only (`integrations/models.py IntegrationProvider`) — `stripe`, `google_calendar`, `email`, `demo_commerce`. No public catalog/discovery endpoint; mirrored (not imported) in `features/integrations/components/integration-badges.tsx`, same pattern as every other domain's status-label mirror. |
+| Webhook endpoints/deliveries | Real, separate domain (`backend/webhooks/`) with its own full public CRUD + redrive contract — **not implemented this chunk** (Chunk 2). |
+| Notifications | **Internal only** — `backend/notifications/` has no `urls.py`/`views.py`/`serializers.py` at all; verified directly against the app's file listing and `config/urls.py`'s route table (notifications are never `include()`d). No public API exists for this chunk (or any chunk) to expose. |
+
+**Mutation deferral decision** (master prompt Part J §35): this chunk
+implements list + detail only. Every one of the five write endpoints above
+is a real, unambiguous backend contract, but each either accepts raw
+provider credentials directly (create, credential rotate) or is a
+genuinely separate operational action (enable/disable, test) that deserves
+its own reviewed UI rather than being bolted onto a foundation chunk. None
+is essential to make the Connections UI operational — a workspace's
+connections already exist from earlier-phase business-integration setup
+(real E2E fixtures below are created directly via the ORM, exactly as a
+real Phase 7 setup flow would persist them), so a read-only list/detail is
+a fully real, useful surface on its own. See `features/integrations/types.ts`
+for the same decision recorded next to the code.
+
+**Credential safety**: `IntegrationConnectionSerializer`
+(`integrations/serializers.py`) never includes `encrypted_credentials` or
+any plaintext — its field list is exhaustive and secret-free by
+construction. The only credential signal this chunk ever renders is the
+boolean `credentials_configured` ("Configured"/"Not configured") plus the
+opaque `credential_version` counter (a rotation counter, never a secret
+value in itself). Proven both in a unit test (asserting the raw DOM never
+contains `encrypted_credentials` or a `"credentials":` key) and the
+real-backend E2E smoke (a real Stripe connection seeded with a genuine
+encrypted API-key-shaped credential; the rendered page HTML, `localStorage`,
+`sessionStorage`, and URL are all asserted to never contain it).
+
+**Statuses**: `IntegrationConnection.status` — `active`, `disabled`,
+`invalid_credentials`, `degraded` (`IntegrationConnectionStatusEnum`). An
+unrecognized future status renders safely via the shared `EnumBadge`
+fallback, same as every other domain — proven in both a unit test and the
+real-backend E2E smoke.
+
+**Filters/pagination**: `IntegrationConnectionListCreateView` declares no
+`filter_backends` and no `ordering_fields` at all (verified directly against
+`integrations/views.py`) — the generated OpenAPI schema types
+`ordering`/`search` anyway (Category B schema gap, same shape as Knowledge's
+document-list gap), but both are dead: the list is always ordered
+`provider, id` (`integrations/selectors.py connection_list_for_workspace`)
+and cannot be filtered or searched. Real DRF `PageNumberPagination`
+(`page`/`page_size`, 50/page default) still applies — `page` is the only
+real, exposed list param this chunk's UI offers.
+
+**Routes**: one canonical route family, `/app/integrations` (list) and
+`/app/integrations/[connectionId]` (detail) — matching the master prompt's
+preferred shape. One top-level nav entry, "Integrations" — not separate
+Webhooks/Notifications/Deliveries entries; those, once implemented, will
+live under this same route family as tabs/subroutes rather than new
+top-level nav items (master prompt Part G §27).
+
+**Server state**: `["workspaces", wsId, "integrations", "connections", "list"|"detail", ...]`
+query keys (`features/integrations/query-keys.ts`) — same workspace-first
+policy as every other domain. No polling: unlike a Knowledge document's
+ingestion status, a connection's `status`/`last_checked_at` only ever change
+as the result of an explicit operator action this chunk doesn't expose yet,
+so there is no asynchronous state for a detail-page poll to watch.
+
+**Content safety**: `configuration` (arbitrary non-secret provider JSON) is
+rendered through the existing shared `StructuredPayload` viewer
+(`JSON.stringify` into a `<pre>`, never `dangerouslySetInnerHTML`) — proven
+both in a unit test and the real-backend E2E smoke with genuine
+HTML/script-looking configuration content that renders as inert text.
+
+**Deferred Phase 22 capabilities** (real backend endpoints exist; no
+frontend surface yet): connection create/update/credential-rotate/
+enable-disable/test, webhook endpoint management, webhook delivery
+visibility/redrive. Notifications have no public API at all (see the
+contract table above) and are not planned for any later chunk unless a real
+public endpoint is added first.
+
+**Known Phase 22 Chunk 1 schema gaps** (none blocking):
+
+| Endpoint | Gap | Blocking? |
+| --- | --- | --- |
+| `integrations_list` | Generated schema types `ordering`/`search`; neither is real (no filter backend on the view at all). Only `page` is real. | No — narrowed locally in `features/integrations/api.ts`. |
+| `integrations_create` (deferred) | Generated 201 response is typed as `IntegrationConnectionCreate` (the *request* shape) instead of the real full `IntegrationConnection` body (`IntegrationConnectionListCreateView.create` returns `IntegrationConnectionSerializer(connection).data`). | No — not exercised this chunk (create is deferred); documented for whichever later chunk implements it. |
+
 ## Local development
 
 1. Start the backend (see `../README.md`) so `NEXT_PUBLIC_API_BASE_URL`
@@ -2031,7 +2135,7 @@ empty/error/workspace-isolation/unknown-status coverage as every other
 domain, plus a conversation-scoped test proving only the real
 `conversation`-filtered rows render.
 
-## End-to-end tests (`e2e/`, Phase 18 Chunk 4; extended Phase 19 Chunks 1-3, Phase 20 Chunks 1-3)
+## End-to-end tests (`e2e/`, Phase 18 Chunk 4; extended Phase 19 Chunks 1-3, Phase 20 Chunks 1-3, Phase 22 Chunk 1)
 
 Playwright (`@playwright/test`), Chromium only — the mandatory acceptance
 browser for this phase; Firefox/WebKit weren't added (single-browser
