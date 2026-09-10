@@ -1451,6 +1451,83 @@ workaround to the same `error.code === "not_found"` check already used by
 `CustomerDetailPage` — one consistent not-found pattern across every detail
 page. See defect `P20-404-01`.
 
+### Knowledge / RAG management (Phase 21 Chunk 1)
+
+Read-only foundation over the real, already-built backend Knowledge/RAG
+domain (`backend/knowledge/`). Two real, independent, workspace-scoped
+entities — `KnowledgeSource` and `KnowledgeDocument` — are exposed; nothing
+about retrieval architecture, ingestion internals, or vector search was
+redesigned or invented for the frontend.
+
+**Public API contract discovered** (verified against `knowledge/views.py`,
+`knowledge/selectors.py`, `knowledge/serializers.py`, and
+`knowledge/tests/test_views.py` — never inferred from models/services
+alone):
+
+| Capability | Status |
+| --- | --- |
+| Document list/detail | **Real**, implemented this chunk. `GET .../knowledge/documents/`, `GET .../knowledge/documents/{id}/`. |
+| Source list/detail | **Real**, implemented this chunk. `GET .../knowledge/sources/`, `GET .../knowledge/sources/{id}/`. |
+| Upload | Real endpoint (`POST .../documents/`, multipart, `KnowledgeDocumentListCreateView.create`) — **not implemented this chunk** (Chunk 2). |
+| Ingestion / retry | Real (`POST .../documents/{id}/retry/`, `GET .../ingestion-jobs/{id}/`) — **not implemented this chunk** (Chunk 2). Not read either: a document's own `status`/`last_ingested_at`/`last_error_code`/`chunk_count` fields already carry every ingestion signal this chunk needs, and there is no field linking a document to its ingestion job IDs, so reading one would mean guessing an ID or an N+1 pattern — both avoided. |
+| Retrieval / search | Real (`POST .../search/`, `GET .../retrieval-events/{id}/`) — **not implemented this chunk** (Chunk 3). |
+| Delete / archive | **Not a real endpoint at all.** No delete/archive view exists in `knowledge/urls.py` — `KnowledgeSource`/`KnowledgeDocument` only expose `is_active` as a field; there is no way to delete either through the public API. Never invented. |
+| Chunk API | **Not a real endpoint at all.** `KnowledgeChunk` is a real model but has no dedicated view — chunk text is only ever visible embedded in a search/retrieval-event response (Chunk 3 territory). |
+
+**Document filters** (`knowledge/selectors.py document_list_for_workspace`):
+real filters are `source_id` and `status` — **not** `search`, which the
+generated OpenAPI schema types anyway (Category A schema gap, same shape as
+every other domain — see `features/handoffs/api.ts`). `ordering` is
+schema-only/dead for both documents and sources: neither view sets DRF's
+`ordering_fields`, so both always order `-created_at, -id` regardless of any
+`ordering` query param.
+
+**Source filters** (`source_list_for_workspace`): `search` (name/description,
+case-insensitive `icontains`) and `is_active` are both real; `is_active`
+isn't typed in the generated schema at all.
+
+**Statuses**: `KnowledgeDocument.status` — `pending`, `queued`, `processing`,
+`ready`, `failed` (`KnowledgeDocumentStatusEnum`). `ready`/`failed` are
+terminal (`isTerminalDocumentStatus`); the detail page labels a document
+"Settled" or "Still in progress" from this, **never** a percentage or ETA
+(no real progress signal exists — master prompt Part A §10). An unrecognized
+future status renders safely via the shared `EnumBadge` fallback, same as
+every other domain.
+
+**Routes**: one canonical route family, `/app/knowledge` (list) and
+`/app/knowledge/[documentId]` (detail) — `KnowledgeDocument` is the entity
+operators actually care about (what the RAG pipeline retrieves from).
+`KnowledgeSource` has no dedicated detail route this chunk: it's surfaced as
+a second read-only tab (`?tab=sources`) on the same list page and as a
+plain-text field (never a fake link to a route that doesn't exist) on
+Document detail, keeping the route surface to the two entities the master
+prompt's preferred shape names rather than adding a third alias.
+
+**Server state**: `["workspaces", wsId, "knowledge", "documents"|"sources", "list"|"detail", ...]`
+query keys (`features/knowledge/query-keys.ts`) — same workspace-first
+policy as every other domain. A single bounded (`page_size=500`) "all
+sources" fetch backs the Documents list's Source filter dropdown — never a
+per-document source lookup (master prompt Part G §33's N+1 prohibition).
+
+**No polling**: this chunk renders only a document's own persisted status
+snapshot; there is nothing to poll toward until ingestion is actually
+triggerable from this frontend (Chunk 2).
+
+**Content safety**: `KnowledgeSource`/`KnowledgeDocument` carry no full
+document text or chunk content at all this chunk — only metadata
+(`title`, `original_filename`, `metadata` JSON, `last_error_message_safe`,
+etc.). `metadata` is rendered through the existing shared `StructuredPayload`
+viewer (`JSON.stringify` into a `<pre>`, never `dangerouslySetInnerHTML`) —
+proven both in a unit test and the real-backend E2E smoke with genuine
+HTML/script-looking metadata content that renders as inert text.
+
+**Known Phase 21 schema gaps** (none blocking):
+
+| Endpoint | Gap | Blocking? |
+| --- | --- | --- |
+| `documents_list` | Generated schema types `search`/`ordering`; real filters are `source_id`/`status`, untyped. | No — narrowed locally in `features/knowledge/api.ts`. |
+| `sources_list` | Generated schema types `ordering` (dead) but not `is_active` (real). | No — same narrowing. |
+
 ## Local development
 
 1. Start the backend (see `../README.md`) so `NEXT_PUBLIC_API_BASE_URL`
