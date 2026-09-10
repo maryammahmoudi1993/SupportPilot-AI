@@ -32,6 +32,8 @@ from customers.models import Customer
 from policies.models import PolicyEffect, PolicyEvaluation, RiskAssessment
 from knowledge.ingestion.embeddings import DeterministicHashEmbeddingProvider
 from knowledge.models import KnowledgeChunk, KnowledgeDocument, KnowledgeDocumentStatus, KnowledgeIngestionJob, KnowledgeIngestionStatus, KnowledgeSource, KnowledgeSourceType
+from integrations.crypto import encrypt_credentials
+from integrations.models import IntegrationConnection, IntegrationConnectionStatus, IntegrationEnvironment, IntegrationProvider
 from tickets.models import HumanHandoff, HumanHandoffReason, HumanHandoffStatus, Ticket, TicketPriority, TicketStatus
 from tools.contracts import RiskLevel, SideEffectType
 from tools.models import ToolBinding, ToolDefinition, ToolExecution, ToolExecutionStatus
@@ -568,6 +570,41 @@ ws_a_retrieval_unsafe_text = (
 )
 _e2e_chunk(ws_a_retrieval_document, 3, ws_a_retrieval_unsafe_text)
 
+# Integrations domain (Phase 22 Chunk 1) — real IntegrationConnection rows,
+# created directly via the ORM with real encrypted credentials (the same
+# integrations.crypto.encrypt_credentials the real create/rotate services
+# use — never plaintext on the model, matching the actual persisted
+# contract) so the real-backend smoke can prove tenant isolation, safe
+# credential-presence rendering, and unknown-future-status handling against
+# the actual API rather than a frontend-invented fixture shape. Rows
+# cascade-delete with their workspace (IntegrationConnection.workspace,
+# on_delete=CASCADE) so no special teardown ordering is needed (same
+# reasoning as HumanHandoff/Knowledge above).
+ws_b_integration_stripe = IntegrationConnection.objects.create(
+    workspace=ws_b, provider=IntegrationProvider.STRIPE, display_name="Primary Stripe",
+    status=IntegrationConnectionStatus.ACTIVE, environment=IntegrationEnvironment.TEST,
+    configuration={"statement_descriptor": "SUPPORTPILOT"},
+    encrypted_credentials=encrypt_credentials({"api_key": "sk_test_fake_not_a_real_secret"}),
+    credential_version=1, last_checked_at=timezone.now(), last_success_at=timezone.now(),
+)
+ws_b_integration_email = IntegrationConnection.objects.create(
+    workspace=ws_b, provider=IntegrationProvider.EMAIL,
+    status=IntegrationConnectionStatus.DISABLED, environment=IntegrationEnvironment.TEST,
+    configuration={}, credential_version=0,
+)
+ws_a_integration_calendar = IntegrationConnection.objects.create(
+    workspace=ws_a, provider=IntegrationProvider.GOOGLE_CALENDAR, display_name="Workspace A calendar",
+    status=IntegrationConnectionStatus.INVALID_CREDENTIALS, environment=IntegrationEnvironment.TEST,
+    # Content-safety fixture (same posture as Knowledge/Conversations above):
+    # real HTML/script-looking configuration, to prove end to end that it is
+    # rendered as inert plain text inside StructuredPayload, never interpreted
+    # as markup.
+    configuration={"calendar_id": "<script>window.__xss_marker = true;</script>"},
+    encrypted_credentials=encrypt_credentials({"refresh_token": "fake-not-a-real-token"}),
+    credential_version=2, last_checked_at=timezone.now(),
+    last_error_code="integration_invalid_credentials",
+)
+
 print(json.dumps({
     "primaryEmail": primary.email,
     "primaryPassword": PASSWORD,
@@ -628,6 +665,9 @@ print(json.dumps({
     "workspaceAKnowledgeDocumentProcessingId": str(ws_a_knowledge_document_processing.id),
     "workspaceARetrievalSourceId": str(ws_a_retrieval_source.id),
     "workspaceARetrievalDocumentId": str(ws_a_retrieval_document.id),
+    "workspaceBIntegrationStripeId": str(ws_b_integration_stripe.id),
+    "workspaceBIntegrationEmailId": str(ws_b_integration_email.id),
+    "workspaceAIntegrationCalendarId": str(ws_a_integration_calendar.id),
 }))
 `;
 
