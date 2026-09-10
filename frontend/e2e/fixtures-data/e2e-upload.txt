@@ -1,0 +1,4 @@
+This is a small, harmless synthetic text document used by the Phase 21 Chunk 2
+real-backend Knowledge upload E2E test (e2e/knowledge.spec.ts). It contains no
+real customer data, secrets, or credentials, and exists only to exercise the
+real upload -> ingestion pipeline end to end.

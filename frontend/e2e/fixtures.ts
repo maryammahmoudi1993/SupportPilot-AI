@@ -58,6 +58,8 @@ export interface E2EData {
   workspaceBKnowledgeDocumentReadyId: string;
   workspaceBKnowledgeDocumentFailedId: string;
   workspaceAKnowledgeDocumentId: string;
+  workspaceAKnowledgeSourceId: string;
+  workspaceAKnowledgeDocumentFailedId: string;
 }
 
 let cached: E2EData | null = null;

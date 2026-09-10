@@ -30,7 +30,7 @@ from common.redaction import redact
 from conversations.models import Conversation, ConversationChannel, ConversationStatus, Message, MessageDirection, MessageSenderType
 from customers.models import Customer
 from policies.models import PolicyEffect, PolicyEvaluation, RiskAssessment
-from knowledge.models import KnowledgeDocument, KnowledgeDocumentStatus, KnowledgeSource, KnowledgeSourceType
+from knowledge.models import KnowledgeDocument, KnowledgeDocumentStatus, KnowledgeIngestionJob, KnowledgeIngestionStatus, KnowledgeSource, KnowledgeSourceType
 from tickets.models import HumanHandoff, HumanHandoffReason, HumanHandoffStatus, Ticket, TicketPriority, TicketStatus
 from tools.contracts import RiskLevel, SideEffectType
 from tools.models import ToolBinding, ToolDefinition, ToolExecution, ToolExecutionStatus
@@ -481,6 +481,27 @@ ws_a_knowledge_document = KnowledgeDocument.objects.create(
     status=KnowledgeDocumentStatus.READY, extracted_char_count=30, chunk_count=1,
     last_ingested_at=timezone.now(),
 )
+# Phase 21 Chunk 2: a real failed document in Workspace A (whose primary
+# membership is OWNER — canManageKnowledge) so the real-backend Retry E2E
+# has something legitimately retryable, distinct from Workspace B's own
+# failed-document fixture (ws_b_knowledge_document_failed, used by Chunk 1's
+# read-only failed-state test).
+ws_a_knowledge_document_failed = KnowledgeDocument.objects.create(
+    workspace=ws_a, source=ws_a_knowledge_source, title="Workspace A retryable failure",
+    original_filename="a-broken.pdf", stored_file="knowledge/e2e/a-broken.pdf",
+    content_type="application/pdf", file_size=64, content_sha256="e" * 64,
+    status=KnowledgeDocumentStatus.FAILED, last_error_code="knowledge_malformed_pdf",
+    last_error_message_safe="The PDF is malformed or unreadable.",
+)
+# retry_document (knowledge/services.py) requires a real, real prior
+# ingestion job to re-queue (it re-uses the most recent one) — without this,
+# the real Retry E2E would hit a genuine 409 "No ingestion job exists",
+# which is not the scenario this fixture is for.
+KnowledgeIngestionJob.objects.create(
+    workspace=ws_a, document=ws_a_knowledge_document_failed,
+    status=KnowledgeIngestionStatus.FAILED, idempotency_key="e2e-a-broken-job",
+    error_code="knowledge_malformed_pdf", safe_error_message="The PDF is malformed or unreadable.",
+)
 
 print(json.dumps({
     "primaryEmail": primary.email,
@@ -537,6 +558,8 @@ print(json.dumps({
     "workspaceBKnowledgeDocumentReadyId": str(ws_b_knowledge_document_ready.id),
     "workspaceBKnowledgeDocumentFailedId": str(ws_b_knowledge_document_failed.id),
     "workspaceAKnowledgeDocumentId": str(ws_a_knowledge_document.id),
+    "workspaceAKnowledgeSourceId": str(ws_a_knowledge_source.id),
+    "workspaceAKnowledgeDocumentFailedId": str(ws_a_knowledge_document_failed.id),
 }))
 `;
 
