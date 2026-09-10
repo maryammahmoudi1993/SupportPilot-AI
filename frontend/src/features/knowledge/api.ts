@@ -35,6 +35,8 @@ import type {
   KnowledgeDocument,
   KnowledgeDocumentListParams,
   KnowledgeIngestionJob,
+  KnowledgeSearchRequestInput,
+  KnowledgeSearchResponse,
   KnowledgeSource,
   KnowledgeSourceListParams,
   PaginatedKnowledgeDocumentList,
@@ -287,5 +289,38 @@ export function retryKnowledgeDocument(
       params: { path: { workspace_id: workspaceId, document_id: documentId } },
       signal,
     }),
+  );
+}
+
+/**
+ * Real-time semantic search over this workspace's ready, active knowledge
+ * chunks (`knowledge/retrieval/services.py search_knowledge`) — a POST, not
+ * a GET: every call persists a real `RetrievalEvent` (+ one `RetrievalHit`
+ * per returned result), so this is a genuine, telemetry-producing mutation,
+ * never treated as a cacheable/automatically-retried read (see queries.ts).
+ * Unlike Chunk 2's upload/source-create endpoints, the generated
+ * `KnowledgeSearchRequest`/`KnowledgeSearchResponse` types are accurate —
+ * no schema-gap cast needed here.
+ */
+export function fetchKnowledgeSearch(
+  workspaceId: string,
+  input: KnowledgeSearchRequestInput,
+  signal?: AbortSignal,
+): Promise<KnowledgeSearchResponse> {
+  return unwrap(
+    withRequestTimeout(
+      (requestSignal) =>
+        apiClient.POST("/api/v1/workspaces/{workspace_id}/knowledge/search/", {
+          params: { path: { workspace_id: workspaceId } },
+          body: {
+            query: input.query,
+            top_k: input.topK,
+            source_ids: input.sourceId ? [input.sourceId] : undefined,
+          },
+          signal: requestSignal,
+        }),
+      undefined,
+      signal,
+    ),
   );
 }

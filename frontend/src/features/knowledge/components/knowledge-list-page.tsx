@@ -9,6 +9,7 @@ import {
   KnowledgeDocumentStatusBadge,
   knowledgeSourceTypeLabel,
 } from "@/features/knowledge/components/knowledge-badges";
+import { KnowledgeSearchPanel } from "@/features/knowledge/components/knowledge-search-panel";
 import { KnowledgeSourceCreateForm } from "@/features/knowledge/components/knowledge-source-create-form";
 import { KnowledgeUploadForm } from "@/features/knowledge/components/knowledge-upload-form";
 import {
@@ -473,6 +474,9 @@ function KnowledgeListContent() {
         <TabLink href={`${pathname}?tab=sources`} isActive={tab === "sources"}>
           Sources
         </TabLink>
+        <TabLink href={`${pathname}?tab=search`} isActive={tab === "search"}>
+          Search
+        </TabLink>
       </div>
 
       {workspaceId === null ? (
@@ -484,13 +488,22 @@ function KnowledgeListContent() {
           params={documentParams}
           canManage={canManage}
         />
-      ) : (
+      ) : tab === "sources" ? (
         <SourcesTab
           workspaceId={workspaceId}
           pathname={pathname}
           params={sourceParams}
           canManage={canManage}
         />
+      ) : (
+        // `key={workspaceId}`: a full remount on workspace switch, not just
+        // a prop update. This is the actual in-flight-switch safety
+        // mechanism (master prompt Part I §37) belt-and-braces alongside
+        // the query-key isolation in queries.ts `useKnowledgeSearchQuery` —
+        // switching workspaces discards this panel's in-progress request
+        // and local draft state entirely rather than leaving either
+        // reachable from the new workspace's render tree.
+        <KnowledgeSearchPanel key={workspaceId} workspaceId={workspaceId} />
       )}
     </div>
   );

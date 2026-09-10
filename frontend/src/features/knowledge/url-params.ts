@@ -1,10 +1,14 @@
 /**
  * Shareable/restorable URL query-string state for the Knowledge list — same
  * pattern and untrusted-input posture as features/handoffs/url-params.ts.
- * One route (`/app/knowledge`) hosts two real tabs (Documents/Sources, see
- * knowledge-list-page.tsx); `tab` selects between them and each tab keeps
- * its own page/filter params so switching tabs never clobbers the other's
- * state in the URL.
+ * One route (`/app/knowledge`) hosts three real tabs (Documents/Sources/
+ * Search, see knowledge-list-page.tsx); `tab` selects between them and each
+ * tab keeps its own page/filter params so switching tabs never clobbers the
+ * other's state in the URL. The Search tab's own query text/filters are
+ * deliberately NOT part of the URL (master prompt Part R §66 — no clear
+ * product reason to make a submitted search text shareable/bookmarkable,
+ * and every search is already a persisted, telemetry-producing request) —
+ * only which tab is active lives here.
  */
 import type {
   DocumentStatusFilter,
@@ -20,10 +24,17 @@ import {
 const VALID_STATUSES: readonly string[] = ["pending", "queued", "processing", "ready", "failed"];
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export type KnowledgeTab = "documents" | "sources";
+export type KnowledgeTab = "documents" | "sources" | "search";
 
 export function parseKnowledgeTab(searchParams: URLSearchParams): KnowledgeTab {
-  return searchParams.get("tab") === "sources" ? "sources" : "documents";
+  const raw = searchParams.get("tab");
+  if (raw === "sources") {
+    return "sources";
+  }
+  if (raw === "search") {
+    return "search";
+  }
+  return "documents";
 }
 
 function parsePage(raw: string | null, fallback: number): number {

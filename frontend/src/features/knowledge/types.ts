@@ -2,10 +2,9 @@
  * Knowledge/RAG domain types. `KnowledgeDocument` and `KnowledgeSource` are
  * the two real, public entities (backend/knowledge/models.py
  * `KnowledgeDocument`/`KnowledgeSource`, serialized by
- * backend/knowledge/serializers.py). `KnowledgeChunk` and retrieval
- * (`RetrievalEvent`/`RetrievalHit`) are real backend concepts too, but no
- * chunk implemented so far reads or renders them — out of scope until
- * Chunk 3 (retrieval preview).
+ * backend/knowledge/serializers.py). `KnowledgeChunk` is a real backend
+ * concept surfaced only indirectly, through retrieval hit `text` (Chunk 3) —
+ * no chunk detail/list endpoint is ever fetched directly.
  *
  * `KnowledgeIngestionJob` (Chunk 2) has a real, public, but never-directly-
  * fetched-here GET endpoint (`GET .../knowledge/ingestion-jobs/{id}/`) — it
@@ -15,6 +14,15 @@
  * signal the UI needs, and polling a second, separate job resource per
  * document would be exactly the N+1/compounded-polling pattern master
  * prompt Part D §17 and Part L §40 forbid.
+ *
+ * `RetrievalEvent`/`RetrievalHit` (Chunk 3) are real, persisted on every
+ * search (`knowledge/retrieval/services.py search_knowledge`), but there is
+ * no public *list* endpoint for them — only `GET .../knowledge/
+ * retrieval-events/{event_id}/`, a single-event read that returns exactly
+ * the same shape the search response itself already carries. No Retrieval
+ * History UI is built (master prompt Part H §32): an internal model/a
+ * single-event-by-ID read endpoint is not the same thing as a public list
+ * capability, and this chunk never links to or fetches that endpoint at all.
  */
 import type { components } from "@/types/api";
 
@@ -153,4 +161,47 @@ export interface UploadKnowledgeDocumentInput {
 export interface CreateKnowledgeSourceInput {
   name: string;
   description?: string;
+}
+
+export type KnowledgeSearchResponse = components["schemas"]["KnowledgeSearchResponse"];
+export type KnowledgeSearchHit = components["schemas"]["KnowledgeSearchHit"];
+
+/**
+ * Real, backend-enforced retrieval bounds (config/settings.py
+ * `KNOWLEDGE_DEFAULT_TOP_K`/`KNOWLEDGE_MAX_TOP_K`, knowledge/retrieval/
+ * services.py `search_knowledge`) — mirrored here for client-side UX only
+ * (the top_k select's bounded option list); the backend independently
+ * re-validates and is the sole authority (a request outside `[1, MAX]`
+ * fails with a real 400 `knowledge_invalid_retrieval_query`).
+ */
+export const KNOWLEDGE_SEARCH_DEFAULT_TOP_K = 5;
+export const KNOWLEDGE_SEARCH_MAX_TOP_K = 20;
+export const KNOWLEDGE_SEARCH_MAX_QUERY_LENGTH = 2000;
+
+/**
+ * Real request fields only (knowledge/serializers.py
+ * `KnowledgeSearchRequestSerializer`: `query`, `top_k`, `minimum_score`,
+ * `source_ids`, `document_ids`). This chunk's preview UI exposes `query`,
+ * `top_k`, and a single-source filter (`source_ids`) only:
+ *
+ * - `minimum_score` is a real field, but exposing a raw similarity-score
+ *   threshold control would require explaining the same score semantics
+ *   this chunk otherwise keeps deliberately minimal (master prompt Part C
+ *   §14 lists it as optional, not required) — omitted from this preview,
+ *   not from the contract.
+ * - `document_ids` is real too, but there is no scalable, product-safe way
+ *   to offer a document picker: the document list endpoint has no
+ *   title/text search filter at all (see api.ts's Chunk 1 schema-gap note),
+ *   so populating a dropdown would mean fetching every document in the
+ *   workspace — exactly the "500-document fake completeness" the master
+ *   prompt (Part G §31) forbids. Omitted for the same reason.
+ *
+ * `sourceId` here is deliberately singular (one filter, not a multi-select)
+ * to match the existing Documents-tab Source filter's UX, even though the
+ * real backend accepts a list.
+ */
+export interface KnowledgeSearchRequestInput {
+  query: string;
+  topK?: number;
+  sourceId?: string;
 }

@@ -23,6 +23,7 @@ import {
   fetchAllKnowledgeSourcesForFilter,
   fetchKnowledgeDocumentDetail,
   fetchKnowledgeDocumentList,
+  fetchKnowledgeSearch,
   fetchKnowledgeSourceDetail,
   fetchKnowledgeSourceList,
 } from "@/features/knowledge/api";
@@ -30,6 +31,8 @@ import { knowledgeKeys } from "@/features/knowledge/query-keys";
 import type {
   KnowledgeDocument,
   KnowledgeDocumentListParams,
+  KnowledgeSearchRequestInput,
+  KnowledgeSearchResponse,
   KnowledgeSource,
   KnowledgeSourceListParams,
   PaginatedKnowledgeDocumentList,
@@ -112,5 +115,57 @@ export function useKnowledgeSourceDetailQuery(workspaceId: string | null, source
     queryFn: ({ signal }) =>
       fetchKnowledgeSourceDetail(workspaceId as string, sourceId as string, signal),
     enabled: workspaceId !== null && sourceId !== null,
+  });
+}
+
+/**
+ * Retrieval preview (Chunk 3). Deliberately NOT an ordinary `useQuery` keyed
+ * by the request's content — search is a telemetry-producing POST (every
+ * call persists a real `RetrievalEvent`, master prompt Part H §32), not a
+ * cacheable list, so:
+ *
+ * - `enabled: false` — this query never fires on its own (mount,
+ *   `queryKey` change, window focus, reconnect); the only way it ever runs
+ *   is an explicit `refetch()` call from the search form's submit handler
+ *   (master prompt Part J §41 — "one explicit search: one retrieval
+ *   request").
+ * - `retry: 0` — an automatic retry would silently create a second,
+ *   user-invisible `RetrievalEvent` for the same submitted search.
+ * - the query key is a single "current search" slot per workspace (see
+ *   `knowledgeKeys.retrievalCurrent`), not one entry per distinct request —
+ *   which is exactly what makes an in-flight workspace switch safe without
+ *   any extra bookkeeping: a response for Workspace A's request can only
+ *   ever resolve into A's slot. The component reading the *current* active
+ *   workspace's slot is, at that point, already reading a different (empty,
+ *   or previously-cleared) key — so a late A response can never render
+ *   under B (master prompt Part I §37), and switching back to A later
+ *   starts a fresh search rather than resurrecting a stale one.
+ * - `requestRef` (not a state variable) is what the actual submitted
+ *   request comes from: `queryFn` reads `requestRef.current` at *call*
+ *   time, not at the time this hook's closure was created, so updating the
+ *   ref and calling `refetch()` in the same event handler always uses the
+ *   just-submitted request — no stale-closure/second-click bug, and no
+ *   `useEffect` needed to "sync" state into the query.
+ */
+export function useKnowledgeSearchQuery(
+  workspaceId: string,
+  requestRef: { current: KnowledgeSearchRequestInput | null },
+) {
+  return useQuery<KnowledgeSearchResponse, ApiError>({
+    queryKey: knowledgeKeys.retrievalCurrent(workspaceId),
+    queryFn: ({ signal }) => {
+      const request = requestRef.current;
+      if (!request) {
+        // Unreachable in practice: the form only ever calls `refetch()`
+        // after setting `requestRef.current` — this guards the type only.
+        return Promise.reject(new Error("No search has been submitted yet."));
+      }
+      return fetchKnowledgeSearch(workspaceId, request, signal);
+    },
+    enabled: false,
+    retry: 0,
+    refetchOnWindowFocus: false,
+    refetchOnMount: false,
+    refetchOnReconnect: false,
   });
 }

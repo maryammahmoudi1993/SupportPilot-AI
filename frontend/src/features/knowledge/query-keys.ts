@@ -33,4 +33,20 @@ export const knowledgeKeys = {
     [...knowledgeKeys.sources(workspaceId), "detail"] as const,
   sourceDetail: (workspaceId: string, sourceId: string) =>
     [...knowledgeKeys.sourceDetails(workspaceId), sourceId] as const,
+
+  /**
+   * A single workspace-scoped "current search result" slot (Chunk 3) — not
+   * one cache entry per distinct query/filters/top_k. Retrieval is a
+   * telemetry-producing POST (every call persists a real `RetrievalEvent`),
+   * never an ordinary cacheable list, so there is no value in retaining a
+   * separate cache entry per past query text; the workspace boundary is the
+   * only isolation property that matters here (master prompt Part J §40),
+   * and this key still delivers it: a late-arriving response for Workspace
+   * A can only ever write into A's slot, never into B's, because switching
+   * the active workspace changes this key entirely — see queries.ts
+   * `useKnowledgeSearchQuery`.
+   */
+  retrieval: (workspaceId: string) => [...knowledgeKeys.all(workspaceId), "retrieval"] as const,
+  retrievalCurrent: (workspaceId: string) =>
+    [...knowledgeKeys.retrieval(workspaceId), "current"] as const,
 };
