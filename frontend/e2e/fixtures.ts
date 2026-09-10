@@ -53,6 +53,11 @@ export interface E2EData {
   workspaceBHandoffPendingId: string;
   workspaceBHandoffResolvedId: string;
   workspaceAHandoffPendingId: string;
+  workspaceBKnowledgeSourceId: string;
+  workspaceBKnowledgeSourceName: string;
+  workspaceBKnowledgeDocumentReadyId: string;
+  workspaceBKnowledgeDocumentFailedId: string;
+  workspaceAKnowledgeDocumentId: string;
 }
 
 let cached: E2EData | null = null;

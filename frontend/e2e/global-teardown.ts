@@ -12,6 +12,7 @@ const CLEANUP_SCRIPT = `
 from accounts.models import User
 from agents.models import AgentRun
 from approvals.models import ApprovalRequest
+from knowledge.models import KnowledgeDocument, KnowledgeSource
 from tickets.models import HumanHandoff
 from tools.models import ToolExecution
 from workspaces.models import Workspace
@@ -31,14 +32,20 @@ from workspaces.models import Workspace
 # ordering, but is deleted explicitly here for a clean, auditable log line.
 # ToolDefinition rows are global/code-owned (no workspace FK) and are never
 # deleted here — sync_tool_definitions() is safely re-run/no-op on the next
-# E2E setup.
+# E2E setup. KnowledgeDocument.source is on_delete=PROTECT, but both
+# KnowledgeSource and KnowledgeDocument also carry their own direct
+# workspace CASCADE, and are deleted explicitly here (before the workspace
+# cascade) purely for a clean, auditable log line — same reasoning as
+# HumanHandoff above.
 deleted_approvals = ApprovalRequest.objects.filter(workspace__name__startswith="E2E ").delete()
 deleted_handoffs = HumanHandoff.objects.filter(workspace__name__startswith="E2E ").delete()
+deleted_knowledge_documents = KnowledgeDocument.objects.filter(workspace__name__startswith="E2E ").delete()
+deleted_knowledge_sources = KnowledgeSource.objects.filter(workspace__name__startswith="E2E ").delete()
 deleted_tool_executions = ToolExecution.objects.filter(workspace__name__startswith="E2E ").delete()
 deleted_runs = AgentRun.objects.filter(workspace__name__startswith="E2E ").delete()
 deleted_users = User.objects.filter(email__startswith="e2e-").delete()
 deleted_workspaces = Workspace.objects.filter(name__startswith="E2E ").delete()
-print("E2E cleanup:", deleted_approvals, deleted_handoffs, deleted_tool_executions, deleted_runs, deleted_users, deleted_workspaces)
+print("E2E cleanup:", deleted_approvals, deleted_handoffs, deleted_knowledge_documents, deleted_knowledge_sources, deleted_tool_executions, deleted_runs, deleted_users, deleted_workspaces)
 `;
 
 export default async function globalTeardown(): Promise<void> {

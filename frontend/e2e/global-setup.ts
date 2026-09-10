@@ -30,6 +30,7 @@ from common.redaction import redact
 from conversations.models import Conversation, ConversationChannel, ConversationStatus, Message, MessageDirection, MessageSenderType
 from customers.models import Customer
 from policies.models import PolicyEffect, PolicyEvaluation, RiskAssessment
+from knowledge.models import KnowledgeDocument, KnowledgeDocumentStatus, KnowledgeSource, KnowledgeSourceType
 from tickets.models import HumanHandoff, HumanHandoffReason, HumanHandoffStatus, Ticket, TicketPriority, TicketStatus
 from tools.contracts import RiskLevel, SideEffectType
 from tools.models import ToolBinding, ToolDefinition, ToolExecution, ToolExecutionStatus
@@ -437,6 +438,50 @@ ws_a_handoff_pending = HumanHandoff.objects.create(
     safe_summary="Retrieval confidence was too low to answer safely.",
 )
 
+# Knowledge/RAG domain (Phase 21 Chunk 1) — real KnowledgeSource/
+# KnowledgeDocument rows with real cross-workspace data, created directly
+# via the ORM (never through the upload endpoint, which would require a real
+# multipart file and would trigger real ingestion via Celery) so the
+# real-backend smoke can prove tenant isolation, source/status filters, and
+# safe metadata rendering against the actual API. Rows cascade-delete with
+# their workspace (KnowledgeSource.workspace and KnowledgeDocument.workspace
+# are both on_delete=CASCADE); KnowledgeDocument.source is on_delete=PROTECT
+# but that only guards a source-only delete — Workspace.delete() collects
+# both models via their own direct workspace CASCADE, so no special
+# ordering is needed here (same reasoning as HumanHandoff above).
+ws_b_knowledge_source = KnowledgeSource.objects.create(
+    workspace=ws_b, name="Support Macros", description="Canned refund/shipping responses.",
+    source_type=KnowledgeSourceType.UPLOAD, is_active=True,
+)
+ws_b_knowledge_document_ready = KnowledgeDocument.objects.create(
+    workspace=ws_b, source=ws_b_knowledge_source, title="Refund policy",
+    original_filename="refund-policy.txt", stored_file="knowledge/e2e/refund-policy.txt",
+    content_type="text/plain", file_size=512, content_sha256="b" * 64,
+    status=KnowledgeDocumentStatus.READY, extracted_char_count=480, chunk_count=3,
+    last_ingested_at=timezone.now(),
+    # Phase 21 Chunk 1 content-safety fixture: HTML/script-looking real
+    # metadata, to prove end to end (not just via unit test) that it is
+    # rendered as inert plain text, never interpreted as markup.
+    metadata={"note": "<script>window.__xss_marker = true;</script>"},
+)
+ws_b_knowledge_document_failed = KnowledgeDocument.objects.create(
+    workspace=ws_b, source=ws_b_knowledge_source, title="Malformed upload",
+    original_filename="broken.pdf", stored_file="knowledge/e2e/broken.pdf",
+    content_type="application/pdf", file_size=64, content_sha256="c" * 64,
+    status=KnowledgeDocumentStatus.FAILED, last_error_code="knowledge_malformed_pdf",
+    last_error_message_safe="The PDF is malformed or unreadable.",
+)
+ws_a_knowledge_source = KnowledgeSource.objects.create(
+    workspace=ws_a, name="Workspace A Only Source", source_type=KnowledgeSourceType.MANUAL,
+)
+ws_a_knowledge_document = KnowledgeDocument.objects.create(
+    workspace=ws_a, source=ws_a_knowledge_source, title="Workspace A only document",
+    original_filename="a-only.txt", stored_file="knowledge/e2e/a-only.txt",
+    content_type="text/plain", file_size=32, content_sha256="d" * 64,
+    status=KnowledgeDocumentStatus.READY, extracted_char_count=30, chunk_count=1,
+    last_ingested_at=timezone.now(),
+)
+
 print(json.dumps({
     "primaryEmail": primary.email,
     "primaryPassword": PASSWORD,
@@ -487,6 +532,11 @@ print(json.dumps({
     "workspaceBHandoffPendingId": str(ws_b_handoff_pending.id),
     "workspaceBHandoffResolvedId": str(ws_b_handoff_resolved.id),
     "workspaceAHandoffPendingId": str(ws_a_handoff_pending.id),
+    "workspaceBKnowledgeSourceId": str(ws_b_knowledge_source.id),
+    "workspaceBKnowledgeSourceName": ws_b_knowledge_source.name,
+    "workspaceBKnowledgeDocumentReadyId": str(ws_b_knowledge_document_ready.id),
+    "workspaceBKnowledgeDocumentFailedId": str(ws_b_knowledge_document_failed.id),
+    "workspaceAKnowledgeDocumentId": str(ws_a_knowledge_document.id),
 }))
 `;
 
