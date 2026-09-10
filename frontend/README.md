@@ -1856,6 +1856,125 @@ public endpoint is added first.
 | `integrations_list` | Generated schema types `ordering`/`search`; neither is real (no filter backend on the view at all). Only `page` is real. | No — narrowed locally in `features/integrations/api.ts`. |
 | `integrations_create` (deferred) | Generated 201 response is typed as `IntegrationConnectionCreate` (the *request* shape) instead of the real full `IntegrationConnection` body (`IntegrationConnectionListCreateView.create` returns `IntegrationConnectionSerializer(connection).data`). | No — not exercised this chunk (create is deferred); documented for whichever later chunk implements it. |
 
+### Webhook Endpoints + Deliveries (Phase 22 Chunk 2)
+
+Read-only operational visibility over the real, already-built backend
+webhooks domain (`backend/webhooks/`, a Phase 10 feature). Two real,
+workspace-scoped entities are exposed — `WebhookEndpoint` and
+`WebhookDelivery` — as two more tabs on the same `/app/integrations` page
+Chunk 1 built (master prompt Part E §17: one coherent Integrations section,
+never a separate top-level Webhooks/Deliveries nav entry).
+
+**Public API contract discovered** (verified against `webhooks/views.py`,
+`webhooks/selectors.py`, `webhooks/serializers.py`, `webhooks/services.py`,
+and `webhooks/permissions.py` — never inferred from models/services alone):
+
+| Capability | Status |
+| --- | --- |
+| Endpoint list/detail | **Real**, implemented this chunk. `GET .../webhooks/endpoints/`, `GET .../webhooks/endpoints/{id}/`. Any active workspace member can read. |
+| Endpoint create | Real (`POST .../webhooks/endpoints/`, support_manager/admin/owner) — **not implemented this chunk**. Accepts a raw destination URL and produces a raw signing secret, once. |
+| Endpoint update | Real (`PATCH .../webhooks/endpoints/{id}/`, name/url/subscribed_event_types) — **not implemented this chunk**. |
+| Endpoint enable/disable | Real (`PATCH .../webhooks/endpoints/{id}/status/`) — **not implemented this chunk**. |
+| Rotate signing secret | Real (`POST .../webhooks/endpoints/{id}/rotate-secret/`, throttled as a sensitive mutation) — **not implemented this chunk**. |
+| Endpoint delete | **Not a real endpoint at all.** No delete view exists in `webhooks/urls.py` — an endpoint can only be disabled, never deleted, through the public API. |
+| Delivery list/detail | **Real**, implemented this chunk. `GET .../webhooks/deliveries/`, `GET .../webhooks/deliveries/{id}/`. Any active workspace member can read (same permission as endpoints — not the manage-only permission Chunk 1 assumed for Integrations). |
+| Redrive | Real (`POST .../webhooks/deliveries/{id}/redrive/`, support_manager/admin/owner, only from a terminal `failed`/`dead` delivery) — **discovered and documented, not implemented this chunk** (master prompt Part D §16 — Chunk 3 territory). |
+| Individual attempt rows | **Not a real endpoint at all.** `DeliveryAttempt` is a real model (`notifications/models.py`) with no public list/detail view anywhere — `WebhookDeliverySerializer` only ever exposes the aggregate `attempt_count`/`max_attempts` plus the single latest attempt's `last_http_status` (a `SerializerMethodField` reading `delivery.attempts.order_by("-attempt_number").first()`). No per-attempt timeline is fetched or fabricated. |
+| Request payload / response body / headers | **Not exposed by any public serializer at all** — verified directly against `WebhookDeliverySerializer`'s exhaustive field list. There is nothing to render as untrusted response content beyond the already-safe `last_error_code` string and `last_http_status` integer. |
+
+**Mutation deferral decision** (same posture as Chunk 1's Integration
+Connections decision, master prompt's explicit "read/operations visibility"
+framing for this chunk): every write endpoint above is real, but each
+either accepts a raw destination URL/produces a raw signing secret (create,
+rotate) or is a genuine operational mutation (status, redrive) the master
+prompt explicitly reserves for a later chunk. Redrive in particular was
+fully discovered (allowed states: only `failed`/`dead`; reuses the same
+logical `WebhookDelivery`/event, never creates a second one; grants
+`WEBHOOKS_REDRIVE_ATTEMPT_ALLOWANCE` additional attempts by raising
+`max_attempts`; a disabled endpoint is rejected before any state change) but
+deliberately has no UI control yet.
+
+**Endpoint model**: `status` — `active`/`disabled`
+(`WebhookEndpointStatusEnum`). `subscribed_event_types` — a real
+`WebhookEventType` allowlist (`approval.requested`, `approval.approved`,
+`approval.rejected`, `approval.expired`, `handoff.created`); an unrecognized
+value falls back safely. The destination URL is real, workspace-member-
+visible configuration data — shown as plain text, **never** auto-linked (no
+existing safe-external-link policy in this app covers an arbitrary
+operator-entered destination) and never injected into HTML.
+
+**Signing secret safety**: never returned by list/detail at all — only
+`secret_configured` (bool) and `secret_created_at` (timestamp) are ever
+rendered, proven in both a unit test (asserting the raw DOM never contains
+`encrypted_signing_secret` or a `"signing_secret":` key) and the
+real-backend E2E smoke (a real endpoint seeded with a genuine encrypted
+signing secret; page HTML/`localStorage`/`sessionStorage` all asserted to
+never contain it).
+
+**Delivery model**: `status` is one of the real
+`notifications.models.DeliveryStatus` values — `pending`, `claimed`,
+`retry_scheduled`, `delivered`, `failed`, `dead`
+(`DELIVERY_TERMINAL_STATUSES` = delivered/failed/dead). Attempt
+representation is Option A (one `WebhookDelivery` row + `attempt_count`/
+`max_attempts` + latest `last_http_status` only — see the contract table
+above), never a fabricated per-attempt timeline.
+
+**At-least-once honesty** (master prompt Part D §14): this platform never
+guarantees exactly-once external delivery — the delivery detail page states
+this explicitly ("Delivered" means the endpoint returned 2xx *at least
+once*, not that it was called exactly once). Automatic retry is real,
+deterministic, bounded exponential backoff
+(`notifications/backoff.py compute_retry_delay_seconds`, base/cap server
+settings only) — never estimated or countdown-animated client-side; the
+real `next_attempt_at` timestamp is shown as-is, and **only** while the
+delivery is non-terminal (`Delivery.next_attempt_at` is never null, but its
+value is stale/meaningless once terminal — never labeled as a real retry
+ETA for a settled delivery).
+
+**Schema gaps** (Category B, all non-blocking): the generated
+`WebhookDelivery.status`/`event_type` fields are typed plain `string` (no
+enum at all — `webhooks/serializers.py WebhookDeliverySerializer` declares
+`status`/`event_type` as plain `CharField(source=...)` on a non-
+`ModelSerializer`, which drf-spectacular can't infer choices from); the
+real values are mirrored locally in `features/webhooks/types.ts`.
+`WebhookDelivery.delivered_at`/`failed_at` are typed as required non-null
+`string`, but the real model fields are nullable and DRF's read
+serialization passes a `None` model value through as JSON `null` regardless
+of `allow_null` — widened to `string | null` via `SafeWebhookDelivery`/
+`toSafeWebhookDelivery`. `WebhookEndpoint.subscribed_event_types` is typed
+`unknown` (no element type inferable for a plain `JSONField(default=list)`)
+— narrowed via `subscribedEventTypes()`. Same `ordering`/`search`-typed-but-
+dead, only-`page`-is-real gap as Integrations' Chunk 1 list (no
+`filter_backends` on either webhooks list view).
+
+**Routes**: `/app/integrations?tab=webhooks` and `?tab=deliveries` (list),
+`/app/integrations/webhooks/[endpointId]` and
+`/app/integrations/deliveries/[deliveryId]` (detail) — no new top-level nav
+entry. **Server state**:
+`["workspaces", wsId, "integrations", "webhooks", "endpoints"|"deliveries", "list"|"detail", ...]`
+query keys (`features/webhooks/query-keys.ts`), nested under the same
+`integrations` root as connections. **Polling**: only Delivery *detail*
+polls, and only while non-terminal — same `refetchInterval`-reads-latest-
+data pattern as Knowledge's document polling; the Delivery *list* and
+Endpoint list/detail are never polled.
+
+**Notifications**: confirmed, again, to have no public API at all
+(`backend/notifications/` has no `urls.py`/`views.py`/`serializers.py`,
+never `include()`d in `config/urls.py`) — no Notifications UI exists or is
+planned for any later chunk unless a real public endpoint is added first.
+
+**Real-backend E2E note**: every delivery status fixture
+(`e2e/global-setup.ts`) is reached through the real, pure-DB
+`notifications.services` functions (`claim_delivery`/
+`complete_delivery_success`/`complete_delivery_failure`) against a
+`Delivery` row created directly via the ORM — deliberately **not**
+`notifications.services.create_delivery`, whose real `transaction.on_commit`
+Celery dispatch would otherwise be picked up by this suite's real worker and
+attempt genuine outbound HTTP delivery to the fixture's destination URL
+(caught and fixed during this chunk's own real-backend run — see the Chunk
+2 defect ledger). No live external webhook destination is ever contacted by
+this suite.
+
 ## Local development
 
 1. Start the backend (see `../README.md`) so `NEXT_PUBLIC_API_BASE_URL`
@@ -2135,7 +2254,7 @@ empty/error/workspace-isolation/unknown-status coverage as every other
 domain, plus a conversation-scoped test proving only the real
 `conversation`-filtered rows render.
 
-## End-to-end tests (`e2e/`, Phase 18 Chunk 4; extended Phase 19 Chunks 1-3, Phase 20 Chunks 1-3, Phase 22 Chunk 1)
+## End-to-end tests (`e2e/`, Phase 18 Chunk 4; extended Phase 19 Chunks 1-3, Phase 20 Chunks 1-3, Phase 22 Chunks 1-2)
 
 Playwright (`@playwright/test`), Chromium only — the mandatory acceptance
 browser for this phase; Firefox/WebKit weren't added (single-browser
