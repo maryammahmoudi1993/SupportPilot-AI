@@ -502,6 +502,23 @@ KnowledgeIngestionJob.objects.create(
     status=KnowledgeIngestionStatus.FAILED, idempotency_key="e2e-a-broken-job",
     error_code="knowledge_malformed_pdf", safe_error_message="The PDF is malformed or unreadable.",
 )
+# Phase 21 Chunk 2A: a real, genuinely non-terminal (PROCESSING) document in
+# Workspace A, created directly via the ORM rather than through a real
+# upload — a real upload's genuine non-terminal window is too short and
+# timing-dependent to assert against reliably (the real Celery worker may
+# race straight through it), and the master prompt explicitly forbids
+# slowing production code or adding arbitrary sleeps to widen that window.
+# This row has no associated KnowledgeIngestionJob, so nothing (no real
+# Celery task references it) will ever move it out of PROCESSING — it stays
+# non-terminal for the lifetime of this fixture, which is exactly what the
+# active-processing workspace-isolation test needs to prove: a real backend
+# non-terminal state, safely and deterministically held in place.
+ws_a_knowledge_document_processing = KnowledgeDocument.objects.create(
+    workspace=ws_a, source=ws_a_knowledge_source, title="Workspace A actively processing",
+    original_filename="a-processing.txt", stored_file="knowledge/e2e/a-processing.txt",
+    content_type="text/plain", file_size=48, content_sha256="f" * 64,
+    status=KnowledgeDocumentStatus.PROCESSING,
+)
 
 print(json.dumps({
     "primaryEmail": primary.email,
@@ -560,6 +577,7 @@ print(json.dumps({
     "workspaceAKnowledgeDocumentId": str(ws_a_knowledge_document.id),
     "workspaceAKnowledgeSourceId": str(ws_a_knowledge_source.id),
     "workspaceAKnowledgeDocumentFailedId": str(ws_a_knowledge_document_failed.id),
+    "workspaceAKnowledgeDocumentProcessingId": str(ws_a_knowledge_document_processing.id),
 }))
 `;
 

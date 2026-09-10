@@ -60,6 +60,7 @@ export interface E2EData {
   workspaceAKnowledgeDocumentId: string;
   workspaceAKnowledgeSourceId: string;
   workspaceAKnowledgeDocumentFailedId: string;
+  workspaceAKnowledgeDocumentProcessingId: string;
 }
 
 let cached: E2EData | null = null;

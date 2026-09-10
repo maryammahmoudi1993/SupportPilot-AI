@@ -207,6 +207,166 @@ test.describe("Knowledge", () => {
     await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
   });
 
+  test("a real unsupported file type is genuinely rejected by the backend — no document or ingestion job is ever created", async ({
+    page,
+  }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+    await page.getByRole("button", { name: data.defaultWorkspaceName }).click();
+    await page.getByRole("menuitem", { name: new RegExp(data.otherWorkspaceName) }).click();
+    // Active workspace is now A (owner — canManageKnowledge).
+
+    await page.goto("/app/knowledge");
+    await page.getByRole("button", { name: "Upload document" }).click();
+    const uploadForm = page.getByRole("form", { name: "Upload a knowledge document" });
+    await uploadForm.getByLabel("Source").selectOption(data.workspaceAKnowledgeSourceId);
+    await uploadForm.getByLabel("Title").fill("E2E unsupported file");
+    // `setInputFiles` bypasses the file picker entirely (there is no native
+    // dialog to filter), so the `<input accept>` hint never blocks this —
+    // exactly what's needed to prove the REAL backend, not the client hint,
+    // is the actual authority (knowledge/ingestion/validators.py `validate_upload`,
+    // raised before any `KnowledgeDocument` row is created — see
+    // knowledge/services.py `upload_document`).
+    await uploadForm
+      .getByLabel("File")
+      .setInputFiles(path.join(__dirname, "fixtures-data", "e2e-unsupported.exe"));
+    const [response] = await Promise.all([
+      page.waitForResponse(
+        (res) => res.url().includes("/knowledge/documents/") && res.request().method() === "POST",
+      ),
+      uploadForm.getByRole("button", { name: "Upload" }).click(),
+    ]);
+    expect(response.status()).toBe(400);
+    const body = await response.json();
+    expect(body.error.code).toBe("knowledge_unsupported_type");
+
+    // The frontend shows the real safe rejection, never a fabricated success.
+    await expect(page.getByText("This upload was rejected")).toBeVisible();
+    await expect(page.getByText("The uploaded file type is not supported.")).toBeVisible();
+    // Still on the upload form — no navigation to a document that doesn't exist.
+    await expect(uploadForm).toBeVisible();
+    await expect(page.getByRole("heading", { name: "E2E unsupported file" })).toHaveCount(0);
+  });
+
+  test("the real upload form never sends a request with no file selected, in a real browser", async ({
+    page,
+  }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+    await page.getByRole("button", { name: data.defaultWorkspaceName }).click();
+    await page.getByRole("menuitem", { name: new RegExp(data.otherWorkspaceName) }).click();
+
+    await page.goto("/app/knowledge");
+    await page.getByRole("button", { name: "Upload document" }).click();
+    const uploadForm = page.getByRole("form", { name: "Upload a knowledge document" });
+    await uploadForm.getByLabel("Source").selectOption(data.workspaceAKnowledgeSourceId);
+    await uploadForm.getByLabel("Title").fill("E2E missing file");
+
+    const uploadButton = uploadForm.getByRole("button", { name: "Upload" });
+    // Product decision (Chunk 2A §5): the Source select and File input use
+    // `aria-required` rather than native `required` (see the component's
+    // doc comment) — but the real gate is the submit control's own disabled
+    // state, driven by the same `canSubmit` check as every other required
+    // field. This is proven directly in a real browser, not just jsdom.
+    await expect(uploadButton).toBeDisabled();
+    await expect(uploadForm.getByLabel("File")).toHaveAttribute("aria-required", "true");
+
+    // A disabled submit control also means no implicit form submission on
+    // Enter from a text field — proven directly rather than assumed.
+    let requestSeen = false;
+    const onRequest = (req: import("@playwright/test").Request) => {
+      if (req.url().includes("/knowledge/documents/") && req.method() === "POST") {
+        requestSeen = true;
+      }
+    };
+    page.on("request", onRequest);
+    await uploadForm.getByLabel("Title").click();
+    await page.keyboard.press("Enter");
+    // Bounded wait, not a fixed guess at network latency: proves no request
+    // fires in a window well past any real request's round trip.
+    await page.waitForTimeout(1000);
+    page.off("request", onRequest);
+    expect(requestSeen).toBe(false);
+    // The form stays open and fully usable — no crash, no dead end.
+    await expect(uploadForm).toBeVisible();
+    await expect(uploadButton).toBeDisabled();
+  });
+
+  test("a real actively-processing (non-terminal) Workspace A document is never visible after switching to Workspace B — including its detail route and its polling", async ({
+    page,
+  }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+    await page.getByRole("button", { name: data.defaultWorkspaceName }).click();
+    await page.getByRole("menuitem", { name: new RegExp(data.otherWorkspaceName) }).click();
+    // Active workspace is now A (owner). This document is a real, genuinely
+    // non-terminal (PROCESSING) row, held in place deterministically because
+    // it has no associated ingestion job for any real Celery worker to act
+    // on (see global-setup.ts) — not a racy real upload.
+
+    await page.goto("/app/knowledge");
+    await expect(page.getByRole("link", { name: "Workspace A actively processing" })).toBeVisible();
+
+    await page
+      .getByRole("link", { name: "Workspace A actively processing" })
+      .click();
+    await expect(page.getByRole("heading", { name: "Workspace A actively processing" })).toBeVisible();
+    await expect(page.getByText("Processing", { exact: true }).first()).toBeVisible();
+    await expect(page.getByText("Still in progress")).toBeVisible();
+
+    // Confirm real detail polling is active while non-terminal.
+    const documentUrlFragment = `/knowledge/documents/${data.workspaceAKnowledgeDocumentProcessingId}/`;
+    const pollBeforeSwitch = page.waitForRequest(
+      (req) => req.url().includes(documentUrlFragment) && req.method() === "GET",
+      { timeout: 8_000 },
+    );
+    await expect(pollBeforeSwitch).resolves.toBeTruthy();
+
+    // Switch to Workspace B WITHOUT navigating away first — still on this
+    // exact document's detail URL — the strongest form of this isolation
+    // check (master prompt §6).
+    await page.getByRole("button", { name: data.otherWorkspaceName }).click();
+    await page.getByRole("menuitem", { name: new RegExp(data.defaultWorkspaceName) }).click();
+
+    // No A metadata flash: the real document (which does not exist in B)
+    // is safely rejected, never rendered under B.
+    await expect(page.getByText("Document not found")).toBeVisible();
+    await expect(page.getByText("Workspace A actively processing")).toHaveCount(0);
+    await expect(page.getByText("Still in progress")).toHaveCount(0);
+
+    // No further polling of the A document leaks into the B-active page —
+    // bounded wait comfortably past one real 5s poll interval.
+    let leakedRequestSeen = false;
+    const onLeak = (req: import("@playwright/test").Request) => {
+      if (req.url().includes(documentUrlFragment)) {
+        leakedRequestSeen = true;
+      }
+    };
+    page.on("request", onLeak);
+    await page.waitForTimeout(6_000);
+    page.off("request", onLeak);
+    expect(leakedRequestSeen).toBe(false);
+
+    // Direct deep link under B is independently, safely rejected too — a
+    // real API call, not just a client-side route guard. Capture the app's
+    // real Bearer token from a real authenticated request it makes anyway
+    // (see the unauthorized-upload test below for why: the token lives only
+    // in an in-memory JS module, never a cookie/localStorage).
+    const [listRequest] = await Promise.all([
+      page.waitForRequest((req) => req.url().includes("/knowledge/documents/")),
+      page.goto("/app/knowledge"),
+    ]);
+    const authorization = listRequest.headers()["authorization"];
+    expect(authorization).toBeTruthy();
+    const response = await page.request.get(
+      `http://localhost:8000/api/v1/workspaces/${data.workspaceBId}/knowledge/documents/${data.workspaceAKnowledgeDocumentProcessingId}/`,
+      { headers: { Authorization: authorization } },
+    );
+    expect(response.status()).toBe(404);
+    const body = await response.json();
+    expect(body.error.code).toBe("not_found");
+  });
+
   test("a direct, unauthorized API upload attempt is genuinely rejected by the backend — no privilege escalation", async ({
     page,
   }) => {

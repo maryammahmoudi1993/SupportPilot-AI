@@ -1,0 +1,4 @@
+Not a real executable. This is a small, harmless synthetic binary-looking file
+used only by the Phase 21 Chunk 2A real-backend Knowledge upload E2E test
+(e2e/knowledge.spec.ts) to prove the real backend rejects an unsupported file
+type. It contains no real customer data, secrets, or credentials.
