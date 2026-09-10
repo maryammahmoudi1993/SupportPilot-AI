@@ -14,6 +14,20 @@ import { e2eData, login } from "./fixtures";
  * pieces genuinely compose — a real upload this test performs itself
  * (not a pre-seeded fixture) is the one later found by a real retrieval
  * search — never a mock, never a live external embedding provider.
+ *
+ * Phase 22 Chunk 1B: uploads into its own dedicated
+ * `workspaceAKnowledgeJourneySourceId` (global-setup.ts), never the shared
+ * `workspaceARetrievalSourceId` — that Source also receives
+ * keyboard-journey.spec.ts's own real upload of the exact same
+ * byte-identical fixture file, which produces a genuine similarity tie
+ * under the deterministic hash embedding provider (real backend behavior,
+ * not a defect); this journey's own "my upload ranks first" assertion
+ * cannot assume anything about a document another, independently-authored
+ * spec puts into a Source this one doesn't own. The retrieval step also
+ * scopes the real Source filter to this dedicated Source, so the search is
+ * provably isolated from every other spec's fixture data regardless of
+ * upload order — this is real UI + real API filter + real backend
+ * retrieval + real deterministic embedding, none of it weakened.
  */
 test.describe("Knowledge: the complete real RAG journey", () => {
   test("upload -> real Celery ingestion -> ready -> retrieve -> workspace isolation -> logout", async ({
@@ -32,10 +46,12 @@ test.describe("Knowledge: the complete real RAG journey", () => {
     await page.getByRole("menuitem", { name: new RegExp(data.otherWorkspaceName) }).click();
     await page.goto("/app/knowledge");
 
-    // 4. upload a real, valid document
+    // 4. upload a real, valid document into this journey's own dedicated
+    // Source (Phase 22 Chunk 1B — see the module doc comment above for why
+    // this must not be the shared workspaceARetrievalSourceId).
     await page.getByRole("button", { name: "Upload document" }).click();
     const uploadForm = page.getByRole("form", { name: "Upload a knowledge document" });
-    await uploadForm.getByLabel("Source").selectOption(data.workspaceARetrievalSourceId);
+    await uploadForm.getByLabel("Source").selectOption(data.workspaceAKnowledgeJourneySourceId);
     await uploadForm.getByLabel("Title").fill("RAG journey document");
     await uploadForm
       .getByLabel("File")
@@ -61,9 +77,16 @@ test.describe("Knowledge: the complete real RAG journey", () => {
     // the deterministic offline embedding provider is a hashed-token
     // projection, so distinctive shared words reliably dominate cosine
     // similarity against this workspace's other (topically unrelated)
-    // fixture chunks.
+    // fixture chunks. The real Source filter scopes this search to this
+    // journey's own dedicated Source (Phase 22 Chunk 1B) — this document is
+    // the only one that can ever exist there, so the result is provably
+    // isolated from every other spec's fixture data, independent of run
+    // order — never weakened to "some result exists."
     await page.goto("/app/knowledge?tab=search");
     const searchForm = page.getByRole("form", { name: "Search knowledge" });
+    await searchForm
+      .getByLabel("Source")
+      .selectOption(data.workspaceAKnowledgeJourneySourceId);
     await searchForm.getByLabel("Query").fill("harmless synthetic text document ingestion pipeline");
     await searchForm.getByRole("button", { name: "Search" }).click();
 

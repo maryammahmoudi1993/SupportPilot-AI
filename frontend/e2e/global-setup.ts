@@ -570,6 +570,26 @@ ws_a_retrieval_unsafe_text = (
 )
 _e2e_chunk(ws_a_retrieval_document, 3, ws_a_retrieval_unsafe_text)
 
+# Phase 22 Chunk 1B: a Source dedicated solely to knowledge-journey.spec.ts's
+# own real upload-then-search journey, isolated from ws_a_retrieval_source
+# above. keyboard-journey.spec.ts (Phase 20 Chunk 4) separately uploads its
+# own real document into ws_a_retrieval_source too, using the exact same
+# byte-identical e2e-upload.txt fixture file (it only needs *some* real,
+# active Source to prove keyboard reachability of the upload form — it never
+# searches/ranks anything) — under the deterministic hash embedding provider
+# that produces a genuine similarity tie between the two uploads, and a
+# full-suite run resolves that tie by insertion order, which
+# knowledge-journey.spec.ts's own "my upload ranks first" assertion cannot
+# assume across specs it doesn't control. A dedicated, otherwise-empty
+# Source removes the collision at its root — knowledge-journey.spec.ts's own
+# real upload is the ONLY document that can ever exist here, so retrieval
+# scoped to this Source (via the real Source filter — see the spec) can
+# never see another spec's document, regardless of upload order or content.
+ws_a_knowledge_journey_source = KnowledgeSource.objects.create(
+    workspace=ws_a, name="E2E Knowledge Journey Fixtures", source_type=KnowledgeSourceType.MANUAL,
+    is_active=True,
+)
+
 # Integrations domain (Phase 22 Chunk 1) — real IntegrationConnection rows,
 # created directly via the ORM with real encrypted credentials (the same
 # integrations.crypto.encrypt_credentials the real create/rotate services
@@ -665,6 +685,8 @@ print(json.dumps({
     "workspaceAKnowledgeDocumentProcessingId": str(ws_a_knowledge_document_processing.id),
     "workspaceARetrievalSourceId": str(ws_a_retrieval_source.id),
     "workspaceARetrievalDocumentId": str(ws_a_retrieval_document.id),
+    "workspaceAKnowledgeJourneySourceId": str(ws_a_knowledge_journey_source.id),
+    "workspaceAKnowledgeJourneySourceName": ws_a_knowledge_journey_source.name,
     "workspaceBIntegrationStripeId": str(ws_b_integration_stripe.id),
     "workspaceBIntegrationEmailId": str(ws_b_integration_email.id),
     "workspaceAIntegrationCalendarId": str(ws_a_integration_calendar.id),

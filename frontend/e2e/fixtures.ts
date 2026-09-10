@@ -63,6 +63,8 @@ export interface E2EData {
   workspaceAKnowledgeDocumentProcessingId: string;
   workspaceARetrievalSourceId: string;
   workspaceARetrievalDocumentId: string;
+  workspaceAKnowledgeJourneySourceId: string;
+  workspaceAKnowledgeJourneySourceName: string;
   workspaceBIntegrationStripeId: string;
   workspaceBIntegrationEmailId: string;
   workspaceAIntegrationCalendarId: string;
