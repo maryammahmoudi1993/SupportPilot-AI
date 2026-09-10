@@ -1716,6 +1716,42 @@ the same already-cached Sources query the Documents tab's filter uses (no
 duplicate fetch). No per-hit document/source detail request of any kind —
 every displayed field comes from the search response itself. No polling.
 
+### Phase 21 final acceptance gate (Chunk 4)
+
+**Real defect found and fixed**: the Documents/Sources/Search tab strip
+(`knowledge-list-page.tsx`) used `role="tablist"` around three plain,
+URL-navigating `<Link>`s — a genuine `aria-required-children` axe violation
+(impact: critical), since the WAI-ARIA Tabs pattern requires a `tablist` to
+contain only `role="tab"` children, and this component implements none of
+that pattern's other requirements (no roving tabindex, no arrow-key
+navigation, no associated `tabpanel`). Fixed by using a `<nav
+aria-label="Knowledge views">` landmark instead — the semantically honest
+pattern for a set of section-switching navigation links, each already
+carrying a correct `aria-current="page"`. This was the only occurrence of
+this pattern anywhere in the frontend. axe now reports 0 critical/serious
+violations across every scanned Knowledge state (list, tabs, every document
+status, upload form, validation/rejection errors, zero-results, search
+results, network-error).
+
+**Inactive-Source retrieval semantics** (Chunk 3's Search filter question,
+finally adjudicated): `search_knowledge`'s query includes
+`document__source__is_active=True` unconditionally — an inactive Source's
+chunks are **never** retrievable, through any filter combination, not just
+"not offered by this UI." The Search tab's active-sources-only dropdown is
+therefore a precise mirror of a real, unconditional backend constraint, not
+merely an operator convenience with a gap — no fix was needed.
+
+**Known Phase 21 intentional omissions** (by design, not oversight — see
+the Chunk 1-3 sections above for each one's full rationale): no document
+delete/archive, no Source edit/delete, no Source detail page, no Retrieval
+History UI (a real single-event-by-id endpoint exists but is never
+called/linked), ingestion progress is poll-based with no percentage,
+`minimum_score`/`document_ids`/multi-Source retrieval filters are real but
+unexposed, upload has no dedupe/idempotency key (by real backend design),
+duplicate filenames are allowed, and the pre-existing dev-only
+`js-yaml`/`@redocly/openapi-core` audit advisory remains untouched
+(production dependencies: 0 vulnerabilities throughout).
+
 ## Local development
 
 1. Start the backend (see `../README.md`) so `NEXT_PUBLIC_API_BASE_URL`
