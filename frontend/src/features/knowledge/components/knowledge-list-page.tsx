@@ -467,7 +467,20 @@ function KnowledgeListContent() {
         </p>
       </div>
 
-      <div role="tablist" aria-label="Knowledge views" className="flex gap-2">
+      {/*
+        Phase 21 Chunk 4 final acceptance-gate fix (real axe finding,
+        `aria-required-children`, impact critical): these are real
+        URL-navigating links (each `href` changes `?tab=`), not a JS-managed
+        ARIA tabs widget — there is no roving tabindex, no arrow-key
+        navigation between them, and no associated `role="tabpanel"`. The
+        WAI-ARIA Tabs pattern requires `role="tablist"` to contain only
+        `role="tab"` children; wrapping plain links in it was a genuine
+        accessibility defect, not a stylistic choice. A `<nav>` landmark
+        with `aria-current="page"` (already set on the active link — see
+        `TabLink`) is the semantically honest, correct pattern for a set of
+        section-switching navigation links.
+      */}
+      <nav aria-label="Knowledge views" className="flex gap-2">
         <TabLink href={pathname} isActive={tab === "documents"}>
           Documents
         </TabLink>
@@ -477,7 +490,7 @@ function KnowledgeListContent() {
         <TabLink href={`${pathname}?tab=search`} isActive={tab === "search"}>
           Search
         </TabLink>
-      </div>
+      </nav>
 
       {workspaceId === null ? (
         <KnowledgeListSkeleton label="Loading knowledge" />
