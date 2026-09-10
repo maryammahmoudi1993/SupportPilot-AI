@@ -1451,6 +1451,307 @@ workaround to the same `error.code === "not_found"` check already used by
 `CustomerDetailPage` — one consistent not-found pattern across every detail
 page. See defect `P20-404-01`.
 
+### Knowledge / RAG management (Phase 21 Chunk 1)
+
+Read-only foundation over the real, already-built backend Knowledge/RAG
+domain (`backend/knowledge/`). Two real, independent, workspace-scoped
+entities — `KnowledgeSource` and `KnowledgeDocument` — are exposed; nothing
+about retrieval architecture, ingestion internals, or vector search was
+redesigned or invented for the frontend.
+
+**Public API contract discovered** (verified against `knowledge/views.py`,
+`knowledge/selectors.py`, `knowledge/serializers.py`, and
+`knowledge/tests/test_views.py` — never inferred from models/services
+alone):
+
+| Capability | Status |
+| --- | --- |
+| Document list/detail | **Real**, implemented this chunk. `GET .../knowledge/documents/`, `GET .../knowledge/documents/{id}/`. |
+| Source list/detail | **Real**, implemented this chunk. `GET .../knowledge/sources/`, `GET .../knowledge/sources/{id}/`. |
+| Upload | Real endpoint (`POST .../documents/`, multipart, `KnowledgeDocumentListCreateView.create`) — **not implemented this chunk** (Chunk 2). |
+| Ingestion / retry | Real (`POST .../documents/{id}/retry/`, `GET .../ingestion-jobs/{id}/`) — **not implemented this chunk** (Chunk 2). Not read either: a document's own `status`/`last_ingested_at`/`last_error_code`/`chunk_count` fields already carry every ingestion signal this chunk needs, and there is no field linking a document to its ingestion job IDs, so reading one would mean guessing an ID or an N+1 pattern — both avoided. |
+| Retrieval / search | Real (`POST .../search/`, `GET .../retrieval-events/{id}/`) — **not implemented this chunk** (Chunk 3). |
+| Delete / archive | **Not a real endpoint at all.** No delete/archive view exists in `knowledge/urls.py` — `KnowledgeSource`/`KnowledgeDocument` only expose `is_active` as a field; there is no way to delete either through the public API. Never invented. |
+| Chunk API | **Not a real endpoint at all.** `KnowledgeChunk` is a real model but has no dedicated view — chunk text is only ever visible embedded in a search/retrieval-event response (Chunk 3 territory). |
+
+**Document filters** (`knowledge/selectors.py document_list_for_workspace`):
+real filters are `source_id` and `status` — **not** `search`, which the
+generated OpenAPI schema types anyway (Category A schema gap, same shape as
+every other domain — see `features/handoffs/api.ts`). `ordering` is
+schema-only/dead for both documents and sources: neither view sets DRF's
+`ordering_fields`, so both always order `-created_at, -id` regardless of any
+`ordering` query param.
+
+**Source filters** (`source_list_for_workspace`): `search` (name/description,
+case-insensitive `icontains`) and `is_active` are both real; `is_active`
+isn't typed in the generated schema at all.
+
+**Statuses**: `KnowledgeDocument.status` — `pending`, `queued`, `processing`,
+`ready`, `failed` (`KnowledgeDocumentStatusEnum`). `ready`/`failed` are
+terminal (`isTerminalDocumentStatus`); the detail page labels a document
+"Settled" or "Still in progress" from this, **never** a percentage or ETA
+(no real progress signal exists — master prompt Part A §10). An unrecognized
+future status renders safely via the shared `EnumBadge` fallback, same as
+every other domain.
+
+**Routes**: one canonical route family, `/app/knowledge` (list) and
+`/app/knowledge/[documentId]` (detail) — `KnowledgeDocument` is the entity
+operators actually care about (what the RAG pipeline retrieves from).
+`KnowledgeSource` has no dedicated detail route this chunk: it's surfaced as
+a second read-only tab (`?tab=sources`) on the same list page and as a
+plain-text field (never a fake link to a route that doesn't exist) on
+Document detail, keeping the route surface to the two entities the master
+prompt's preferred shape names rather than adding a third alias.
+
+**Server state**: `["workspaces", wsId, "knowledge", "documents"|"sources", "list"|"detail", ...]`
+query keys (`features/knowledge/query-keys.ts`) — same workspace-first
+policy as every other domain. A single bounded (`page_size=500`) "all
+sources" fetch backs the Documents list's Source filter dropdown — never a
+per-document source lookup (master prompt Part G §33's N+1 prohibition).
+
+**Content safety**: `KnowledgeSource`/`KnowledgeDocument` carry no full
+document text or chunk content at all — only metadata (`title`,
+`original_filename`, `metadata` JSON, `last_error_message_safe`, etc.).
+`metadata` is rendered through the existing shared `StructuredPayload`
+viewer (`JSON.stringify` into a `<pre>`, never `dangerouslySetInnerHTML`) —
+proven both in a unit test and the real-backend E2E smoke with genuine
+HTML/script-looking metadata content that renders as inert text.
+
+**Known Phase 21 schema gaps** (none blocking):
+
+| Endpoint | Gap | Blocking? |
+| --- | --- | --- |
+| `documents_list` | Generated schema types `search`/`ordering`; real filters are `source_id`/`status`, untyped. | No — narrowed locally in `features/knowledge/api.ts`. |
+| `sources_list` | Generated schema types `ordering` (dead) but not `is_active` (real). | No — same narrowing. |
+| `documents_create` (Chunk 2) | Generated 201 response is typed as `KnowledgeDocumentUpload` (the *request* shape) instead of the real `{document, ingestion_job}` body; `file` is typed `string` (openapi-typescript can't express a binary multipart field). | No — explicit, narrow, documented casts in `features/knowledge/api.ts`. |
+| `sources_create` (Chunk 2) | Generated 201 response is typed as `KnowledgeSourceWrite` (the *request* shape) instead of the real full `KnowledgeSource` body; `source_type` is typed required despite the backend's real `required=False, default=upload`. | No — same cast pattern; `source_type: "upload"` sent explicitly. |
+
+### Knowledge upload, ingestion, and retry (Phase 21 Chunk 2)
+
+Adds the three real write operations Chunk 1 deliberately left unimplemented,
+plus a minimal source-creation flow to unblock upload in a workspace with no
+active source yet.
+
+**Write contract discovered** (`knowledge/services.py`,
+`knowledge/serializers.py`, `knowledge/views.py`, `knowledge/tests/
+test_views.py`):
+
+| Operation | Method/path | Notes |
+| --- | --- | --- |
+| Upload | `POST .../knowledge/documents/`, `multipart/form-data` | Real fields only: `source_id`, `title`, `file` (`metadata` is real but unused by this chunk's UI). The backend silently discards any other field a client sends (verified: `test_manager_uploads_multipart_and_internal_fields_are_ignored` posts a spoofed `status`/`chunk_count`/`workspace` and asserts they're ignored) — always creates a document with real server-derived `status: "queued"`. |
+| Retry | `POST .../knowledge/documents/{id}/retry/`, no body | Only a `failed` document can be retried — any other status is a real 409 `conflict` ("Only failed documents can be retried."). Response is the `KnowledgeIngestionJob`, not the document; the document's own now-`queued` status is refetched, never hand-assembled. |
+| Source creation | `POST .../knowledge/sources/` | Real fields `name` (required), `description` (optional) — this chunk sends only those two; `source_type`/`is_active`/`metadata` are left to their real backend defaults. |
+| Delete/archive | — | **Not a real endpoint.** No delete/archive view exists in `knowledge/urls.py`; `is_active` is the only lifecycle field either entity exposes. Never invented. |
+| Ingestion job detail | `GET .../knowledge/ingestion-jobs/{id}/` | Real and public, but never called by this frontend — see types.ts's doc comment: a document's own status fields already carry every signal the UI needs, and there is no field linking a document to its job ID (so reading one would mean guessing an ID). |
+
+**File constraints** (backend/config/settings.py, `knowledge/ingestion/
+validators.py` — mirrored client-side for UX only, never authoritative):
+`text/plain` (`.txt`), `text/markdown` (`.md`, `.markdown`),
+`application/pdf` (`.pdf`); max 10 MiB. One file per request (the serializer
+has no multi-file field). An oversize file is pre-checked and blocked
+client-side with an inline message; every other constraint (MIME/extension
+mismatch, empty file, malformed PDF, encrypted PDF, page-count limit) is
+enforced only by the real backend and surfaced via its safe error message.
+
+**Ambiguous upload failure** (master prompt Part C §13 — the reason this
+chunk's upload mutation is more careful than a typical form): the upload
+endpoint has no idempotency key, client external ID, or dedupe token of any
+kind (verified against `knowledge/services.py upload_document` — a resubmit
+always creates a new `KnowledgeDocument` row, and there's no duplicate-
+content check). `isAmbiguousUploadError` (`features/knowledge/mutations.ts`)
+distinguishes a transport-level failure (`ApiError.code` of `"network_error"`
+or `"timeout"` — the request never reached the backend, or a response never
+came back) from a confirmed server rejection (validation/permission/
+conflict — a response the server definitely sent). Only the former shows
+"We couldn't confirm this upload was received" with a **Refresh list**
+action; the frontend never auto-resubmits and never claims "upload failed"
+when persistence is genuinely unknown.
+
+**Ingestion state machine**: `pending`/`queued`/`processing` (non-terminal),
+`ready`/`failed` (terminal) — unchanged from Chunk 1's discovery, reconfirmed
+against `knowledge/services.py run_ingestion`/`retry_document`. No real
+progress percentage exists anywhere in the contract; none is invented.
+
+**Polling** (`features/knowledge/queries.ts`, same pattern as
+`features/agent-runs/queries.ts` `pollWhileNonTerminal`/
+`features/approvals/queries.ts`'s approval-detail poll): only the Document
+*detail* query polls (`KNOWLEDGE_DOCUMENT_POLL_INTERVAL_MS` = 5000ms), and
+only while the fetched document's `status` is non-terminal;
+`refetchIntervalInBackground: false` stops it on a hidden tab or unmount.
+The Documents *list* is never polled — an operator watching ingestion
+progress opens the one document they uploaded/retried, exactly like
+AgentRun/Approval before it; a second, list-level poll underneath an
+already-polling detail tab would be a compounded request stream for no
+additional signal.
+
+**Retry control**: shown on Document detail only when
+`isRetryableDocumentStatus(document.status)` (i.e. `failed`) **and**
+`canManageKnowledge(role)` — never for `ready`/`processing`/etc, even to a
+manager. The mutation is `retry: 0`; a 409 conflict (e.g. another operator
+already retried it from a different tab) refetches the document instead of
+guessing, so the real, current server state — including the control
+disappearing once the document is no longer `failed` — always wins, same
+pattern as Approve/Reject.
+
+**Permissions** (`CanManageKnowledge` — owner/admin/support_manager,
+reconfirmed unchanged from Chunk 1): `canManageKnowledge(role)`
+(`features/knowledge/types.ts`, mirrors the backend set) gates whether
+Upload/New source/Retry controls render at all, using the caller's own
+real, already-fetched workspace role — the backend remains fully
+authoritative and re-derives this from the caller's current DB membership on
+every write regardless of what the UI renders (proven directly:
+`e2e/knowledge.spec.ts`'s permission test attempts upload as a
+`support_agent`, which the backend genuinely rejects).
+
+**Placement**: no new route. "Upload document" (Documents tab) and "New
+source" (Sources tab) are inline toggles on the existing `/app/knowledge`
+list page, each revealing a form in place — matching the master prompt's
+"use existing Knowledge route architecture" instruction rather than adding
+an upload-specific page.
+
+**Test-environment note** (`frontend/src/tests/setup.ts`): jsdom's `File`
+class and Node's real `fetch` (undici, the actual network layer MSW
+intercepts) are different classes from different realms — a real multipart
+upload test fails undici's internal type check on the very first attempt.
+`globalThis.File` is replaced with Node's own (`node:buffer`) in test setup
+so a real end-to-end upload test (`userEvent.upload` → real `FormData` →
+MSW-intercepted `fetch`) actually exercises the real request path instead of
+only the UI in isolation. This has no effect on production code, which
+always runs against a real browser's own `File`.
+
+### Knowledge retrieval / search preview (Phase 21 Chunk 3)
+
+An operator preview of the real retrieval layer — "what chunks would the RAG
+system retrieve for this query?" **Retrieval preview is not answer
+generation**: there is no chat UI, no prompt playground, no LLM response
+preview anywhere in this feature, and no Retrieval History UI (see below).
+
+**Retrieval contract discovered** (`knowledge/views.py
+KnowledgeSearchView`, `knowledge/retrieval/services.py search_knowledge`,
+`knowledge/serializers.py KnowledgeSearchRequestSerializer`/
+`KnowledgeSearchResponseSerializer`):
+
+| Field | Notes |
+| --- | --- |
+| Method/path | `POST .../knowledge/search/` — a real mutation, not a read: every call persists a real `RetrievalEvent` (+ one `RetrievalHit` per returned result), verified directly against the service, which wraps both writes in `transaction.atomic()`. |
+| Request fields | `query` (required, max `KNOWLEDGE_MAX_QUERY_LENGTH` = 2000 chars), `top_k` (optional, real bounds `[1, KNOWLEDGE_MAX_TOP_K]` = `[1, 20]`, default `KNOWLEDGE_DEFAULT_TOP_K` = 5), `minimum_score`, `source_ids`, `document_ids` (all optional). This chunk's UI exposes `query`, `top_k` (a bounded `[3, 5, 10, 20]` select), and a single-source filter only — `minimum_score` and `document_ids` are real but deliberately unexposed (see `features/knowledge/types.ts`'s doc comment on `KnowledgeSearchRequestInput` for why: no product-safe way to offer a document picker without an unbounded fetch, and a raw score-threshold control isn't part of this chunk's minimal scope). |
+| Permission | `IsAuthenticated` + workspace membership only (`WorkspaceScopedMixin`/`get_workspace_for_user_or_404`) — **no `CanManageKnowledge` gate**, same as the read-only Documents/Sources tabs. Any active member, including `support_agent`, can search; reconfirmed by a real E2E test (`e2e/knowledge-search.spec.ts`) that a read-only member's search is never rejected. |
+| Searchable scope | Only `ready`, active documents under an active source (`document__status=READY, document__is_active=True, document__source__is_active=True` — part of the SQL query itself, never a post-filter). A `pending`/`queued`/`processing`/`failed` document's chunks are never returned, and this is never implied otherwise in the UI. |
+| Response fields | `event_id`, `query`, `sufficient_context`, `results[]` (`chunk_id`, `document_id`, `document_title`, `source_id`, `source_name`, `rank`, `score`, `text`, `citation`). The generated OpenAPI types for this endpoint are accurate — no schema-gap cast needed here, unlike Chunk 2's upload/source-create endpoints. |
+| Ordering | Backend-authoritative: `queryset.annotate(distance=CosineDistance(...)).order_by("distance", "document_id", "ordinal", "id")[:top_k]`, with `rank` assigned in that same order. The frontend renders `results` in array order and never re-sorts. |
+| Rate limit | None (`DEFAULT_THROTTLE_CLASSES: []`, and `KnowledgeSearchView` sets no `throttle_scope`) — a real, current backend fact reported here, not a frontend concern to compensate for. |
+
+**Score semantics** (traced through the actual math, not inferred from the
+field name): `score = max(-1.0, min(1.0, 1.0 - cosine_distance))` — this is
+**cosine similarity**, not a distance and not a calibrated probability.
+Higher is more similar. The UI labels it **"Similarity 0.XX"** (2 decimals)
+— never converted to a percentage, never called "confidence" anywhere in
+the codebase (both are asserted absent in unit and E2E tests).
+
+**Result presentation** (`features/knowledge/components/
+knowledge-search-panel.tsx`): rank, a real Document link
+(`/app/knowledge/{document_id}`, the existing detail route — no new page),
+source name as **plain text** (there is no Source detail page in this app,
+so no dead link is ever created), the chunk text itself, and its citation
+(`page_start`/`page_end`/`start_offset`/`end_offset`/`chunk_ordinal`,
+rendered via the existing `StructuredPayload` safe-JSON viewer). No fake
+"grounding %"/"relevance %"/"citation quality" metric of any kind.
+
+**Chunk content safety**: retrieved chunk text is **untrusted data** — it
+may contain HTML-looking, script-looking, prompt-injection-looking, or
+URL-looking text, or long strings. It is rendered as a plain React text node
+inside a bounded, internally-scrolling box (`max-h-40 overflow-y-auto`, plus
+a defensive 4000-character hard truncation, clearly marked "(truncated)")
+— never `dangerouslySetInnerHTML`, raw Markdown-to-HTML, `eval`, or `new
+Function`, and never auto-linked. Proven both in unit tests (HTML-looking,
+script-looking, and prompt-injection-looking fixtures) and in a real E2E
+test that ingests such a chunk through the real pipeline and searches for it.
+
+**Server state / cache architecture** (`features/knowledge/queries.ts
+useKnowledgeSearchQuery`): deliberately **not** an ordinary `useQuery` keyed
+by request content — search is a telemetry-producing POST, not a cacheable
+list. The query is `enabled: false` and fires only via an explicit
+`refetch()` call from the form's submit handler (never on mount, key change,
+window focus, or reconnect — one explicit search: one request), `retry: 0`
+(an automatic retry would silently create a second, invisible
+`RetrievalEvent`), and keyed by a single **workspace-scoped "current
+search" slot** (`knowledgeKeys.retrievalCurrent(workspaceId)`) rather than
+one cache entry per distinct query. The submitted request itself is read
+from a `useRef` (not React state) inside `queryFn`, so calling `refetch()`
+immediately after setting the ref always uses the just-submitted request —
+no stale-closure/second-click bug, no `useEffect` needed to "sync" state
+into the query.
+
+**Workspace isolation / in-flight switch safety**: two independent
+mechanisms, deliberately redundant. (1) `KnowledgeSearchPanel` is mounted
+with `key={workspaceId}` (`knowledge-list-page.tsx`) — switching workspaces
+fully unmounts the old panel instance (discarding its draft/result state
+entirely) and mounts a fresh one, rather than updating props in place. (2)
+Independently, the query-key scoping above means even a late-arriving
+response from the old workspace's request can only ever resolve into that
+workspace's own cache slot — never the new workspace's. Both are proven: a
+unit test simulates the real `key` remount mid-flight (a delayed response
+resolving after the switch never appears), and a real E2E test performs the
+actual browser-level workspace switch after firing a real search.
+
+**No Retrieval History UI**: `RetrievalEvent`/`RetrievalHit` are real,
+persisted on every search, and there is a real, public
+`GET .../knowledge/retrieval-events/{event_id}/` endpoint — but it is a
+single-event-by-id read, not a list, and it returns exactly the same shape
+the search response itself already carries. An internal model with a
+single-item read endpoint is not a public list capability; this chunk never
+calls or links to it, and `event_id` is never surfaced in the UI.
+
+**No-hit / error states**: "No results" (`sufficient_context: false`,
+`results: []`) is rendered as a distinct, non-alarming state — never the
+same UI as a network/permission/server error, and never shown for a genuine
+failure. Proven with a real, deterministic zero-result E2E case: filtering
+by a real Source with zero real `KnowledgeChunk` rows (not a fabricated
+empty state, not `minimum_score`-induced, since that control isn't exposed
+in this chunk's UI).
+
+**Network**: one explicit search submission → exactly one `POST
+.../knowledge/search/` request, plus the Source filter's dropdown reusing
+the same already-cached Sources query the Documents tab's filter uses (no
+duplicate fetch). No per-hit document/source detail request of any kind —
+every displayed field comes from the search response itself. No polling.
+
+### Phase 21 final acceptance gate (Chunk 4)
+
+**Real defect found and fixed**: the Documents/Sources/Search tab strip
+(`knowledge-list-page.tsx`) used `role="tablist"` around three plain,
+URL-navigating `<Link>`s — a genuine `aria-required-children` axe violation
+(impact: critical), since the WAI-ARIA Tabs pattern requires a `tablist` to
+contain only `role="tab"` children, and this component implements none of
+that pattern's other requirements (no roving tabindex, no arrow-key
+navigation, no associated `tabpanel`). Fixed by using a `<nav
+aria-label="Knowledge views">` landmark instead — the semantically honest
+pattern for a set of section-switching navigation links, each already
+carrying a correct `aria-current="page"`. This was the only occurrence of
+this pattern anywhere in the frontend. axe now reports 0 critical/serious
+violations across every scanned Knowledge state (list, tabs, every document
+status, upload form, validation/rejection errors, zero-results, search
+results, network-error).
+
+**Inactive-Source retrieval semantics** (Chunk 3's Search filter question,
+finally adjudicated): `search_knowledge`'s query includes
+`document__source__is_active=True` unconditionally — an inactive Source's
+chunks are **never** retrievable, through any filter combination, not just
+"not offered by this UI." The Search tab's active-sources-only dropdown is
+therefore a precise mirror of a real, unconditional backend constraint, not
+merely an operator convenience with a gap — no fix was needed.
+
+**Known Phase 21 intentional omissions** (by design, not oversight — see
+the Chunk 1-3 sections above for each one's full rationale): no document
+delete/archive, no Source edit/delete, no Source detail page, no Retrieval
+History UI (a real single-event-by-id endpoint exists but is never
+called/linked), ingestion progress is poll-based with no percentage,
+`minimum_score`/`document_ids`/multi-Source retrieval filters are real but
+unexposed, upload has no dedupe/idempotency key (by real backend design),
+duplicate filenames are allowed, and the pre-existing dev-only
+`js-yaml`/`@redocly/openapi-core` audit advisory remains untouched
+(production dependencies: 0 vulnerabilities throughout).
+
 ## Local development
 
 1. Start the backend (see `../README.md`) so `NEXT_PUBLIC_API_BASE_URL`

@@ -1,3 +1,5 @@
+import path from "node:path";
+
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test } from "@playwright/test";
 
@@ -219,6 +221,151 @@ test.describe("Accessibility (axe)", () => {
     // Active workspace defaults to B; this approval belongs to A — real 404.
     await page.goto(`/app/approvals/${data.workspaceAApprovalApproveId}`);
     await expect(page.getByText("Approval not found")).toBeVisible();
+
+    const results = await new AxeBuilder({ page }).analyze();
+    expect(seriousOrCritical(results), JSON.stringify(seriousOrCritical(results), null, 2)).toEqual(
+      [],
+    );
+  });
+
+  // Phase 21 Chunk 4 (final Knowledge/RAG acceptance gate, Part J §38): the
+  // Knowledge domain's list/detail/tab surfaces, scanned separately since
+  // no earlier chunk's report covered them with axe.
+  const KNOWLEDGE_PAGES: { name: string; path: (data: ReturnType<typeof e2eData>) => string }[] = [
+    { name: "Knowledge Documents list", path: () => "/app/knowledge" },
+    { name: "Knowledge Sources tab", path: () => "/app/knowledge?tab=sources" },
+    { name: "Knowledge Search tab", path: () => "/app/knowledge?tab=search" },
+    {
+      name: "Knowledge Document detail (ready)",
+      path: (data) => `/app/knowledge/${data.workspaceBKnowledgeDocumentReadyId}`,
+    },
+    {
+      name: "Knowledge Document detail (failed)",
+      path: (data) => `/app/knowledge/${data.workspaceBKnowledgeDocumentFailedId}`,
+    },
+  ];
+
+  for (const { name, path } of KNOWLEDGE_PAGES) {
+    test(`${name} has no serious/critical violations`, async ({ page }) => {
+      const data = e2eData();
+      await login(page, data.primaryEmail, data.primaryPassword);
+      await page.goto(path(data));
+      await expect(page.locator("table, h1, h2, h3, form").first()).toBeVisible();
+
+      const results = await new AxeBuilder({ page }).analyze();
+      expect(
+        seriousOrCritical(results),
+        JSON.stringify(seriousOrCritical(results), null, 2),
+      ).toEqual([]);
+    });
+  }
+
+  test("Knowledge Document detail (actively processing, non-terminal) has no serious/critical violations", async ({
+    page,
+  }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+    await page.getByRole("button", { name: data.defaultWorkspaceName }).click();
+    await page.getByRole("menuitem", { name: new RegExp(data.otherWorkspaceName) }).click();
+    await page.goto(`/app/knowledge/${data.workspaceAKnowledgeDocumentProcessingId}`);
+    await expect(page.getByText("Still in progress")).toBeVisible();
+
+    const results = await new AxeBuilder({ page }).analyze();
+    expect(seriousOrCritical(results), JSON.stringify(seriousOrCritical(results), null, 2)).toEqual(
+      [],
+    );
+  });
+
+  test("the Knowledge upload form (open, empty) has no serious/critical violations", async ({
+    page,
+  }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+    await page.getByRole("button", { name: data.defaultWorkspaceName }).click();
+    await page.getByRole("menuitem", { name: new RegExp(data.otherWorkspaceName) }).click();
+    await page.goto("/app/knowledge");
+    await page.getByRole("button", { name: "Upload document" }).click();
+    await expect(page.getByRole("form", { name: "Upload a knowledge document" })).toBeVisible();
+
+    const results = await new AxeBuilder({ page }).analyze();
+    expect(seriousOrCritical(results), JSON.stringify(seriousOrCritical(results), null, 2)).toEqual(
+      [],
+    );
+  });
+
+  test("a real unsupported-file upload rejection has no serious/critical violations", async ({
+    page,
+  }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+    await page.getByRole("button", { name: data.defaultWorkspaceName }).click();
+    await page.getByRole("menuitem", { name: new RegExp(data.otherWorkspaceName) }).click();
+    await page.goto("/app/knowledge");
+    await page.getByRole("button", { name: "Upload document" }).click();
+    const form = page.getByRole("form", { name: "Upload a knowledge document" });
+    await form.getByLabel("Source").selectOption(data.workspaceAKnowledgeSourceId);
+    await form.getByLabel("Title").fill("Axe unsupported file");
+    await form
+      .getByLabel("File")
+      .setInputFiles(path.join(__dirname, "fixtures-data", "e2e-unsupported.exe"));
+    await form.getByRole("button", { name: "Upload" }).click();
+    await expect(page.getByText("This upload was rejected")).toBeVisible();
+
+    const results = await new AxeBuilder({ page }).analyze();
+    expect(seriousOrCritical(results), JSON.stringify(seriousOrCritical(results), null, 2)).toEqual(
+      [],
+    );
+  });
+
+  test("a real zero-result Knowledge search has no serious/critical violations", async ({
+    page,
+  }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+    await page.getByRole("button", { name: data.defaultWorkspaceName }).click();
+    await page.getByRole("menuitem", { name: new RegExp(data.otherWorkspaceName) }).click();
+    await page.goto("/app/knowledge?tab=search");
+    const form = page.getByRole("form", { name: "Search knowledge" });
+    await form.getByLabel("Source").selectOption(data.workspaceAKnowledgeSourceId);
+    await form.getByLabel("Query").fill("anything at all");
+    await form.getByRole("button", { name: "Search" }).click();
+    await expect(page.getByText("No results")).toBeVisible();
+
+    const results = await new AxeBuilder({ page }).analyze();
+    expect(seriousOrCritical(results), JSON.stringify(seriousOrCritical(results), null, 2)).toEqual(
+      [],
+    );
+  });
+
+  test("a real Knowledge search with results has no serious/critical violations", async ({
+    page,
+  }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+    await page.getByRole("button", { name: data.defaultWorkspaceName }).click();
+    await page.getByRole("menuitem", { name: new RegExp(data.otherWorkspaceName) }).click();
+    await page.goto("/app/knowledge?tab=search");
+    const form = page.getByRole("form", { name: "Search knowledge" });
+    await form.getByLabel("Query").fill("duplicate payment refund");
+    await form.getByRole("button", { name: "Search" }).click();
+    await expect(page.getByRole("region", { name: "Search results" }).getByRole("list")).toBeVisible();
+
+    const results = await new AxeBuilder({ page }).analyze();
+    expect(seriousOrCritical(results), JSON.stringify(seriousOrCritical(results), null, 2)).toEqual(
+      [],
+    );
+  });
+
+  test("a Knowledge Documents list network-error state has no serious/critical violations", async ({
+    page,
+  }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+    await page.route("**/api/v1/workspaces/*/knowledge/documents/*", (route) =>
+      route.abort("failed"),
+    );
+    await page.goto("/app/knowledge");
+    await expect(page.getByText("Something went wrong")).toBeVisible();
 
     const results = await new AxeBuilder({ page }).analyze();
     expect(seriousOrCritical(results), JSON.stringify(seriousOrCritical(results), null, 2)).toEqual(

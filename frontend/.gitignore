@@ -19,6 +19,7 @@
 /blob-report/
 /playwright/.cache/
 /e2e/.e2e-data.json
+/e2e/.e2e-setup-script.py
 
 # next.js
 /.next/
