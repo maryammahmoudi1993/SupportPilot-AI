@@ -68,6 +68,16 @@ export interface E2EData {
   workspaceBIntegrationStripeId: string;
   workspaceBIntegrationEmailId: string;
   workspaceAIntegrationCalendarId: string;
+  workspaceBWebhookEndpointId: string;
+  workspaceBWebhookEndpointDisabledId: string;
+  workspaceBWebhookDeliveryPendingId: string;
+  workspaceBWebhookDeliveryClaimedId: string;
+  workspaceBWebhookDeliveryDeliveredId: string;
+  workspaceBWebhookDeliveryRetryScheduledId: string;
+  workspaceBWebhookDeliveryDeadId: string;
+  workspaceBWebhookDeliveryFailedId: string;
+  workspaceAWebhookEndpointId: string;
+  workspaceAWebhookDeliveryId: string;
 }
 
 let cached: E2EData | null = null;

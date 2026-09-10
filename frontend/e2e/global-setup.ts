@@ -34,6 +34,10 @@ from knowledge.ingestion.embeddings import DeterministicHashEmbeddingProvider
 from knowledge.models import KnowledgeChunk, KnowledgeDocument, KnowledgeDocumentStatus, KnowledgeIngestionJob, KnowledgeIngestionStatus, KnowledgeSource, KnowledgeSourceType
 from integrations.crypto import encrypt_credentials
 from integrations.models import IntegrationConnection, IntegrationConnectionStatus, IntegrationEnvironment, IntegrationProvider
+from django.conf import settings as django_settings
+from notifications.models import Delivery, DeliveryChannel
+from notifications.services import claim_delivery, complete_delivery_failure, complete_delivery_success
+from webhooks.models import WebhookDelivery, WebhookEndpoint, WebhookEndpointStatus, WebhookEvent, WebhookEventType
 from tickets.models import HumanHandoff, HumanHandoffReason, HumanHandoffStatus, Ticket, TicketPriority, TicketStatus
 from tools.contracts import RiskLevel, SideEffectType
 from tools.models import ToolBinding, ToolDefinition, ToolExecution, ToolExecutionStatus
@@ -625,6 +629,131 @@ ws_a_integration_calendar = IntegrationConnection.objects.create(
     last_error_code="integration_invalid_credentials",
 )
 
+# Webhooks domain (Phase 22 Chunk 2) — real WebhookEndpoint/WebhookEvent/
+# WebhookDelivery rows. The endpoint's encrypted_signing_secret is set
+# directly via integrations.crypto.encrypt_credentials (never through
+# create_endpoint, whose real SSRF/DNS pre-check would otherwise run
+# against a synthetic destination), same pattern as
+# webhooks/tests/factories.py WebhookEndpointFactory.
+#
+# Deliberately NOT notifications.services.create_delivery (the pattern
+# webhooks/tests/test_views.py TestDeliveryInspection itself uses): that
+# function schedules a real Celery dispatch on commit
+# (transaction.on_commit(partial(dispatch_delivery_for_processing, ...))) —
+# harmless in the backend's own pytest suite (no real worker consumes it
+# there), but this E2E environment runs a REAL Celery worker against the
+# REAL Redis broker (master prompt Part K §36, 39), so that dispatch would
+# actually be picked up and would attempt a genuine outbound HTTP delivery
+# to whatever URL the fixture endpoint carries — exactly the live external
+# dispatch master prompt Part K §37 forbids, and a real race against this
+# script's own direct claim/complete calls on the same row. Delivery rows
+# are instead created directly via the ORM (mirroring create_delivery's own
+# real field defaults, minus the dispatch side effect) — claim_delivery/
+# complete_delivery_success/complete_delivery_failure below still exercise
+# the exact real state-machine transitions, just never queued for a real
+# worker to also race against.
+ws_b_webhook_endpoint = WebhookEndpoint.objects.create(
+    workspace=ws_b, name="Support ops relay", url="https://example.com/hooks/supportpilot",
+    status=WebhookEndpointStatus.ACTIVE,
+    subscribed_event_types=[WebhookEventType.APPROVAL_REQUESTED, WebhookEventType.HANDOFF_CREATED],
+    encrypted_signing_secret=encrypt_credentials({"secret": "fake-signing-secret-not-real"}),
+    secret_created_at=timezone.now(),
+)
+ws_b_webhook_endpoint_disabled = WebhookEndpoint.objects.create(
+    workspace=ws_b, name="Disabled relay", url="https://example.com/hooks/disabled",
+    status=WebhookEndpointStatus.DISABLED,
+    subscribed_event_types=[WebhookEventType.APPROVAL_REQUESTED],
+)
+
+def _webhook_event(event_type):
+    return WebhookEvent.objects.create(
+        workspace=ws_b, event_type=event_type, version=1, payload_snapshot={"summary": "e2e fixture"},
+    )
+
+def _webhook_delivery(endpoint, event, *, max_attempts=None):
+    delivery = Delivery.objects.create(
+        workspace=ws_b, channel=DeliveryChannel.WEBHOOK,
+        max_attempts=max_attempts or django_settings.DELIVERY_DEFAULT_MAX_ATTEMPTS,
+        next_attempt_at=timezone.now(),
+    )
+    WebhookDelivery.objects.create(delivery=delivery, workspace=ws_b, endpoint=endpoint, event=event)
+    return delivery
+
+ws_b_webhook_delivery_pending = _webhook_delivery(
+    ws_b_webhook_endpoint, _webhook_event(WebhookEventType.APPROVAL_REQUESTED)
+)
+
+ws_b_webhook_delivery_claimed_delivery = _webhook_delivery(
+    ws_b_webhook_endpoint, _webhook_event(WebhookEventType.APPROVAL_REQUESTED)
+)
+claim_delivery(delivery_id=ws_b_webhook_delivery_claimed_delivery.id)
+
+delivered_delivery = _webhook_delivery(
+    ws_b_webhook_endpoint, _webhook_event(WebhookEventType.HANDOFF_CREATED)
+)
+_, delivered_token = claim_delivery(delivery_id=delivered_delivery.id)
+complete_delivery_success(
+    delivery_id=delivered_delivery.id, claim_token=delivered_token, response_status_code=200
+)
+
+retry_scheduled_delivery = _webhook_delivery(
+    ws_b_webhook_endpoint, _webhook_event(WebhookEventType.APPROVAL_REQUESTED)
+)
+_, retry_token = claim_delivery(delivery_id=retry_scheduled_delivery.id)
+complete_delivery_failure(
+    delivery_id=retry_scheduled_delivery.id, claim_token=retry_token,
+    safe_error_code="webhook_http_503", retryable=True, response_status_code=503,
+)
+
+dead_delivery = _webhook_delivery(
+    ws_b_webhook_endpoint, _webhook_event(WebhookEventType.HANDOFF_CREATED)
+)
+_, dead_token = claim_delivery(delivery_id=dead_delivery.id)
+complete_delivery_failure(
+    delivery_id=dead_delivery.id, claim_token=dead_token,
+    safe_error_code="webhook_invalid_url", retryable=False,
+)
+
+# max_attempts=1 so this single retryable failure immediately exhausts the
+# attempt budget (attempt_count == max_attempts) — a real, retries-exhausted
+# FAILED delivery, distinct from the explicitly-non-retryable DEAD one above
+# (notifications/services.py complete_delivery_failure: FAILED if retryable
+# else DEAD, chosen by whether any budget remains).
+failed_delivery = _webhook_delivery(
+    ws_b_webhook_endpoint, _webhook_event(WebhookEventType.APPROVAL_REQUESTED), max_attempts=1
+)
+_, failed_token = claim_delivery(delivery_id=failed_delivery.id)
+complete_delivery_failure(
+    delivery_id=failed_delivery.id, claim_token=failed_token,
+    safe_error_code="webhook_http_500", retryable=True, response_status_code=500,
+)
+
+# Content-safety fixture (same posture as every other domain above): a real
+# HTML/script-looking endpoint name, to prove end to end that it renders as
+# inert plain text, never interpreted as markup — on Workspace A so the
+# real cross-workspace isolation E2E has its own distinct endpoint/delivery
+# to assert against too.
+ws_a_webhook_endpoint = WebhookEndpoint.objects.create(
+    workspace=ws_a, name="<script>window.__xss_marker = true;</script>",
+    url="https://example.com/hooks/workspace-a",
+    status=WebhookEndpointStatus.ACTIVE,
+    subscribed_event_types=[WebhookEventType.APPROVAL_APPROVED],
+    encrypted_signing_secret=encrypt_credentials({"secret": "fake-signing-secret-not-real"}),
+    secret_created_at=timezone.now(),
+)
+ws_a_webhook_event = WebhookEvent.objects.create(
+    workspace=ws_a, event_type=WebhookEventType.APPROVAL_APPROVED, version=1,
+    payload_snapshot={"summary": "workspace a fixture"},
+)
+ws_a_webhook_delivery = Delivery.objects.create(
+    workspace=ws_a, channel=DeliveryChannel.WEBHOOK,
+    max_attempts=django_settings.DELIVERY_DEFAULT_MAX_ATTEMPTS, next_attempt_at=timezone.now(),
+)
+WebhookDelivery.objects.create(
+    delivery=ws_a_webhook_delivery, workspace=ws_a, endpoint=ws_a_webhook_endpoint,
+    event=ws_a_webhook_event,
+)
+
 print(json.dumps({
     "primaryEmail": primary.email,
     "primaryPassword": PASSWORD,
@@ -690,6 +819,16 @@ print(json.dumps({
     "workspaceBIntegrationStripeId": str(ws_b_integration_stripe.id),
     "workspaceBIntegrationEmailId": str(ws_b_integration_email.id),
     "workspaceAIntegrationCalendarId": str(ws_a_integration_calendar.id),
+    "workspaceBWebhookEndpointId": str(ws_b_webhook_endpoint.id),
+    "workspaceBWebhookEndpointDisabledId": str(ws_b_webhook_endpoint_disabled.id),
+    "workspaceBWebhookDeliveryPendingId": str(ws_b_webhook_delivery_pending.id),
+    "workspaceBWebhookDeliveryClaimedId": str(ws_b_webhook_delivery_claimed_delivery.id),
+    "workspaceBWebhookDeliveryDeliveredId": str(delivered_delivery.id),
+    "workspaceBWebhookDeliveryRetryScheduledId": str(retry_scheduled_delivery.id),
+    "workspaceBWebhookDeliveryDeadId": str(dead_delivery.id),
+    "workspaceBWebhookDeliveryFailedId": str(failed_delivery.id),
+    "workspaceAWebhookEndpointId": str(ws_a_webhook_endpoint.id),
+    "workspaceAWebhookDeliveryId": str(ws_a_webhook_delivery.id),
 }))
 `;
 
