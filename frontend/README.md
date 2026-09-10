@@ -1619,6 +1619,103 @@ MSW-intercepted `fetch`) actually exercises the real request path instead of
 only the UI in isolation. This has no effect on production code, which
 always runs against a real browser's own `File`.
 
+### Knowledge retrieval / search preview (Phase 21 Chunk 3)
+
+An operator preview of the real retrieval layer — "what chunks would the RAG
+system retrieve for this query?" **Retrieval preview is not answer
+generation**: there is no chat UI, no prompt playground, no LLM response
+preview anywhere in this feature, and no Retrieval History UI (see below).
+
+**Retrieval contract discovered** (`knowledge/views.py
+KnowledgeSearchView`, `knowledge/retrieval/services.py search_knowledge`,
+`knowledge/serializers.py KnowledgeSearchRequestSerializer`/
+`KnowledgeSearchResponseSerializer`):
+
+| Field | Notes |
+| --- | --- |
+| Method/path | `POST .../knowledge/search/` — a real mutation, not a read: every call persists a real `RetrievalEvent` (+ one `RetrievalHit` per returned result), verified directly against the service, which wraps both writes in `transaction.atomic()`. |
+| Request fields | `query` (required, max `KNOWLEDGE_MAX_QUERY_LENGTH` = 2000 chars), `top_k` (optional, real bounds `[1, KNOWLEDGE_MAX_TOP_K]` = `[1, 20]`, default `KNOWLEDGE_DEFAULT_TOP_K` = 5), `minimum_score`, `source_ids`, `document_ids` (all optional). This chunk's UI exposes `query`, `top_k` (a bounded `[3, 5, 10, 20]` select), and a single-source filter only — `minimum_score` and `document_ids` are real but deliberately unexposed (see `features/knowledge/types.ts`'s doc comment on `KnowledgeSearchRequestInput` for why: no product-safe way to offer a document picker without an unbounded fetch, and a raw score-threshold control isn't part of this chunk's minimal scope). |
+| Permission | `IsAuthenticated` + workspace membership only (`WorkspaceScopedMixin`/`get_workspace_for_user_or_404`) — **no `CanManageKnowledge` gate**, same as the read-only Documents/Sources tabs. Any active member, including `support_agent`, can search; reconfirmed by a real E2E test (`e2e/knowledge-search.spec.ts`) that a read-only member's search is never rejected. |
+| Searchable scope | Only `ready`, active documents under an active source (`document__status=READY, document__is_active=True, document__source__is_active=True` — part of the SQL query itself, never a post-filter). A `pending`/`queued`/`processing`/`failed` document's chunks are never returned, and this is never implied otherwise in the UI. |
+| Response fields | `event_id`, `query`, `sufficient_context`, `results[]` (`chunk_id`, `document_id`, `document_title`, `source_id`, `source_name`, `rank`, `score`, `text`, `citation`). The generated OpenAPI types for this endpoint are accurate — no schema-gap cast needed here, unlike Chunk 2's upload/source-create endpoints. |
+| Ordering | Backend-authoritative: `queryset.annotate(distance=CosineDistance(...)).order_by("distance", "document_id", "ordinal", "id")[:top_k]`, with `rank` assigned in that same order. The frontend renders `results` in array order and never re-sorts. |
+| Rate limit | None (`DEFAULT_THROTTLE_CLASSES: []`, and `KnowledgeSearchView` sets no `throttle_scope`) — a real, current backend fact reported here, not a frontend concern to compensate for. |
+
+**Score semantics** (traced through the actual math, not inferred from the
+field name): `score = max(-1.0, min(1.0, 1.0 - cosine_distance))` — this is
+**cosine similarity**, not a distance and not a calibrated probability.
+Higher is more similar. The UI labels it **"Similarity 0.XX"** (2 decimals)
+— never converted to a percentage, never called "confidence" anywhere in
+the codebase (both are asserted absent in unit and E2E tests).
+
+**Result presentation** (`features/knowledge/components/
+knowledge-search-panel.tsx`): rank, a real Document link
+(`/app/knowledge/{document_id}`, the existing detail route — no new page),
+source name as **plain text** (there is no Source detail page in this app,
+so no dead link is ever created), the chunk text itself, and its citation
+(`page_start`/`page_end`/`start_offset`/`end_offset`/`chunk_ordinal`,
+rendered via the existing `StructuredPayload` safe-JSON viewer). No fake
+"grounding %"/"relevance %"/"citation quality" metric of any kind.
+
+**Chunk content safety**: retrieved chunk text is **untrusted data** — it
+may contain HTML-looking, script-looking, prompt-injection-looking, or
+URL-looking text, or long strings. It is rendered as a plain React text node
+inside a bounded, internally-scrolling box (`max-h-40 overflow-y-auto`, plus
+a defensive 4000-character hard truncation, clearly marked "(truncated)")
+— never `dangerouslySetInnerHTML`, raw Markdown-to-HTML, `eval`, or `new
+Function`, and never auto-linked. Proven both in unit tests (HTML-looking,
+script-looking, and prompt-injection-looking fixtures) and in a real E2E
+test that ingests such a chunk through the real pipeline and searches for it.
+
+**Server state / cache architecture** (`features/knowledge/queries.ts
+useKnowledgeSearchQuery`): deliberately **not** an ordinary `useQuery` keyed
+by request content — search is a telemetry-producing POST, not a cacheable
+list. The query is `enabled: false` and fires only via an explicit
+`refetch()` call from the form's submit handler (never on mount, key change,
+window focus, or reconnect — one explicit search: one request), `retry: 0`
+(an automatic retry would silently create a second, invisible
+`RetrievalEvent`), and keyed by a single **workspace-scoped "current
+search" slot** (`knowledgeKeys.retrievalCurrent(workspaceId)`) rather than
+one cache entry per distinct query. The submitted request itself is read
+from a `useRef` (not React state) inside `queryFn`, so calling `refetch()`
+immediately after setting the ref always uses the just-submitted request —
+no stale-closure/second-click bug, no `useEffect` needed to "sync" state
+into the query.
+
+**Workspace isolation / in-flight switch safety**: two independent
+mechanisms, deliberately redundant. (1) `KnowledgeSearchPanel` is mounted
+with `key={workspaceId}` (`knowledge-list-page.tsx`) — switching workspaces
+fully unmounts the old panel instance (discarding its draft/result state
+entirely) and mounts a fresh one, rather than updating props in place. (2)
+Independently, the query-key scoping above means even a late-arriving
+response from the old workspace's request can only ever resolve into that
+workspace's own cache slot — never the new workspace's. Both are proven: a
+unit test simulates the real `key` remount mid-flight (a delayed response
+resolving after the switch never appears), and a real E2E test performs the
+actual browser-level workspace switch after firing a real search.
+
+**No Retrieval History UI**: `RetrievalEvent`/`RetrievalHit` are real,
+persisted on every search, and there is a real, public
+`GET .../knowledge/retrieval-events/{event_id}/` endpoint — but it is a
+single-event-by-id read, not a list, and it returns exactly the same shape
+the search response itself already carries. An internal model with a
+single-item read endpoint is not a public list capability; this chunk never
+calls or links to it, and `event_id` is never surfaced in the UI.
+
+**No-hit / error states**: "No results" (`sufficient_context: false`,
+`results: []`) is rendered as a distinct, non-alarming state — never the
+same UI as a network/permission/server error, and never shown for a genuine
+failure. Proven with a real, deterministic zero-result E2E case: filtering
+by a real Source with zero real `KnowledgeChunk` rows (not a fabricated
+empty state, not `minimum_score`-induced, since that control isn't exposed
+in this chunk's UI).
+
+**Network**: one explicit search submission → exactly one `POST
+.../knowledge/search/` request, plus the Source filter's dropdown reusing
+the same already-cached Sources query the Documents tab's filter uses (no
+duplicate fetch). No per-hit document/source detail request of any kind —
+every displayed field comes from the search response itself. No polling.
+
 ## Local development
 
 1. Start the backend (see `../README.md`) so `NEXT_PUBLIC_API_BASE_URL`
