@@ -12,6 +12,7 @@ import { resetAuthMockState } from "@/tests/msw/handlers";
 import { resetCustomerMockState } from "@/tests/msw/customer-handlers";
 import { resetConversationMockState } from "@/tests/msw/conversation-handlers";
 import { resetHandoffMockState } from "@/tests/msw/handoff-handlers";
+import { resetKnowledgeMockState } from "@/tests/msw/knowledge-handlers";
 import { resetTicketMockState } from "@/tests/msw/ticket-handlers";
 import { resetToolExecutionMockState } from "@/tests/msw/tool-execution-handlers";
 import { server } from "@/tests/msw/server";
@@ -47,6 +48,7 @@ beforeEach(() => {
   resetToolExecutionMockState();
   resetApprovalMockState();
   resetHandoffMockState();
+  resetKnowledgeMockState();
   localStorage.clear();
   sessionStorage.clear();
 });
