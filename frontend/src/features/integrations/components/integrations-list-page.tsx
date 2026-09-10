@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Suspense } from "react";
+import type { ReactNode } from "react";
 
 import {
   IntegrationConnectionStatusBadge,
@@ -14,7 +15,11 @@ import type { IntegrationConnectionListParams } from "@/features/integrations/ty
 import {
   buildIntegrationConnectionListQueryString,
   parseIntegrationConnectionListParams,
+  parseIntegrationsTab,
 } from "@/features/integrations/url-params";
+import { WebhookDeliveriesTab } from "@/features/webhooks/components/webhook-deliveries-tab";
+import { WebhookEndpointsTab } from "@/features/webhooks/components/webhook-endpoints-tab";
+import { parseWebhookDeliveryListParams, parseWebhookEndpointListParams } from "@/features/webhooks/url-params";
 import { useWorkspace } from "@/features/workspace/workspace-provider";
 import { ListError } from "@/components/support/list-error";
 import { Pagination } from "@/components/support/pagination";
@@ -22,6 +27,31 @@ import { Timestamp } from "@/components/support/timestamp";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
+
+function TabLink({
+  href,
+  isActive,
+  children,
+}: {
+  href: string;
+  isActive: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <Link
+      href={href}
+      aria-current={isActive ? "page" : undefined}
+      className={cn(
+        "rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
+        isActive
+          ? "bg-primary-500 text-text-inverse"
+          : "text-text-secondary hover:bg-surface-2 hover:text-text-primary",
+      )}
+    >
+      {children}
+    </Link>
+  );
+}
 
 function IntegrationsListSkeleton() {
   return (
@@ -157,21 +187,52 @@ function IntegrationsListInner() {
   const searchParams = useSearchParams();
 
   const workspaceId = workspace.activeWorkspace?.id ?? null;
-  const params = parseIntegrationConnectionListParams(searchParams);
+  const tab = parseIntegrationsTab(searchParams);
+  const connectionParams = parseIntegrationConnectionListParams(searchParams);
+  const endpointParams = parseWebhookEndpointListParams(searchParams);
+  const deliveryParams = parseWebhookDeliveryListParams(searchParams);
 
   return (
     <div className="flex flex-col gap-6">
       <div>
         <h1 className="text-text-primary text-xl font-semibold">Integrations</h1>
         <p className="text-text-secondary text-sm">
-          Real external-provider connections configured for this workspace.
+          Real external-provider connections and outbound webhook operations for this workspace.
         </p>
       </div>
 
+      {/*
+        Same real-navigation-links-not-ARIA-tabs pattern as
+        knowledge-list-page.tsx (Phase 21 Chunk 4 accessibility fix): each
+        `href` changes `?tab=`, there is no roving tabindex or associated
+        `role="tabpanel"`, so a `<nav>` landmark with `aria-current="page"`
+        is the semantically honest pattern here too — never `role="tablist"`
+        around plain links.
+      */}
+      <nav aria-label="Integrations views" className="flex gap-2">
+        <TabLink href={pathname} isActive={tab === "connections"}>
+          Connections
+        </TabLink>
+        <TabLink href={`${pathname}?tab=webhooks`} isActive={tab === "webhooks"}>
+          Webhooks
+        </TabLink>
+        <TabLink href={`${pathname}?tab=deliveries`} isActive={tab === "deliveries"}>
+          Deliveries
+        </TabLink>
+      </nav>
+
       {workspaceId === null ? (
         <IntegrationsListSkeleton />
+      ) : tab === "connections" ? (
+        <IntegrationsListContent
+          workspaceId={workspaceId}
+          pathname={pathname}
+          params={connectionParams}
+        />
+      ) : tab === "webhooks" ? (
+        <WebhookEndpointsTab workspaceId={workspaceId} pathname={pathname} params={endpointParams} />
       ) : (
-        <IntegrationsListContent workspaceId={workspaceId} pathname={pathname} params={params} />
+        <WebhookDeliveriesTab workspaceId={workspaceId} pathname={pathname} params={deliveryParams} />
       )}
     </div>
   );
