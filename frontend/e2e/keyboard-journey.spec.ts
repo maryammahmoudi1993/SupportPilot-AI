@@ -1,3 +1,5 @@
+import path from "node:path";
+
 import type { Locator, Page } from "@playwright/test";
 import { expect, test } from "@playwright/test";
 
@@ -333,6 +335,125 @@ test.describe("Keyboard-only operational journey", () => {
     await tabUntilFocused(page, handoffConversationLink);
     await page.keyboard.press("Enter");
     await page.waitForURL(`**/app/inbox/${data.workspaceAConversationId}`);
+
+    // --- Logout, entirely via keyboard ---
+    const accountMenuButton = page.getByRole("button", { name: /Account menu/i });
+    await tabUntilFocused(page, accountMenuButton);
+    await page.keyboard.press("Enter");
+    const signOutItem = page.getByRole("menuitem", { name: "Sign out" });
+    await expect(signOutItem).toBeVisible();
+    await expect(signOutItem).toBeFocused();
+    await page.keyboard.press("Enter");
+
+    await page.waitForURL("**/login");
+    await expect(page.getByRole("button", { name: "Sign in" })).toBeVisible();
+  });
+
+  // Phase 21 Chunk 4 (final Knowledge/RAG acceptance gate, Part J §39): a
+  // real keyboard-only pass through Knowledge — Documents -> Upload ->
+  // Document detail -> Search -> a real result -> Document link -> Sources
+  // -> workspace switch -> logout. The browser's own native file-picker
+  // dialog is the one control no automated tool (Playwright included) can
+  // meaningfully drive as a pure keyboard action — that OS-level dialog is
+  // never simulated here; `setInputFiles` supplies the file directly, and
+  // every OTHER control (Source select, Title input, Upload button, and the
+  // File input's own reachability via Tab) is driven and asserted for real.
+  test("navigates Knowledge -> Upload -> Document -> Search -> a real result -> Sources, and logs out, entirely via keyboard (except the OS file-picker dialog)", async ({
+    page,
+  }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+
+    // --- Switch to Workspace A via keyboard (owner — canManageKnowledge;
+    // carries the real retrieval fixtures) ---
+    const workspaceSwitcher = page.getByRole("button", { name: data.defaultWorkspaceName });
+    await tabUntilFocused(page, workspaceSwitcher);
+    await page.keyboard.press("Enter");
+    const otherWorkspaceItem = page.getByRole("menuitem", {
+      name: new RegExp(data.otherWorkspaceName),
+    });
+    await keyUntilFocused(page, otherWorkspaceItem, "ArrowDown");
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("button", { name: data.otherWorkspaceName })).toBeVisible();
+
+    // --- Knowledge: reach the list via keyboard ---
+    const knowledgeLink = page
+      .getByRole("navigation", { name: "Primary" })
+      .getByRole("link", { name: "Knowledge" });
+    await tabUntilFocused(page, knowledgeLink);
+    await page.keyboard.press("Enter");
+    await page.waitForURL("**/app/knowledge");
+
+    // --- Upload: open the form, operate every real control via keyboard ---
+    const uploadToggle = page.getByRole("button", { name: "Upload document" });
+    await tabUntilFocused(page, uploadToggle);
+    await page.keyboard.press("Enter");
+    const form = page.getByRole("form", { name: "Upload a knowledge document" });
+    await expect(form).toBeVisible();
+
+    const sourceSelect = form.getByLabel("Source");
+    await tabUntilFocused(page, sourceSelect);
+    // Same established convention as the Tickets priority filter above:
+    // `selectOption` sets the value the same way keyboard selection would;
+    // `tabUntilFocused` is what actually proves keyboard reachability.
+    await sourceSelect.selectOption(data.workspaceARetrievalSourceId);
+    const titleInput = form.getByLabel("Title");
+    await tabUntilFocused(page, titleInput);
+    await page.keyboard.type("Keyboard journey upload");
+    const fileInput = form.getByLabel("File");
+    await tabUntilFocused(page, fileInput);
+    await fileInput.setInputFiles(path.join(__dirname, "fixtures-data", "e2e-upload.txt"));
+    const uploadButton = form.getByRole("button", { name: "Upload" });
+    await tabUntilFocused(page, uploadButton);
+    await page.keyboard.press("Enter");
+
+    await expect(page.getByRole("heading", { name: "Keyboard journey upload" })).toBeVisible();
+
+    // --- Back to the Knowledge list (the tab navigation only exists there,
+    // not on Document detail), then Search: submit a real query, follow the
+    // real Document link, entirely via keyboard ---
+    const backToKnowledgeLink = page.getByRole("link", { name: "← Back to Knowledge" });
+    await tabUntilFocused(page, backToKnowledgeLink);
+    await page.keyboard.press("Enter");
+    await page.waitForURL("**/app/knowledge");
+
+    const searchTab = page.getByRole("link", { name: "Search" });
+    await tabUntilFocused(page, searchTab);
+    await page.keyboard.press("Enter");
+    await page.waitForURL("**/app/knowledge?tab=search");
+
+    const searchForm = page.getByRole("form", { name: "Search knowledge" });
+    const queryInput = searchForm.getByLabel("Query");
+    await tabUntilFocused(page, queryInput);
+    await page.keyboard.type("duplicate payment refund");
+    const searchButton = searchForm.getByRole("button", { name: "Search" });
+    await tabUntilFocused(page, searchButton);
+    await page.keyboard.press("Enter");
+
+    const resultsRegion = page.getByRole("region", { name: "Search results" });
+    await expect(resultsRegion.getByRole("list")).toBeVisible();
+    // This document's other real chunks may also rank (all with the same
+    // Document link text) — the first result (rank 1) is the one this
+    // journey actually follows.
+    const documentLink = resultsRegion
+      .getByRole("listitem")
+      .first()
+      .getByRole("link", { name: "Support Handbook" });
+    await tabUntilFocused(page, documentLink);
+    await page.keyboard.press("Enter");
+    await page.waitForURL(`**/app/knowledge/${data.workspaceARetrievalDocumentId}`);
+    await expect(page.getByRole("heading", { name: "Support Handbook" })).toBeVisible();
+
+    // --- Sources tab, via keyboard ---
+    const backLink = page.getByRole("link", { name: "← Back to Knowledge" });
+    await tabUntilFocused(page, backLink);
+    await page.keyboard.press("Enter");
+    await page.waitForURL("**/app/knowledge");
+    const sourcesTab = page.getByRole("link", { name: "Sources" });
+    await tabUntilFocused(page, sourcesTab);
+    await page.keyboard.press("Enter");
+    await page.waitForURL("**/app/knowledge?tab=sources");
+    await expect(page.getByText("E2E Retrieval Fixtures")).toBeVisible();
 
     // --- Logout, entirely via keyboard ---
     const accountMenuButton = page.getByRole("button", { name: /Account menu/i });

@@ -1,3 +1,5 @@
+import path from "node:path";
+
 import { expect, test } from "@playwright/test";
 
 import { e2eData, login } from "./fixtures";
@@ -98,6 +100,31 @@ for (const viewport of VIEWPORTS) {
         await login(page, data.primaryEmail, data.primaryPassword);
         await page.goto(path(data));
         await expect(page.getByRole("status", { name: loadingLabel })).toBeHidden();
+        await assertNoHorizontalOverflow(page);
+      });
+    }
+
+    // Phase 21 Chunk 4 (final Knowledge/RAG acceptance gate, Part K §41):
+    // Knowledge's list/tab/detail surfaces, at every required viewport.
+    const KNOWLEDGE_PAGES: {
+      name: string;
+      path: (data: ReturnType<typeof e2eData>) => string;
+    }[] = [
+      { name: "Knowledge Documents list", path: () => "/app/knowledge" },
+      { name: "Knowledge Sources tab", path: () => "/app/knowledge?tab=sources" },
+      { name: "Knowledge Search tab", path: () => "/app/knowledge?tab=search" },
+      {
+        name: "Knowledge Document detail",
+        path: (data) => `/app/knowledge/${data.workspaceBKnowledgeDocumentReadyId}`,
+      },
+    ];
+
+    for (const { name, path } of KNOWLEDGE_PAGES) {
+      test(`${name} has no horizontal overflow`, async ({ page }) => {
+        const data = e2eData();
+        await login(page, data.primaryEmail, data.primaryPassword);
+        await page.goto(path(data));
+        await expect(page.locator("table, h1, h2, h3, form").first()).toBeVisible();
         await assertNoHorizontalOverflow(page);
       });
     }
@@ -246,6 +273,63 @@ test.describe("Mobile shell (375px)", () => {
 
     await expect(page.getByText("Rejected", { exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: "Reject" })).toHaveCount(0);
+    await assertNoHorizontalOverflow(page);
+  });
+
+  // Phase 21 Chunk 4 (final Knowledge/RAG acceptance gate, Part K §43): at
+  // 375px, every real control on the upload form remains usable.
+  test("Knowledge upload form is usable: Source/Title/File/Upload all reachable, error states readable", async ({
+    page,
+  }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+    await page.getByRole("button", { name: data.defaultWorkspaceName }).click();
+    await page.getByRole("menuitem", { name: new RegExp(data.otherWorkspaceName) }).click();
+    await page.goto("/app/knowledge");
+    await page.getByRole("button", { name: "Upload document" }).click();
+
+    const form = page.getByRole("form", { name: "Upload a knowledge document" });
+    await expect(form.getByLabel("Source")).toBeVisible();
+    await expect(form.getByLabel("Title")).toBeVisible();
+    await expect(form.getByLabel("File")).toBeVisible();
+    await expect(form.getByRole("button", { name: "Upload" })).toBeVisible();
+    await assertNoHorizontalOverflow(page);
+
+    await form.getByLabel("Source").selectOption(data.workspaceAKnowledgeSourceId);
+    await form.getByLabel("Title").fill("Mobile upload check");
+    await form
+      .getByLabel("File")
+      .setInputFiles(path.join(__dirname, "fixtures-data", "e2e-unsupported.exe"));
+    await form.getByRole("button", { name: "Upload" }).click();
+
+    await expect(page.getByText("This upload was rejected")).toBeVisible();
+    await assertNoHorizontalOverflow(page);
+  });
+
+  // Phase 21 Chunk 4 (final Knowledge/RAG acceptance gate, Part K §42): at
+  // 375px, the Search form, a real ranked result, its Similarity score, and
+  // a long chunk all remain readable/usable, and the Document link is reachable.
+  test("Knowledge search is usable: query/top_k/source controls, a real result, and a long chunk are all readable", async ({
+    page,
+  }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+    await page.getByRole("button", { name: data.defaultWorkspaceName }).click();
+    await page.getByRole("menuitem", { name: new RegExp(data.otherWorkspaceName) }).click();
+    await page.goto("/app/knowledge?tab=search");
+
+    const form = page.getByRole("form", { name: "Search knowledge" });
+    await expect(form.getByLabel("Query")).toBeVisible();
+    await expect(form.getByLabel("Results")).toBeVisible();
+    await expect(form.getByLabel("Source")).toBeVisible();
+    await form.getByLabel("Query").fill("duplicate payment refund");
+    await form.getByRole("button", { name: "Search" }).click();
+
+    const resultsRegion = page.getByRole("region", { name: "Search results" });
+    await expect(resultsRegion.getByRole("list")).toBeVisible();
+    const firstResult = resultsRegion.getByRole("listitem").first();
+    await expect(firstResult.getByText(/^Similarity \d\.\d\d$/)).toBeVisible();
+    await expect(firstResult.getByRole("link", { name: "Support Handbook" })).toBeVisible();
     await assertNoHorizontalOverflow(page);
   });
 });
