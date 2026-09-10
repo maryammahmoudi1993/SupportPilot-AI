@@ -99,6 +99,14 @@ export const knowledgeMockState = {
   uploadNetworkError: false,
   /** An artificial delay so an "in flight" window is actually observable in a test, rather than racing a same-tick MSW resolution — same pattern as approval-handlers.ts `decisionDelayMs`. */
   uploadDelayMs: 0,
+  /**
+   * Mirrors the real backend's synchronous, request-time rejection
+   * (`knowledge/ingestion/validators.py` `validate_upload`, raised before any
+   * `KnowledgeDocument` row is created — see `knowledge/services.py`
+   * `upload_document`) for a file whose content-type/extension isn't in
+   * `KNOWLEDGE_ALLOWED_CONTENT_TYPES` (Phase 21 Chunk 2A §3).
+   */
+  uploadUnsupportedType: false,
 };
 
 export function seedKnowledgeDocuments(
@@ -120,6 +128,7 @@ export function resetKnowledgeMockState(): void {
   knowledgeMockState.documentCreateCallCount = 0;
   knowledgeMockState.uploadNetworkError = false;
   knowledgeMockState.uploadDelayMs = 0;
+  knowledgeMockState.uploadUnsupportedType = false;
   nextId = 1;
 }
 
@@ -222,6 +231,17 @@ export const knowledgeHandlers = [
         return HttpResponse.json(
           { error: { code: "conflict", message: "The selected knowledge source is not active." } },
           { status: 409 },
+        );
+      }
+      if (knowledgeMockState.uploadUnsupportedType) {
+        return HttpResponse.json(
+          {
+            error: {
+              code: "knowledge_unsupported_type",
+              message: "The uploaded file type is not supported.",
+            },
+          },
+          { status: 400 },
         );
       }
       const fileName = file instanceof File ? file.name : "upload";

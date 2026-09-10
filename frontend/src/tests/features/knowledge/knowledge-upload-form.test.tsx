@@ -137,6 +137,70 @@ describe("KnowledgeUploadForm", () => {
     expect(screen.getByRole("button", { name: "Refresh list" })).toBeInTheDocument();
   });
 
+  it("keeps submit disabled with no file selected, even with source and title filled — no request is ever sent", async () => {
+    signIn();
+    seedKnowledgeSources(FIXTURE_WORKSPACE_GLOBEX.id, [
+      makeKnowledgeSourceFixture({ id: SOURCE_1, name: "Support Macros" }),
+    ]);
+    vi.mocked(useRouter).mockReturnValue({
+      push: vi.fn(),
+    } as unknown as ReturnType<typeof useRouter>);
+
+    renderAuthenticated(<KnowledgeUploadForm workspaceId={FIXTURE_WORKSPACE_GLOBEX.id} />);
+    await screen.findByRole("option", { name: "Support Macros" });
+
+    const user = userEvent.setup();
+    await user.selectOptions(screen.getByLabelText("Source"), SOURCE_1);
+    await user.type(screen.getByLabelText("Title"), "Refund policy");
+
+    // No file chosen: `canSubmit` (the real gate — see the component's doc
+    // comment on `aria-required` vs native `required`) stays false, so the
+    // submit control itself is disabled — not just guarded inside the
+    // handler. A disabled button fails Testing Library's/userEvent's own
+    // actionability check on click, which is itself proof it cannot be
+    // activated; this asserts the disabled state directly instead.
+    expect(screen.getByRole("button", { name: "Upload" })).toBeDisabled();
+    expect(knowledgeMockState.documentCreateCallCount).toBe(0);
+
+    // Also required: this is a screen-reader-perceivable requirement, not
+    // just a visual one — the file input carries `aria-required="true"`.
+    expect(screen.getByLabelText("File")).toHaveAttribute("aria-required", "true");
+  });
+
+  it("shows the real server rejection for an unsupported file type, persists no document, and never navigates", async () => {
+    signIn();
+    seedKnowledgeSources(FIXTURE_WORKSPACE_GLOBEX.id, [
+      makeKnowledgeSourceFixture({ id: SOURCE_1, name: "Support Macros" }),
+    ]);
+    knowledgeMockState.uploadUnsupportedType = true;
+    const push = vi.fn();
+    vi.mocked(useRouter).mockReturnValue({ push } as unknown as ReturnType<typeof useRouter>);
+
+    renderAuthenticated(<KnowledgeUploadForm workspaceId={FIXTURE_WORKSPACE_GLOBEX.id} />);
+    await screen.findByRole("option", { name: "Support Macros" });
+
+    const user = userEvent.setup();
+    await user.selectOptions(screen.getByLabelText("Source"), SOURCE_1);
+    await user.type(screen.getByLabelText("Title"), "Suspicious file");
+    // `userEvent.upload` itself honors the input's `accept` attribute (a
+    // real jsdom/Testing-Library behavior, not a product one), so an
+    // extension outside the allow-list can never actually be selected here —
+    // this instead models the real case the client-side `accept` hint can
+    // never catch: a `.txt`-named file whose actual bytes/content-type the
+    // server independently rejects (`validate_upload`'s magic-byte check,
+    // knowledge/ingestion/validators.py). The client never pre-empts this —
+    // the server is the sole authority — proven by this real 400 round trip.
+    await user.upload(screen.getByLabelText("File"), makeFile("note.txt", "hello"));
+    await user.click(screen.getByRole("button", { name: "Upload" }));
+
+    expect(await screen.findByText("This upload was rejected")).toBeInTheDocument();
+    expect(screen.getByText("The uploaded file type is not supported.")).toBeInTheDocument();
+    expect(push).not.toHaveBeenCalled();
+    expect(
+      knowledgeMockState.documentsByWorkspace[FIXTURE_WORKSPACE_GLOBEX.id] ?? [],
+    ).toHaveLength(0);
+  });
+
   it("blocks duplicate submission while an upload is pending — never a double POST", async () => {
     signIn();
     seedKnowledgeSources(FIXTURE_WORKSPACE_GLOBEX.id, [
