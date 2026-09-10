@@ -77,3 +77,9 @@ logs/
 /dist/
 /build/
 .cache/
+
+# Frontend E2E: a transient, generated Django-shell script the frontend's
+# global-setup.ts writes next to backend/manage.py at test-run time (so
+# Python's `sys.path[0]` resolves `import config`) and deletes immediately
+# after — never a tracked backend source file.
+/backend/.e2e-setup-script.py

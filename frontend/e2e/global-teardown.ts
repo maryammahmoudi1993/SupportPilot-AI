@@ -12,7 +12,7 @@ const CLEANUP_SCRIPT = `
 from accounts.models import User
 from agents.models import AgentRun
 from approvals.models import ApprovalRequest
-from knowledge.models import KnowledgeDocument, KnowledgeSource
+from knowledge.models import KnowledgeDocument, KnowledgeSource, RetrievalEvent
 from tickets.models import HumanHandoff
 from tools.models import ToolExecution
 from workspaces.models import Workspace
@@ -37,6 +37,15 @@ from workspaces.models import Workspace
 # workspace CASCADE, and are deleted explicitly here (before the workspace
 # cascade) purely for a clean, auditable log line — same reasoning as
 # HumanHandoff above.
+#
+# Phase 21 Chunk 3: RetrievalHit.chunk is on_delete=PROTECT
+# (knowledge/models.py) against KnowledgeChunk — a real search performed
+# during E2E persists real RetrievalEvent/RetrievalHit rows referencing real
+# chunks, so RetrievalEvent (which CASCADEs its RetrievalHit rows) must be
+# deleted BEFORE KnowledgeDocument, whose own cascade deletes KnowledgeChunk
+# — the same "PROTECT blocks even a row about to be co-deleted" reasoning
+# as ApprovalRequest/ToolExecution/AgentRun above.
+deleted_retrieval_events = RetrievalEvent.objects.filter(workspace__name__startswith="E2E ").delete()
 deleted_approvals = ApprovalRequest.objects.filter(workspace__name__startswith="E2E ").delete()
 deleted_handoffs = HumanHandoff.objects.filter(workspace__name__startswith="E2E ").delete()
 deleted_knowledge_documents = KnowledgeDocument.objects.filter(workspace__name__startswith="E2E ").delete()
@@ -45,7 +54,7 @@ deleted_tool_executions = ToolExecution.objects.filter(workspace__name__startswi
 deleted_runs = AgentRun.objects.filter(workspace__name__startswith="E2E ").delete()
 deleted_users = User.objects.filter(email__startswith="e2e-").delete()
 deleted_workspaces = Workspace.objects.filter(name__startswith="E2E ").delete()
-print("E2E cleanup:", deleted_approvals, deleted_handoffs, deleted_knowledge_documents, deleted_knowledge_sources, deleted_tool_executions, deleted_runs, deleted_users, deleted_workspaces)
+print("E2E cleanup:", deleted_retrieval_events, deleted_approvals, deleted_handoffs, deleted_knowledge_documents, deleted_knowledge_sources, deleted_tool_executions, deleted_runs, deleted_users, deleted_workspaces)
 `;
 
 export default async function globalTeardown(): Promise<void> {
