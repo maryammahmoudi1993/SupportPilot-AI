@@ -12,7 +12,8 @@
  * position. Do not add a destination whose route does not yet exist — an
  * unclickable/fake nav entry is worse than a short sidebar. Phase 20 Chunk 3
  * adds "Approvals" and "Handoffs" now that `/app/approvals` and
- * `/app/handoffs` are real.
+ * `/app/handoffs` are real. Phase 21 Chunk 1 adds "Knowledge" now that
+ * `/app/knowledge` is real.
  */
 export interface NavItem {
   id: string;
@@ -29,4 +30,5 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { id: "agent-runs", label: "Agent Runs", path: "/app/agent-runs" },
   { id: "approvals", label: "Approvals", path: "/app/approvals" },
   { id: "handoffs", label: "Handoffs", path: "/app/handoffs" },
+  { id: "knowledge", label: "Knowledge", path: "/app/knowledge" },
 ];
