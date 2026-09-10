@@ -9,6 +9,8 @@ import {
   KnowledgeDocumentStatusBadge,
   knowledgeSourceTypeLabel,
 } from "@/features/knowledge/components/knowledge-badges";
+import { KnowledgeSourceCreateForm } from "@/features/knowledge/components/knowledge-source-create-form";
+import { KnowledgeUploadForm } from "@/features/knowledge/components/knowledge-upload-form";
 import {
   useKnowledgeDocumentListQuery,
   useKnowledgeSourceFilterOptionsQuery,
@@ -20,6 +22,7 @@ import type {
   KnowledgeSourceListParams,
   SourceActiveFilter,
 } from "@/features/knowledge/types";
+import { canManageKnowledge } from "@/features/knowledge/types";
 import {
   buildKnowledgeDocumentListQueryString,
   buildKnowledgeSourceListQueryString,
@@ -32,6 +35,7 @@ import { useWorkspace } from "@/features/workspace/workspace-provider";
 import { ListError } from "@/components/support/list-error";
 import { Pagination } from "@/components/support/pagination";
 import { Timestamp } from "@/components/support/timestamp";
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -83,14 +87,17 @@ function DocumentsTab({
   workspaceId,
   pathname,
   params,
+  canManage,
 }: {
   workspaceId: string;
   pathname: string;
   params: KnowledgeDocumentListParams;
+  canManage: boolean;
 }) {
   const router = useRouter();
   const query = useKnowledgeDocumentListQuery(workspaceId, params);
   const sourceOptions = useKnowledgeSourceFilterOptionsQuery(workspaceId);
+  const [isUploadOpen, setIsUploadOpen] = useState(false);
 
   function pushParams(next: KnowledgeDocumentListParams) {
     router.replace(`${pathname}${buildKnowledgeDocumentListQueryString(next)}`, { scroll: false });
@@ -108,6 +115,22 @@ function DocumentsTab({
 
   return (
     <div className="flex flex-col gap-6">
+      {canManage && (
+        <div className="flex flex-col gap-3">
+          <div>
+            <Button size="sm" onClick={() => setIsUploadOpen((open) => !open)}>
+              {isUploadOpen ? "Cancel upload" : "Upload document"}
+            </Button>
+          </div>
+          {isUploadOpen && (
+            <KnowledgeUploadForm
+              workspaceId={workspaceId}
+              onCancel={() => setIsUploadOpen(false)}
+            />
+          )}
+        </div>
+      )}
+
       <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">
         <div className="w-full sm:w-64">
           <Label htmlFor="knowledge-source-filter">Source</Label>
@@ -235,12 +258,15 @@ function SourcesTab({
   workspaceId,
   pathname,
   params,
+  canManage,
 }: {
   workspaceId: string;
   pathname: string;
   params: KnowledgeSourceListParams;
+  canManage: boolean;
 }) {
   const router = useRouter();
+  const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [searchInput, setSearchInput] = useState(params.search);
   // Mirrors `params.search` so external URL changes (browser back/forward, a
   // pasted link) can reset the field — same pattern as
@@ -280,6 +306,23 @@ function SourcesTab({
 
   return (
     <div className="flex flex-col gap-6">
+      {canManage && (
+        <div className="flex flex-col gap-3">
+          <div>
+            <Button size="sm" onClick={() => setIsCreateOpen((open) => !open)}>
+              {isCreateOpen ? "Cancel" : "New source"}
+            </Button>
+          </div>
+          {isCreateOpen && (
+            <KnowledgeSourceCreateForm
+              workspaceId={workspaceId}
+              onCreated={() => setIsCreateOpen(false)}
+              onCancel={() => setIsCreateOpen(false)}
+            />
+          )}
+        </div>
+      )}
+
       <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">
         <div className="w-full sm:w-72">
           <Label htmlFor="knowledge-source-search">Search</Label>
@@ -409,6 +452,7 @@ function KnowledgeListContent() {
   const searchParams = useSearchParams();
 
   const workspaceId = workspace.activeWorkspace?.id ?? null;
+  const canManage = canManageKnowledge(workspace.activeWorkspace?.role);
   const tab: KnowledgeTab = parseKnowledgeTab(searchParams);
   const documentParams = parseKnowledgeDocumentListParams(searchParams);
   const sourceParams = parseKnowledgeSourceListParams(searchParams);
@@ -434,9 +478,19 @@ function KnowledgeListContent() {
       {workspaceId === null ? (
         <KnowledgeListSkeleton label="Loading knowledge" />
       ) : tab === "documents" ? (
-        <DocumentsTab workspaceId={workspaceId} pathname={pathname} params={documentParams} />
+        <DocumentsTab
+          workspaceId={workspaceId}
+          pathname={pathname}
+          params={documentParams}
+          canManage={canManage}
+        />
       ) : (
-        <SourcesTab workspaceId={workspaceId} pathname={pathname} params={sourceParams} />
+        <SourcesTab
+          workspaceId={workspaceId}
+          pathname={pathname}
+          params={sourceParams}
+          canManage={canManage}
+        />
       )}
     </div>
   );

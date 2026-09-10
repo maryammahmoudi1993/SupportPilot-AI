@@ -4,13 +4,20 @@ import Link from "next/link";
 import type { ReactNode } from "react";
 
 import { KnowledgeDocumentStatusBadge } from "@/features/knowledge/components/knowledge-badges";
+import { useRetryKnowledgeDocumentMutation } from "@/features/knowledge/mutations";
 import { useKnowledgeDocumentDetailQuery } from "@/features/knowledge/queries";
-import { isTerminalDocumentStatus } from "@/features/knowledge/types";
+import {
+  canManageKnowledge,
+  isRetryableDocumentStatus,
+  isTerminalDocumentStatus,
+} from "@/features/knowledge/types";
 import { useWorkspace } from "@/features/workspace/workspace-provider";
 import { EntityNotFound } from "@/components/support/entity-not-found";
 import { ListError } from "@/components/support/list-error";
 import { StructuredPayload } from "@/components/support/structured-payload";
 import { Timestamp } from "@/components/support/timestamp";
+import { Alert } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
@@ -58,11 +65,14 @@ function formatBytes(bytes: number): string {
 function KnowledgeDocumentDetailContent({
   workspaceId,
   documentId,
+  canManage,
 }: {
   workspaceId: string;
   documentId: string;
+  canManage: boolean;
 }) {
   const documentQuery = useKnowledgeDocumentDetailQuery(workspaceId, documentId);
+  const retryMutation = useRetryKnowledgeDocumentMutation(workspaceId, documentId);
 
   if (documentQuery.isPending) {
     return (
@@ -92,6 +102,20 @@ function KnowledgeDocumentDetailContent({
   }
 
   const document = documentQuery.data;
+  const showRetry = canManage && isRetryableDocumentStatus(document.status);
+
+  function handleRetry() {
+    retryMutation.mutate(undefined, {
+      onError: () => {
+        // A 409 `conflict` here means the real server state has moved on
+        // (e.g. already retried/re-processed from another tab) since this
+        // page last fetched — refetch and let the actual persisted state
+        // redraw the page, same pattern as Approve/Reject
+        // (approval-detail-page.tsx).
+        void documentQuery.refetch();
+      },
+    });
+  }
 
   return (
     <div className="flex flex-col gap-4">
@@ -152,6 +176,26 @@ function KnowledgeDocumentDetailContent({
             </dl>
           )}
 
+          {retryMutation.isError && (
+            <Alert variant="danger" title="This document could not be queued for retry">
+              {retryMutation.error.message}
+            </Alert>
+          )}
+
+          {showRetry && (
+            <div>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={handleRetry}
+                disabled={retryMutation.isPending}
+                isLoading={retryMutation.isPending}
+              >
+                Retry
+              </Button>
+            </div>
+          )}
+
           <div>
             <span className="text-text-muted text-xs font-medium uppercase">Metadata</span>
             <div className="mt-1">
@@ -187,6 +231,7 @@ export function KnowledgeDocumentDetailPage({ documentId }: { documentId: string
     <KnowledgeDocumentDetailContent
       workspaceId={workspace.activeWorkspace.id}
       documentId={documentId}
+      canManage={canManageKnowledge(workspace.activeWorkspace.role)}
     />
   );
 }

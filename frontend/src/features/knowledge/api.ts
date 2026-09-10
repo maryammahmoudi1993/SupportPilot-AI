@@ -1,8 +1,5 @@
 /**
- * Typed API boundary for the knowledge domain — read-only this chunk (master
- * prompt Part E §21): upload/ingestion-trigger/retry/delete/retrieval are
- * real backend endpoints (knowledge/urls.py) but are not called here — see
- * frontend/README.md.
+ * Typed API boundary for the knowledge domain.
  *
  * Schema gap (Category A, same shape as every other domain — see
  * features/handoffs/api.ts): the generated
@@ -18,18 +15,36 @@
  * The sources list, by contrast, really does support `search` (name/
  * description, case-insensitive) plus a real `is_active` filter the
  * generated schema doesn't type at all.
+ *
+ * Schema gap (Chunk 2, upload): the generated
+ * `api_v1_workspaces_knowledge_documents_create` operation types its
+ * `multipart/form-data` request body as `KnowledgeDocumentUpload`, whose
+ * `file` field is typed `string` (openapi-typescript has no way to express
+ * "binary file" for a multipart body — a known, general limitation, not
+ * specific to this endpoint). The real backend
+ * (`KnowledgeDocumentUploadSerializer`) expects an actual `File`/`Blob`.
+ * `uploadKnowledgeDocument` below builds a real `FormData` (verified against
+ * `knowledge/tests/test_views.py`'s exact field names: `source_id`, `title`,
+ * `file`) and casts it to the generated body type at the one call site that
+ * needs it — an explicit, narrow, documented cast, never `any`/`ts-ignore`.
  */
 import { apiClient } from "@/lib/api/client";
-import { unwrap, withRequestTimeout } from "@/lib/api/request";
+import { requestWithTimeout, unwrap, withRequestTimeout } from "@/lib/api/request";
 import type {
+  CreateKnowledgeSourceInput,
   KnowledgeDocument,
   KnowledgeDocumentListParams,
+  KnowledgeIngestionJob,
   KnowledgeSource,
   KnowledgeSourceListParams,
   PaginatedKnowledgeDocumentList,
   PaginatedKnowledgeSourceList,
+  UploadKnowledgeDocumentInput,
 } from "@/features/knowledge/types";
-import type { paths } from "@/types/api";
+import type { components, paths } from "@/types/api";
+
+/** Upload can carry up to `KNOWLEDGE_MAX_UPLOAD_BYTES` (10 MiB default) — longer than the app's default 15s request timeout on a slow connection. */
+const UPLOAD_TIMEOUT_MS = 60_000;
 
 type GeneratedDocumentListQuery = NonNullable<
   paths["/api/v1/workspaces/{workspace_id}/knowledge/documents/"]["get"]["parameters"]["query"]
@@ -179,5 +194,98 @@ export function fetchKnowledgeSourceDetail(
       undefined,
       signal,
     ),
+  );
+}
+
+/**
+ * Minimal source creation (master prompt Part I §34) — only the fields this
+ * chunk's upload flow actually needs; `is_active`/`metadata` are left to
+ * their real backend defaults (`true`/`{}`) rather than exposed here, since
+ * nothing in this chunk's UI needs to set them. `source_type: "upload"` is
+ * sent explicitly even though the backend itself defaults to the same value
+ * (`KnowledgeSourceType.UPLOAD`) — the generated schema's `source_type`
+ * field is (incorrectly) required, not optional, despite the backend
+ * serializer's real `required=False, default=upload` — see the module doc
+ * comment's Chunk 2 schema-gap list.
+ *
+ * Schema gap (Chunk 2, response type): the generated
+ * `api_v1_workspaces_knowledge_sources_create` operation types its 201
+ * response as `KnowledgeSourceWrite` (the *request* shape) rather than the
+ * real response body — verified directly against `knowledge/views.py`
+ * `KnowledgeSourceListCreateView.create`, which returns
+ * `KnowledgeSourceSerializer(source).data` (the full object, including
+ * `id`/`created_at`/`updated_at`). An explicit, narrow cast at this one call
+ * site corrects it — never `any`/`ts-ignore`.
+ */
+export function createKnowledgeSource(
+  workspaceId: string,
+  input: CreateKnowledgeSourceInput,
+): Promise<KnowledgeSource> {
+  return requestWithTimeout((signal) =>
+    apiClient.POST("/api/v1/workspaces/{workspace_id}/knowledge/sources/", {
+      params: { path: { workspace_id: workspaceId } },
+      body: { name: input.name, description: input.description, source_type: "upload" },
+      signal,
+    }),
+  ) as unknown as Promise<KnowledgeSource>;
+}
+
+/**
+ * Real multipart field names only (knowledge/serializers.py
+ * `KnowledgeDocumentUploadSerializer`, verified against
+ * `test_manager_uploads_multipart_and_internal_fields_are_ignored`): the
+ * backend derives every other document field itself (status, chunk_count,
+ * workspace, ...) — it silently ignores any other field a client sends
+ * (that same test posts a spoofed `status`/`chunk_count`/`workspace` and
+ * asserts they're discarded), so nothing else is ever built into this
+ * FormData. No idempotency key/dedupe token exists on this endpoint (see
+ * mutations.ts's ambiguous-network-failure handling for why this matters).
+ *
+ * Schema gap (Chunk 2, response type): the generated
+ * `api_v1_workspaces_knowledge_documents_create` operation types its 201
+ * response as `KnowledgeDocumentUpload` (the *request* shape) rather than
+ * the real `{document, ingestion_job}` body — verified directly against
+ * `knowledge/views.py` `KnowledgeDocumentListCreateView.create` and
+ * `KnowledgeDocumentUploadResponseSerializer`. Corrected with the same
+ * explicit, narrow cast pattern as `createKnowledgeSource` above.
+ */
+export function uploadKnowledgeDocument(
+  workspaceId: string,
+  input: UploadKnowledgeDocumentInput,
+): Promise<{ document: KnowledgeDocument; ingestion_job: KnowledgeIngestionJob }> {
+  const formData = new FormData();
+  formData.set("source_id", input.sourceId);
+  formData.set("title", input.title);
+  formData.set("file", input.file);
+  return requestWithTimeout(
+    (signal) =>
+      apiClient.POST("/api/v1/workspaces/{workspace_id}/knowledge/documents/", {
+        params: { path: { workspace_id: workspaceId } },
+        // See the module doc comment: the generated multipart body type
+        // cannot express a real `File`, so this is an explicit, narrow cast
+        // at the one call site that needs it — never `any`/`ts-ignore`.
+        body: formData as unknown as components["schemas"]["KnowledgeDocumentUpload"],
+        bodySerializer: (body) => body,
+        signal,
+      }),
+    UPLOAD_TIMEOUT_MS,
+  ) as unknown as Promise<{ document: KnowledgeDocument; ingestion_job: KnowledgeIngestionJob }>;
+}
+
+/**
+ * Only `failed` documents are retryable (knowledge/services.py
+ * `retry_document`) — any other status returns a real 409 `conflict`. No
+ * request body; the URL is the action (same pattern as Approve/Reject —
+ * see features/approvals/api.ts).
+ */
+export function retryKnowledgeDocument(
+  workspaceId: string,
+  documentId: string,
+): Promise<KnowledgeIngestionJob> {
+  return requestWithTimeout((signal) =>
+    apiClient.POST("/api/v1/workspaces/{workspace_id}/knowledge/documents/{document_id}/retry/", {
+      params: { path: { workspace_id: workspaceId, document_id: documentId } },
+      signal,
+    }),
   );
 }
