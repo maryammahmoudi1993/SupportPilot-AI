@@ -2078,8 +2078,10 @@ process). Consequently:
   disabled endpoint (click-through, with a real confirmation dialog and a
   real server rejection rendered honestly, never a fabricated "queued"
   message), an already-non-terminal delivery (`webhook_delivery_not_redrivable`,
-  409), an unauthorized role (403), and a foreign-workspace delivery (404)
-  — see `e2e/integration-webhook-mutations.spec.ts`.
+  400 — every `WebhookError` subclass in `webhooks/errors.py` inherits
+  `SafeAPIError`'s default `status_code`, never overridden to 409; see
+  PHASE22-3-02 below), an unauthorized role (403), and a foreign-workspace
+  delivery (404) — see `e2e/integration-webhook-mutations.spec.ts`.
 - The **successful** redrive path (button disappears once the delivery is
   no longer redrivable, the real "Delivery queued for another attempt."
   message stays visible, the delivery list/detail refetch) is proven only
