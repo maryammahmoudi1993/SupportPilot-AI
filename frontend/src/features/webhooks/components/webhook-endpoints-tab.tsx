@@ -2,8 +2,10 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { useState } from "react";
 
 import { WebhookEndpointStatusBadge } from "@/features/webhooks/components/webhook-badges";
+import { CreateWebhookEndpointForm } from "@/features/webhooks/components/create-webhook-endpoint-form";
 import { useWebhookEndpointListQuery } from "@/features/webhooks/queries";
 import type { WebhookEndpointListParams } from "@/features/webhooks/types";
 import { subscribedEventTypes } from "@/features/webhooks/types";
@@ -11,6 +13,7 @@ import { buildWebhookEndpointListQueryString } from "@/features/webhooks/url-par
 import { ListError } from "@/components/support/list-error";
 import { Pagination } from "@/components/support/pagination";
 import { Timestamp } from "@/components/support/timestamp";
+import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 
@@ -29,13 +32,16 @@ export function WebhookEndpointsTab({
   workspaceId,
   pathname,
   params,
+  canManage = false,
 }: {
   workspaceId: string;
   pathname: string;
   params: WebhookEndpointListParams;
+  canManage?: boolean;
 }) {
   const router = useRouter();
   const query = useWebhookEndpointListQuery(workspaceId, params);
+  const [showCreateForm, setShowCreateForm] = useState(false);
 
   function pushParams(next: WebhookEndpointListParams) {
     router.replace(`${pathname}${buildWebhookEndpointListQueryString(next)}`, { scroll: false });
@@ -43,6 +49,23 @@ export function WebhookEndpointsTab({
 
   return (
     <div className="flex flex-col gap-6">
+      {canManage && (
+        <div>
+          {showCreateForm ? (
+            <CreateWebhookEndpointForm
+              workspaceId={workspaceId}
+              onDone={(endpointId) => {
+                setShowCreateForm(false);
+                router.push(`/app/integrations/webhooks/${endpointId}`);
+              }}
+              onCancel={() => setShowCreateForm(false)}
+            />
+          ) : (
+            <Button onClick={() => setShowCreateForm(true)}>New endpoint</Button>
+          )}
+        </div>
+      )}
+
       {query.isPending && <EndpointsListSkeleton />}
 
       {query.isError && (

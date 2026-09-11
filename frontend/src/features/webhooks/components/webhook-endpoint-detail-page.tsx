@@ -4,8 +4,9 @@ import Link from "next/link";
 import type { ReactNode } from "react";
 
 import { WebhookEndpointStatusBadge } from "@/features/webhooks/components/webhook-badges";
+import { ManageWebhookEndpointControls } from "@/features/webhooks/components/manage-webhook-endpoint-controls";
 import { useWebhookEndpointDetailQuery } from "@/features/webhooks/queries";
-import { subscribedEventTypes } from "@/features/webhooks/types";
+import { canManageWebhooks, subscribedEventTypes } from "@/features/webhooks/types";
 import { useWorkspace } from "@/features/workspace/workspace-provider";
 import { EntityNotFound } from "@/components/support/entity-not-found";
 import { ListError } from "@/components/support/list-error";
@@ -47,6 +48,7 @@ function WebhookEndpointDetailContent({
   workspaceId: string;
   endpointId: string;
 }) {
+  const workspace = useWorkspace();
   const endpointQuery = useWebhookEndpointDetailQuery(workspaceId, endpointId);
 
   if (endpointQuery.isPending) {
@@ -146,6 +148,10 @@ function WebhookEndpointDetailContent({
               <p className="text-text-secondary mt-1 text-sm">None</p>
             )}
           </div>
+
+          {canManageWebhooks(workspace.activeWorkspace?.role) && (
+            <ManageWebhookEndpointControls workspaceId={workspaceId} endpoint={endpoint} />
+          )}
         </CardContent>
       </Card>
     </div>

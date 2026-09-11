@@ -7,8 +7,9 @@ import {
   WebhookDeliveryStatusBadge,
   webhookEventTypeLabel,
 } from "@/features/webhooks/components/webhook-badges";
+import { RedriveDeliveryControl } from "@/features/webhooks/components/redrive-delivery-control";
 import { useWebhookDeliveryDetailQuery } from "@/features/webhooks/queries";
-import { isTerminalDeliveryStatus } from "@/features/webhooks/types";
+import { canManageWebhooks, isTerminalDeliveryStatus } from "@/features/webhooks/types";
 import { useWorkspace } from "@/features/workspace/workspace-provider";
 import { EntityNotFound } from "@/components/support/entity-not-found";
 import { ListError } from "@/components/support/list-error";
@@ -50,6 +51,7 @@ function WebhookDeliveryDetailContent({
   workspaceId: string;
   deliveryId: string;
 }) {
+  const workspace = useWorkspace();
   const deliveryQuery = useWebhookDeliveryDetailQuery(workspaceId, deliveryId);
 
   if (deliveryQuery.isPending) {
@@ -171,6 +173,10 @@ function WebhookDeliveryDetailContent({
             &quot;Delivered&quot; means the endpoint returned a successful response at
             least once, not that it was called only once.
           </p>
+
+          {canManageWebhooks(workspace.activeWorkspace?.role) && (
+            <RedriveDeliveryControl workspaceId={workspaceId} delivery={delivery} />
+          )}
         </CardContent>
       </Card>
     </div>

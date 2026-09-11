@@ -157,3 +157,47 @@ const WEBHOOK_MANAGE_ROLES: ReadonlySet<string> = new Set(["support_manager", "a
 export function canManageWebhooks(role: string | undefined): boolean {
   return role !== undefined && WEBHOOK_MANAGE_ROLES.has(role);
 }
+
+// ---------------------------------------------------------------------------
+// Mutation contracts (Phase 22 Chunk 3)
+// ---------------------------------------------------------------------------
+
+export interface CreateWebhookEndpointInput {
+  name: string;
+  url: string;
+  subscribed_event_types: WebhookEventTypeValue[];
+}
+
+export interface UpdateWebhookEndpointInput {
+  name?: string;
+  url?: string;
+  subscribed_event_types?: WebhookEventTypeValue[];
+}
+
+/** The one-time create/rotate response — never returned by any other endpoint (webhooks/serializers.py `WebhookEndpointCreateResponseSerializer`/`WebhookRotateSecretResponseSerializer`, webhooks/views.py `_reveal_secret_once`). */
+export type WebhookEndpointCreateResponse = components["schemas"]["WebhookEndpointCreateResponse"];
+export type WebhookRotateSecretResponse = components["schemas"]["WebhookRotateSecretResponse"];
+
+/** Real allowlist only (backend/webhooks/models.py `WebhookEndpointStatus`). */
+export const WEBHOOK_EVENT_TYPES: WebhookEventTypeValue[] = [
+  "approval.requested",
+  "approval.approved",
+  "approval.rejected",
+  "approval.expired",
+  "handoff.created",
+];
+
+/**
+ * Redrive UI eligibility (master prompt Part E §21): shown only for a
+ * terminal, exhausted delivery — `failed`/`dead` — never `pending`/
+ * `claimed`/`retry_scheduled`/`delivered`. Mirrors
+ * `webhooks/services.py redrive_webhook_delivery`'s own
+ * `locked.status not in (DeliveryStatus.FAILED, DeliveryStatus.DEAD)`
+ * guard exactly — this is UX-only; the backend re-checks independently and
+ * is always the real authority (master prompt Part G §31).
+ */
+const REDRIVABLE_STATUSES: ReadonlySet<string> = new Set(["failed", "dead"]);
+
+export function isRedrivableDeliveryStatus(status: string): boolean {
+  return REDRIVABLE_STATUSES.has(status);
+}

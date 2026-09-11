@@ -14,14 +14,18 @@
  * cannot be filtered. Only `page` is real.
  */
 import { apiClient } from "@/lib/api/client";
-import { unwrap, withRequestTimeout } from "@/lib/api/request";
+import { requestWithTimeout, unwrap, withRequestTimeout } from "@/lib/api/request";
 import type {
+  CreateWebhookEndpointInput,
   PaginatedWebhookDeliveryList,
   PaginatedWebhookEndpointList,
   SafeWebhookDelivery,
+  UpdateWebhookEndpointInput,
   WebhookDeliveryListParams,
   WebhookEndpoint,
+  WebhookEndpointCreateResponse,
   WebhookEndpointListParams,
+  WebhookRotateSecretResponse,
 } from "@/features/webhooks/types";
 import { toSafeWebhookDelivery } from "@/features/webhooks/types";
 import type { paths } from "@/types/api";
@@ -126,6 +130,90 @@ export async function fetchWebhookDeliveryDetail(
         }),
       undefined,
       signal,
+    ),
+  );
+  return toSafeWebhookDelivery(delivery);
+}
+
+// ---------------------------------------------------------------------------
+// Mutations (Phase 22 Chunk 3)
+// ---------------------------------------------------------------------------
+
+export function createWebhookEndpoint(
+  workspaceId: string,
+  input: CreateWebhookEndpointInput,
+): Promise<WebhookEndpointCreateResponse> {
+  return requestWithTimeout((signal) =>
+    apiClient.POST("/api/v1/workspaces/{workspace_id}/webhooks/endpoints/", {
+      params: { path: { workspace_id: workspaceId } },
+      body: {
+        name: input.name,
+        url: input.url,
+        subscribed_event_types: input.subscribed_event_types,
+      },
+      signal,
+    }),
+  );
+}
+
+export function updateWebhookEndpoint(
+  workspaceId: string,
+  endpointId: string,
+  input: UpdateWebhookEndpointInput,
+): Promise<WebhookEndpoint> {
+  return requestWithTimeout((signal) =>
+    apiClient.PATCH("/api/v1/workspaces/{workspace_id}/webhooks/endpoints/{endpoint_id}/", {
+      params: { path: { workspace_id: workspaceId, endpoint_id: endpointId } },
+      body: {
+        name: input.name,
+        url: input.url,
+        subscribed_event_types: input.subscribed_event_types,
+      },
+      signal,
+    }),
+  );
+}
+
+export function setWebhookEndpointStatus(
+  workspaceId: string,
+  endpointId: string,
+  status: "active" | "disabled",
+): Promise<WebhookEndpoint> {
+  return requestWithTimeout((signal) =>
+    apiClient.PATCH("/api/v1/workspaces/{workspace_id}/webhooks/endpoints/{endpoint_id}/status/", {
+      params: { path: { workspace_id: workspaceId, endpoint_id: endpointId } },
+      body: { status },
+      signal,
+    }),
+  );
+}
+
+export function rotateWebhookEndpointSecret(
+  workspaceId: string,
+  endpointId: string,
+): Promise<WebhookRotateSecretResponse> {
+  return requestWithTimeout((signal) =>
+    apiClient.POST(
+      "/api/v1/workspaces/{workspace_id}/webhooks/endpoints/{endpoint_id}/rotate-secret/",
+      {
+        params: { path: { workspace_id: workspaceId, endpoint_id: endpointId } },
+        signal,
+      },
+    ),
+  );
+}
+
+export async function redriveWebhookDelivery(
+  workspaceId: string,
+  deliveryId: string,
+): Promise<SafeWebhookDelivery> {
+  const delivery = await requestWithTimeout((signal) =>
+    apiClient.POST(
+      "/api/v1/workspaces/{workspace_id}/webhooks/deliveries/{delivery_id}/redrive/",
+      {
+        params: { path: { workspace_id: workspaceId, delivery_id: deliveryId } },
+        signal,
+      },
     ),
   );
   return toSafeWebhookDelivery(delivery);
