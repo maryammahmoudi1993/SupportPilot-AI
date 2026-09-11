@@ -5,6 +5,7 @@ import { approvalHandlers } from "@/tests/msw/approval-handlers";
 import { authHandlers } from "@/tests/msw/handlers";
 import { customerHandlers } from "@/tests/msw/customer-handlers";
 import { conversationHandlers } from "@/tests/msw/conversation-handlers";
+import { evaluationHandlers } from "@/tests/msw/evaluation-handlers";
 import { handoffHandlers } from "@/tests/msw/handoff-handlers";
 import { integrationHandlers } from "@/tests/msw/integration-handlers";
 import { knowledgeHandlers } from "@/tests/msw/knowledge-handlers";
@@ -20,6 +21,7 @@ export const server = setupServer(
   ...agentRunHandlers,
   ...toolExecutionHandlers,
   ...approvalHandlers,
+  ...evaluationHandlers,
   ...handoffHandlers,
   ...knowledgeHandlers,
   ...integrationHandlers,
