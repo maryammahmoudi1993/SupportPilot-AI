@@ -2110,6 +2110,111 @@ the real `IntegrationConnectionSerializer` body `IntegrationConnectionListCreate
 actually returns — an explicit, narrow cast at the one call site, same
 pattern as `createKnowledgeSource`.
 
+### Refresh-token rotation concurrency (Phase 22 Chunk 3A)
+
+The backend rotates the HttpOnly refresh cookie on every successful
+`POST /api/v1/auth/refresh/` and blacklists the token just used
+(`config/settings.py SIMPLE_JWT["ROTATE_REFRESH_TOKENS"]`/
+`["BLACKLIST_AFTER_ROTATION"]`, both `True`) — a deliberate, non-negotiable
+security property never weakened by anything below (see
+`backend/accounts/tests/test_auth_views.py
+test_old_refresh_token_cannot_be_reused`, unchanged and still passing).
+`ensureFreshAccessToken()` (`src/lib/api/session.ts`) already deduped
+concurrent refresh callers *within one document* via a module-level
+`refreshInFlight` promise; this chunk closes two further real races that
+same-document dedup cannot reach:
+
+1. **Cross-tab/cross-document racing**: two independent documents (most
+   realistically, two open tabs) can each read the same not-yet-rotated
+   refresh cookie and both attempt to refresh with it — only one wins, the
+   other gets a real, correct 401 (genuine token reuse) and could be pushed
+   to `/login`. `withCrossTabRefreshLock` (`src/lib/api/refresh-lock.ts`)
+   serializes every refresh attempt across the whole origin via the **Web
+   Locks API** (`navigator.locks`, feature-detected — an environment
+   without it, including this project's Vitest/jsdom unit tests, falls
+   back to the pre-existing same-document-only behavior, never worse than
+   before). No data of any kind — session-derived or otherwise — passes
+   through the lock; only a fixed, static lock name coordinates ordering.
+   Each document still performs its own real refresh call and gets its own
+   real access token (in-memory only, per `token-store.ts` — access tokens
+   are never shared between documents by design); the lock only ever
+   changes *when* that call is sent.
+2. **Response loss on navigation**: a hard navigation starting mid-request
+   can sever the connection *after* the backend has already committed a
+   rotation but *before* the browser applies the response's `Set-Cookie`.
+   `keepalive: true` on the refresh fetch lets the browser finish that one
+   in-flight request in the background, including applying its
+   `Set-Cookie`, even after the initiating document is gone — the same
+   mechanism `navigator.sendBeacon` relies on.
+
+**Verified real-backend E2E** (`e2e/auth-refresh-concurrency.spec.ts`):
+two tabs bootstrapping concurrently both end up authenticated against the
+same cookie (every observed refresh response is a real 200); a genuinely
+revoked session converges every concurrent bootstrap to `/login` with
+exactly one refresh attempt per document — no storm, no loop, no stuck
+spinner.
+
+**Known, tracked residual gap**: a third scenario — two hard navigations
+fired with *zero* settle time between them in a single tab — still has an
+open race (`e2e/auth-refresh-concurrency.spec.ts`'s `test.fixme`,
+reproduced directly in ~1 of 3 runs during this chunk's investigation).
+`navigator.locks` releases a document's lock the instant that document is
+torn down, but a `keepalive: true` request it started can still be
+completing on the wire *after* that release — a second, freshly-navigated
+document can then acquire the now-free lock and send its own refresh
+using the still-old cookie while the first (abandoned) document's request
+is still in flight server-side, reopening the exact race the lock exists
+to prevent. This is not reachable by normal pointer/keyboard interaction
+(no real user can fire two top-level navigations this close together);
+it is a genuine gap for rapid *programmatic* navigation. Closing it fully
+would need either a persistent (Service-Worker-backed) coordinator that
+outlives any single document, or a narrow backend accommodation — the
+latter was deliberately not pursued here: any design where a request
+carrying an already-consumed refresh token could receive a successful
+rotated-token response would weaken real replay protection, and is exactly
+the class of change this project's security posture requires explicit
+human sign-off on before implementation, not a unilateral fix. See
+PHASE22-3-04 below.
+
+### Known defects — Phase 22 Chunk 3A
+
+- **PHASE22-3-04 — refresh-token rotation concurrency** (reclassified from
+  Chunk 3's initial "test infrastructure" label to **product /
+  authentication concurrency** once investigated — the original test-level
+  workaround only stopped triggering the race, it did not fix it).
+  **Severity**: medium — real product behavior, but requires either two
+  open tabs racing a bootstrap, or (for the still-open residual case) two
+  hard navigations fired with no settle time, neither of which a real
+  interactive user can trigger through normal pointer/keyboard use.
+  **Root cause**: `ensureFreshAccessToken`'s same-document
+  `refreshInFlight` mutex cannot coordinate across a hard navigation (a new
+  document is a new JS realm) or across tabs; two independent documents
+  could read the same not-yet-rotated refresh cookie and both attempt to
+  refresh, with the loser receiving a real, correct-per-the-backend 401
+  (genuine single-use-token reuse) and being pushed to `/login`.
+  **Fix**: `withCrossTabRefreshLock` (Web Locks API, `src/lib/api/
+  refresh-lock.ts`) serializes every refresh attempt across tabs/documents
+  sharing an origin, with no token material passed through the
+  coordination signal; `keepalive: true` on the refresh fetch
+  (`src/lib/api/session.ts`) prevents a navigation-severed connection from
+  silently losing a just-committed rotation's `Set-Cookie`.
+  **Replay protection preserved**: YES — unchanged backend
+  (`ROTATE_REFRESH_TOKENS`/`BLACKLIST_AFTER_ROTATION` both still `True`,
+  zero backend files modified); `test_old_refresh_token_cannot_be_reused`
+  still passes unmodified.
+  **Regression**: `e2e/auth-refresh-concurrency.spec.ts` (multi-tab
+  concurrent bootstrap, and invalid-session convergence, both real-backend,
+  both run repeatedly with no failures); full Playwright suite 239 passed /
+  1 intentionally-fixme'd / 0 failed on two consecutive full clean runs;
+  Vitest 494/494; backend focused auth suite 56/56 unmodified.
+  **Residual risk**: the third scenario above (zero-settle-time
+  back-to-back hard navigation in one tab) remains open, tracked via a
+  `test.fixme` (not deleted, not silently weakened) rather than closed —
+  closing it fully needs either a persistent cross-document coordinator
+  (Service Worker) or a backend design decision explicitly requiring human
+  sign-off before implementation (see above). No change of any kind was
+  made to backend replay-protection semantics to work around this.
+
 ## Local development
 
 1. Start the backend (see `../README.md`) so `NEXT_PUBLIC_API_BASE_URL`
