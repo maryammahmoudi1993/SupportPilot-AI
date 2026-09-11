@@ -44,6 +44,13 @@ export interface E2EData {
   workspaceBEvaluationResultPassId: string;
   workspaceBEvaluationResultFailId: string;
   workspaceAEvaluationRunId: string;
+  workspaceAEvaluationDatasetId: string;
+  workspaceAEvaluationDatasetName: string;
+  workspaceAEvaluationCaseId: string;
+  workspaceAEvaluationCaseUnsafeId: string;
+  workspaceBEvaluationDatasetId: string;
+  workspaceBEvaluationDatasetName: string;
+  workspaceBEvaluationCaseId: string;
   workspaceBToolExecutionSucceededId: string;
   workspaceBToolExecutionFailedId: string;
   workspaceBToolExecutionWaitingId: string;
