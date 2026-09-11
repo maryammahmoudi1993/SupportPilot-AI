@@ -2217,6 +2217,137 @@ PHASE22-3-04 below.
   sign-off before implementation (see above). No change of any kind was
   made to backend replay-protection semantics to work around this.
 
+### Evaluations — Runs + Results foundation (Phase 23 Chunk 1)
+
+Read-only foundation over the real, already-built backend Evaluation
+Framework (`backend/evaluations/`, a Phase 12 feature — nothing about the
+dataset/case/run lifecycle, the deterministic scoring pipeline, or the
+regression-threshold model was redesigned or invented for the frontend).
+Two real, workspace-scoped entities are exposed this chunk —
+`EvaluationRun` and, nested under it, `EvaluationResult` (per-case outcome).
+`EvaluationDataset`/`EvaluationCase` management has a real public API too
+but is explicitly **out of scope** — see "Deferred capabilities" below.
+
+**Public API contract discovered** (verified against
+`evaluations/views.py`, `evaluations/selectors.py`,
+`evaluations/serializers.py`, `evaluations/permissions.py`, and
+`evaluations/models.py` — never inferred from models/services alone):
+
+| Capability | Status |
+| --- | --- |
+| Run list/detail | **Real**, implemented this chunk. `GET .../evaluations/runs/`, `GET .../evaluations/runs/{run_id}/`. Any active workspace member with `CanViewEvaluations` (owner/admin/support_manager/support_agent/viewer — every real role) can read. |
+| Result list/detail | **Real**, implemented this chunk. `GET .../evaluations/runs/{run_id}/results/`, `GET .../evaluations/runs/{run_id}/results/{result_id}/` (detail endpoint exists but this chunk's list view already renders every field the detail endpoint would add — no separate detail fetch is made). |
+| Dataset/Case list/detail/create/update | Real endpoints (`.../evaluations/datasets/`, `.../evaluations/datasets/{id}/cases/`, owner/admin/support_manager to manage) — **not implemented this chunk**. A `EvaluationRun`'s `dataset_id` is rendered as a plain, unlinked identifier (no dataset browse/picker UI exists yet to link to). |
+| Start run (`POST .../evaluations/runs/`) | Real, throttled (`evaluation_execution` scope), owner/admin/support_manager only — **not implemented this chunk**. Chunk 1 is read-only by design (master prompt Part C §15). |
+| Cancel run (`POST .../evaluations/runs/{run_id}/cancel/`) | Real — **not implemented this chunk**. |
+| Replay result (`POST .../evaluations/runs/{run_id}/results/{result_id}/replay/`) | Real — **not implemented this chunk**. |
+| Compare runs (`POST .../evaluations/compare/`) | Real — **not implemented this chunk**; a genuine comparison action, not a read, and owner/admin/support_manager scoped. |
+| Observability (traces/spans) | **Internal-only.** `backend/observability/` exposes exactly one route, `GET /metrics/` — a Prometheus scrape endpoint wired directly at the top level in `config/urls.py`, explicitly documented in its own module docstring as "deployment infrastructure, not a tenant API": no workspace scoping, no auth, no JSON — a Prometheus text-exposition payload. There is no trace/span/event resource, no per-run telemetry endpoint, and no workspace-scoped observability API of any kind. No UI was built or implied for it — deferred to Chunk 2 for another contract-discovery pass in case a future backend change adds one; if none appears, Chunk 2 will document this as a permanent N/A rather than build a UI over internal-only data. |
+
+**Mutation deferral decision** (master prompt Part C §15): this chunk
+implements run + result **list and detail only** — no execute/cancel/
+replay/compare control anywhere in the UI. Every one of those write
+endpoints is real, but a read-only foundation needs real historical runs to
+render against regardless (this chunk's E2E fixtures create them directly
+via the ORM, exactly as a real `POST .../runs/` + Celery execution would
+persist them), so list/detail alone is already a fully real, useful
+surface. Execution/cancel/replay controls are explicitly Chunk 3's job
+(master prompt Part C, chunk plan) once they can be reviewed together with
+their own confirmation/error UX.
+
+**Metric semantics** (master prompt Part B): no field on `EvaluationRun`/
+`EvaluationResult` is a probability, a percentage, or a confidence score.
+The real fields are plain counts (`total_cases`/`completed_cases`/
+`passed_cases`/`failed_cases` on the run) and a server-authoritative
+boolean outcome (`EvaluationResult.passed`, computed by
+`evaluations/scoring.py score_case` — `not violations`, never a
+client-derived threshold). `EvaluationResult.scorer_output` is a
+`JSONField` with no fixed shape at the API layer
+(`evaluations/schemas.py EvaluationScorerOutput` — structured booleans/
+counts like `forbidden_tool_violation`, `outcome_assertions_passed`, never
+a single numeric "score"); rendered verbatim through the shared
+`StructuredPayload` viewer, never destructured, relabeled, or converted to
+a percentage. `passed` renders as "Passed"/"Failed"/"Not scored" (`null` —
+a case not yet scored, or one whose scoring itself failed) via a dedicated
+`EvaluationPassedBadge`, never inferred client-side from any numeric field.
+No invented labels ("confidence", "quality %", "reliability score") appear
+anywhere in this chunk's code or tests.
+
+**Statuses**: `EvaluationRun.status` — `pending`, `running`, `succeeded`,
+`partial`, `failed`, `cancelled` (`EvaluationRunStatusEnum`).
+`EvaluationResult.status` — `pending`, `running`, `succeeded`, `failed`,
+`cancelled` (`EvaluationResultStatusEnum`). An unrecognized future status
+renders safely via the shared `EnumBadge` fallback, same as every other
+domain — proven in both a unit test and the real-backend E2E smoke.
+
+**Filters/pagination**: real DRF `PageNumberPagination` (`page`/
+`page_size`, 50/page default) on both lists. Real, backend-tested filters —
+verified directly against `evaluations/views.py`/`evaluations/selectors.py`,
+not the generated schema (Category A gap, same shape as every prior
+domain: the generated query type only carries `ordering`/`page`/
+`page_size`/`search`, neither of which the views actually read) — are
+`status`/`dataset_id` for the run list and `status`/`passed` for the
+result list. This chunk's UI surfaces `status` as the run-list control
+(mirroring Agent Runs) and `passed` as the result-list control (the
+higher-value real signal for a read-only foundation); `dataset_id` (no
+dataset picker UI yet) and result `status` are typed in `api.ts` for
+completeness but unused, same deferral reasoning as Agent Runs' `agent_id`.
+
+**Routes**: one canonical route family, `/app/evaluations` (list) and
+`/app/evaluations/[runId]` (detail, with its per-case results panel) —
+matching the master prompt's preferred shape. One top-level nav entry,
+"Evaluations" — not separate Observability/Traces/Metrics entries; those,
+if a real public contract for them is ever found, will live under this
+same route family as tabs rather than new top-level nav items (master
+prompt Part D §16-17).
+
+**Server state**: `["workspaces", wsId, "evaluations", "runs", "list"|"detail", ...]`
+and `["workspaces", wsId, "evaluations", "runs", "detail", runId, "results", "list", params]`
+query keys (`features/evaluations/query-keys.ts`) — same workspace-first
+policy as every other domain. **Polling**: an `EvaluationRun` executes
+asynchronously server-side (Celery) exactly like an `AgentRun`, so its
+detail (and, driven by the same non-terminal condition, its results list)
+is polled at the same fixed 5s interval used by Agent Runs
+(`EVALUATION_RUN_POLL_INTERVAL_MS`), stopping for good the moment a fetch
+observes a terminal status (`EVALUATION_RUN_TERMINAL_STATUSES` —
+`succeeded`/`partial`/`failed`/`cancelled`, mirrored from
+`evaluations/models.py`). One bounded results-list request per interval,
+never one request per result (no N+1) — proven in a unit test asserting
+exact request counts.
+
+**Cross-domain links**: `EvaluationResult.agent_run_id` links directly to
+the existing `/app/agent-runs/[runId]` route by ID — no per-result
+supporting fetch (proven in a unit test asserting exact
+detail/results-list request counts stay at 1 each regardless of result
+count). The underlying model field is nullable (a result with no
+`AgentRun` recorded), so a `null` value renders the honest
+"— (no agent run recorded)" note rather than a broken/empty link — see the
+schema-gap note below. No Tool Execution/Conversation/Knowledge links are
+rendered this chunk: nothing in the public `EvaluationResult` contract
+carries a tool-execution, conversation, or knowledge-document ID directly.
+
+**Content safety**: `scorer_output` (arbitrary structured JSON) and
+`failure_message_safe`/`case_key` (plain server-controlled/redacted text)
+are rendered as plain React text / through the existing shared
+`StructuredPayload` viewer (`JSON.stringify` into a `<pre>`, never
+`dangerouslySetInnerHTML`) — proven both in a unit test and the
+real-backend E2E smoke with genuine HTML/script/prompt-injection-looking
+content that renders as inert text, with no unsafe auto-linking.
+
+**Phase 23 Chunk 1 schema gap register** (none blocking):
+
+| Endpoint / field | Gap | Frontend narrowing | Blocking? |
+| --- | --- | --- | --- |
+| `EvaluationRun.threshold_config`, `EvaluationResult.scorer_output` | Generated as `unknown` — both are plain `JSONField`s with no fixed shape at the API layer. | Rendered via `StructuredPayload`, never destructured into named fields. | No |
+| `EvaluationResult.agent_run_id`, `.replay_of_id` | Generated as required `string` (uuid), but the underlying model columns are nullable (`ForeignKey(..., null=True)`); DRF's plain `UUIDField(read_only=True)` still serializes `None` as JSON `null`. | Re-typed locally in `features/evaluations/types.ts` as `string \| null`; every render site handles the null case explicitly. | No |
+| `evaluations_runs_list`, `evaluations_runs_results_list` | Generated query type only carries `ordering`/`page`/`page_size`/`search`; the real filters (`status`/`dataset_id`, `status`/`passed`) are invisible to drf-spectacular because both views read `request.query_params` directly. | Narrowed locally in `features/evaluations/api.ts`, same pattern as every prior domain. | No |
+
+**Deferred Phase 23 capabilities** (real backend endpoints/entities exist;
+no frontend surface yet): evaluation execution (start run), cancel run,
+replay result, compare runs, Evaluation Dataset/Case management, and any
+future workspace-scoped observability/trace resource (none exists publicly
+today — see the contract table above).
+
 ## Local development
 
 1. Start the backend (see `../README.md`) so `NEXT_PUBLIC_API_BASE_URL`
@@ -2496,7 +2627,7 @@ empty/error/workspace-isolation/unknown-status coverage as every other
 domain, plus a conversation-scoped test proving only the real
 `conversation`-filtered rows render.
 
-## End-to-end tests (`e2e/`, Phase 18 Chunk 4; extended Phase 19 Chunks 1-3, Phase 20 Chunks 1-3, Phase 22 Chunks 1-2)
+## End-to-end tests (`e2e/`, Phase 18 Chunk 4; extended Phase 19 Chunks 1-3, Phase 20 Chunks 1-3, Phase 22 Chunks 1-2, Phase 23 Chunk 1)
 
 Playwright (`@playwright/test`), Chromium only — the mandatory acceptance
 browser for this phase; Firefox/WebKit weren't added (single-browser
@@ -2523,7 +2654,19 @@ ticket with a real `conversation_id` (for the Ticket → Conversation link),
 one resolved Workspace B ticket created directly with no conversation (for
 the status filter and the honest no-conversation case), and one Workspace A
 ticket (for isolation/cross-workspace tests) — no separate cleanup needed,
-since `Ticket.workspace` also cascade-deletes.
+since `Ticket.workspace` also cascade-deletes. Extended in Phase 23 Chunk 1
+with real `EvaluationDataset`/`EvaluationRun`/`EvaluationCaseSnapshot`/
+`EvaluationResult` rows, created directly via the ORM (never through the
+real `POST .../runs/` + Celery execution path, which would need the
+deterministic evaluation pipeline to actually run and would race this
+script's own synchronous setup): a succeeded Workspace B run with one
+passed result (cross-linked to the real `ws_b_agent_run_succeeded` fixture)
+and one failed result carrying genuine HTML/script/prompt-injection-looking
+content in its safe scorer fields, a non-terminal (running) Workspace B run
+for the detail-polling proof, and a distinct Workspace A run/result for
+isolation. `EvaluationRun.dataset`/`.agent_version` are both
+`on_delete=PROTECT` — cleaned up in the same dependency-ordered pattern as
+`AgentRun.agent_version` (see `global-teardown.ts`'s comments).
 `playwright.config.ts`'s `webServer` array starts both halves itself —
 Django (`manage.py runserver`) and the frontend built and started in
 **production mode** (`next build && next start`, not `next dev`) — so the
