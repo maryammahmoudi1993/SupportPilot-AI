@@ -4,6 +4,7 @@ import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { describe, expect, it, vi } from "vitest";
 
 import { EvaluationDatasetDetailPage } from "@/features/evaluations/components/evaluation-dataset-detail-page";
+import { useWorkspace } from "@/features/workspace/workspace-provider";
 import {
   FIXTURE_USER,
   FIXTURE_WORKSPACE_ACME,
@@ -12,6 +13,7 @@ import {
 } from "@/tests/msw/handlers";
 import { renderAuthenticated } from "@/tests/support/render-authenticated";
 import {
+  armCaseUpdateGate,
   evaluationMockState,
   makeEvaluationCaseFixture,
   makeEvaluationDatasetFixture,
@@ -275,5 +277,80 @@ describe("EvaluationDatasetDetailPage", () => {
     await screen.findByText("Case 0");
 
     expect(evaluationMockState.caseListCallCount).toBe(1);
+  });
+
+  describe("mutation isolation across a workspace switch (Phase 23 Chunk 2A)", () => {
+    it("a case-update response that arrives after switching to workspace B never renders in B, and B's own state is untouched", async () => {
+      // Workspace A = Globex (owns this dataset/case); Workspace B = Acme (does
+      // not — the same datasetId is out of scope there, mirroring the real
+      // cross-tenant not-found behavior).
+      signIn([FIXTURE_WORKSPACE_GLOBEX, FIXTURE_WORKSPACE_ACME]);
+      seedEvaluationDatasets(FIXTURE_WORKSPACE_GLOBEX.id, [
+        makeEvaluationDatasetFixture({ id: DATASET_ID, name: "Refund Suite" }),
+      ]);
+      seedEvaluationCases(DATASET_ID, [
+        makeEvaluationCaseFixture({ id: "case-a", key: "refund-flow", name: "Refund flow" }),
+      ]);
+      setupNavigationMocks();
+
+      function Harness() {
+        const workspace = useWorkspace();
+        return (
+          <>
+            {workspace.status === "ready" &&
+              workspace.workspaces.map((candidate) => (
+                <button key={candidate.id} onClick={() => workspace.selectWorkspace(candidate.id)}>
+                  {`switch-to-${candidate.name}`}
+                </button>
+              ))}
+            <EvaluationDatasetDetailPage datasetId={DATASET_ID} />
+          </>
+        );
+      }
+
+      renderAuthenticated(<Harness />);
+
+      // Start in Workspace A (Globex) — the case renders normally.
+      await screen.findByText("Refund flow");
+
+      const user = userEvent.setup();
+      await user.click(screen.getByRole("button", { name: "Edit" }));
+      const nameField = screen.getByLabelText("Name");
+      await user.clear(nameField);
+      await user.type(nameField, "Late A Update");
+
+      // Hold the update response open — deterministic, no sleeps.
+      const release = armCaseUpdateGate();
+      await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+      // The request left the component (fired against A's URL) but is held by the gate.
+      await waitFor(() => expect(evaluationMockState.caseUpdateCallCount).toBe(1));
+      expect(screen.queryByText("Late A Update")).not.toBeInTheDocument();
+
+      // Switch to Workspace B before the held response is released. The same
+      // datasetId does not belong to B, so B's own (distinct) state is "not found".
+      await user.click(
+        screen.getByRole("button", { name: `switch-to-${FIXTURE_WORKSPACE_ACME.name}` }),
+      );
+      expect(await screen.findByText("Evaluation dataset not found")).toBeInTheDocument();
+      expect(screen.queryByText("Refund flow")).not.toBeInTheDocument();
+
+      // Now let A's held response resolve.
+      release();
+      await waitFor(() =>
+        expect(
+          evaluationMockState.casesByDataset[DATASET_ID]?.some(
+            (evaluationCase) => evaluationCase.name === "Late A Update",
+          ),
+        ).toBe(true),
+      );
+
+      // B's rendered view is still exactly B's "not found" state: no A entity,
+      // no A edit form, and no A success side effect ever appears in B.
+      expect(screen.getByText("Evaluation dataset not found")).toBeInTheDocument();
+      expect(screen.queryByText("Late A Update")).not.toBeInTheDocument();
+      expect(screen.queryByText("Refund flow")).not.toBeInTheDocument();
+      expect(screen.queryByLabelText("Name")).not.toBeInTheDocument();
+    });
   });
 });

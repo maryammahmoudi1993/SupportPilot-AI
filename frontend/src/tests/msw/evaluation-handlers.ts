@@ -142,6 +142,27 @@ export function makeEvaluationCaseFixture(
   };
 }
 
+/**
+ * A deterministic, test-controlled gate: a handler `await`s `promise` before
+ * responding, and the test decides exactly when that resolves by calling
+ * `release()` — no `setTimeout`/sleep involved. Used to prove workspace
+ * A→B mutation isolation (Phase 23 Chunk 2A §10-11): a request is held open
+ * across a simulated workspace switch, then deliberately released, so the
+ * "late response" is reproduced deterministically rather than raced.
+ */
+interface Gate {
+  promise: Promise<void>;
+  release: () => void;
+}
+
+function createGate(): Gate {
+  let release!: () => void;
+  const promise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return { promise, release };
+}
+
 export const evaluationMockState = {
   runsByWorkspace: {} as Record<string, EvaluationRunFixture[]>,
   /** Which workspace owns a given run ID — for the cross-workspace 404 check. */
@@ -171,7 +192,25 @@ export const evaluationMockState = {
   datasetUpdateCallCount: 0,
   caseCreateCallCount: 0,
   caseUpdateCallCount: 0,
+
+  /** Held open until the test calls the returned `release()` — see `Gate` above. */
+  datasetCreateGate: null as Gate | null,
+  caseUpdateGate: null as Gate | null,
 };
+
+/** Arm the dataset-create handler to hang until the returned function is called. */
+export function armDatasetCreateGate(): () => void {
+  const gate = createGate();
+  evaluationMockState.datasetCreateGate = gate;
+  return () => gate.release();
+}
+
+/** Arm the case-update handler to hang until the returned function is called. */
+export function armCaseUpdateGate(): () => void {
+  const gate = createGate();
+  evaluationMockState.caseUpdateGate = gate;
+  return () => gate.release();
+}
 
 export function seedEvaluationRuns(workspaceId: string, runs: EvaluationRunFixture[]): void {
   evaluationMockState.runsByWorkspace[workspaceId] = runs;
@@ -224,6 +263,8 @@ export function resetEvaluationMockState(): void {
   evaluationMockState.datasetUpdateCallCount = 0;
   evaluationMockState.caseCreateCallCount = 0;
   evaluationMockState.caseUpdateCallCount = 0;
+  evaluationMockState.datasetCreateGate = null;
+  evaluationMockState.caseUpdateGate = null;
 }
 
 function notFoundRun() {
@@ -355,6 +396,11 @@ export const evaluationHandlers = [
     `${BASE}/api/v1/workspaces/:workspaceId/evaluations/datasets/`,
     async ({ request, params }) => {
       evaluationMockState.datasetCreateCallCount += 1;
+
+      if (evaluationMockState.datasetCreateGate) {
+        await evaluationMockState.datasetCreateGate.promise;
+        evaluationMockState.datasetCreateGate = null;
+      }
 
       if (evaluationMockState.nextCreateDatasetError) {
         const { status, code, message } = evaluationMockState.nextCreateDatasetError;
@@ -509,6 +555,11 @@ export const evaluationHandlers = [
     `${BASE}/api/v1/workspaces/:workspaceId/evaluations/datasets/:datasetId/cases/:caseId/`,
     async ({ request, params }) => {
       evaluationMockState.caseUpdateCallCount += 1;
+
+      if (evaluationMockState.caseUpdateGate) {
+        await evaluationMockState.caseUpdateGate.promise;
+        evaluationMockState.caseUpdateGate = null;
+      }
 
       const datasetId = params.datasetId as string;
       const caseId = params.caseId as string;

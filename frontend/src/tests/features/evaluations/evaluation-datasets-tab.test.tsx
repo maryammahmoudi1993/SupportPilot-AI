@@ -13,6 +13,7 @@ import {
 } from "@/tests/msw/handlers";
 import { renderAuthenticated } from "@/tests/support/render-authenticated";
 import {
+  armDatasetCreateGate,
   evaluationMockState,
   makeEvaluationDatasetFixture,
   seedEvaluationDatasets,
@@ -225,5 +226,75 @@ describe("EvaluationDatasetsTab (via EvaluationsListPage)", () => {
 
     await waitFor(() => expect(screen.queryByText("Acme Suite")).not.toBeInTheDocument());
     expect(await screen.findByRole("link", { name: "Globex Suite" })).toBeInTheDocument();
+  });
+
+  describe("mutation isolation across a workspace switch (Phase 23 Chunk 2A)", () => {
+    it("a dataset-create response that arrives after switching to workspace B never renders in B, and B's own state is untouched", async () => {
+      // Workspace A = Globex (admin, can create); Workspace B = Acme (already has its own dataset).
+      signIn([FIXTURE_WORKSPACE_GLOBEX, FIXTURE_WORKSPACE_ACME]);
+      seedEvaluationDatasets(FIXTURE_WORKSPACE_ACME.id, [
+        makeEvaluationDatasetFixture({ id: "acme-dataset", name: "Acme Suite" }),
+      ]);
+      setupNavigationMocks();
+
+      function Harness() {
+        const workspace = useWorkspace();
+        return (
+          <>
+            {workspace.status === "ready" &&
+              workspace.workspaces.map((candidate) => (
+                <button key={candidate.id} onClick={() => workspace.selectWorkspace(candidate.id)}>
+                  {`switch-to-${candidate.name}`}
+                </button>
+              ))}
+            <EvaluationsListPage />
+          </>
+        );
+      }
+
+      renderAuthenticated(<Harness />);
+
+      // Start in Workspace A (Globex), which has no datasets yet.
+      await screen.findByText("No evaluation datasets yet");
+
+      // Hold the create response open — deterministic, no sleeps.
+      const release = armDatasetCreateGate();
+      const user = userEvent.setup();
+      await user.click(screen.getByRole("button", { name: "New dataset" }));
+      await user.type(screen.getByLabelText("Name"), "Late A Dataset");
+      await user.click(screen.getByRole("button", { name: "Create dataset" }));
+
+      // The request left the component (fired against A's URL) but is held by the gate.
+      await waitFor(() => expect(evaluationMockState.datasetCreateCallCount).toBe(1));
+      expect(screen.queryByText("Late A Dataset")).not.toBeInTheDocument();
+
+      // Switch to Workspace B before the held response is released.
+      await user.click(
+        screen.getByRole("button", { name: `switch-to-${FIXTURE_WORKSPACE_ACME.name}` }),
+      );
+      expect(await screen.findByRole("link", { name: "Acme Suite" })).toBeInTheDocument();
+      // B has no create controls visible (support_agent) — no leaked A create form either.
+      expect(screen.queryByRole("button", { name: "New dataset" })).not.toBeInTheDocument();
+      expect(screen.queryByLabelText("Name")).not.toBeInTheDocument();
+
+      // Now let A's held response resolve.
+      release();
+      await waitFor(() =>
+        expect(
+          evaluationMockState.datasetsByWorkspace[FIXTURE_WORKSPACE_GLOBEX.id]?.some(
+            (dataset) => dataset.name === "Late A Dataset",
+          ),
+        ).toBe(true),
+      );
+
+      // B's rendered view is still exactly B's: no A entity ever appears, B's own
+      // dataset is still the only one shown, and B was never asked to re-list.
+      expect(screen.queryByText("Late A Dataset")).not.toBeInTheDocument();
+      expect(screen.getByRole("link", { name: "Acme Suite" })).toBeInTheDocument();
+      const table = screen.getByRole("table");
+      expect(within(table).queryAllByRole("link").map((link) => link.textContent)).toEqual([
+        "Acme Suite",
+      ]);
+    });
   });
 });
