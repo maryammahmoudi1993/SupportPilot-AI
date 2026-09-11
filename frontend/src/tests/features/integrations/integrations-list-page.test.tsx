@@ -26,12 +26,13 @@ vi.mock("next/navigation", () => ({
 
 function setupNavigationMocks(initialQuery = "") {
   const replace = vi.fn();
-  vi.mocked(useRouter).mockReturnValue({ replace } as unknown as ReturnType<typeof useRouter>);
+  const push = vi.fn();
+  vi.mocked(useRouter).mockReturnValue({ replace, push } as unknown as ReturnType<typeof useRouter>);
   vi.mocked(usePathname).mockReturnValue("/app/integrations");
   vi.mocked(useSearchParams).mockReturnValue(
     new URLSearchParams(initialQuery) as unknown as ReturnType<typeof useSearchParams>,
   );
-  return { replace };
+  return { replace, push };
 }
 
 function signIn(workspaces: { id: string; name: string; slug: string; role: string }[]) {
@@ -198,5 +199,32 @@ describe("IntegrationsListPage", () => {
     expect(
       await screen.findByRole("link", { name: "Globex-only connection" }),
     ).toBeInTheDocument();
+  });
+
+  it("renders a New connection control for an authorized (owner/admin) role, absent for a support_agent (Phase 22 Chunk 3)", async () => {
+    signIn([FIXTURE_WORKSPACE_GLOBEX]); // admin
+    setupNavigationMocks();
+    renderAuthenticated(<IntegrationsListPage />);
+    expect(await screen.findByRole("button", { name: /new connection/i })).toBeInTheDocument();
+  });
+
+  it("creates a demo_commerce connection with no credential fields (the one provider with none)", async () => {
+    signIn([FIXTURE_WORKSPACE_GLOBEX]);
+    setupNavigationMocks();
+    renderAuthenticated(<IntegrationsListPage />);
+    await screen.findByText("No integration connections yet");
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: /new connection/i }));
+    // demo_commerce is the default selected provider — no credential inputs render for it.
+    expect(
+      screen.getByText("The demo commerce provider has no credentials to configure."),
+    ).toBeInTheDocument();
+    await user.type(screen.getByLabelText("Display name (optional)"), "Demo shop");
+    await user.click(screen.getByRole("button", { name: /^create connection$/i }));
+
+    await waitFor(() =>
+      expect(integrationMockState.connectionsByWorkspace[FIXTURE_WORKSPACE_GLOBEX.id]).toHaveLength(1),
+    );
   });
 });

@@ -124,9 +124,23 @@ describe("WebhookEndpointDetailPage", () => {
     expect(await screen.findByText("future_status")).toBeInTheDocument();
   });
 
-  it("never renders an edit/rotate/disable control (deferred to a later chunk)", async () => {
+  it("renders edit/rotate/disable controls for an authorized (admin) role (Phase 22 Chunk 3)", async () => {
     signIn([FIXTURE_WORKSPACE_GLOBEX]); // admin
     seedWebhookEndpoints(FIXTURE_WORKSPACE_GLOBEX.id, [
+      makeWebhookEndpointFixture({ id: ENDPOINT_ID, name: "Endpoint", status: "active" }),
+    ]);
+
+    renderAuthenticated(<WebhookEndpointDetailPage endpointId={ENDPOINT_ID} />);
+
+    await screen.findByRole("heading", { name: "Endpoint" });
+    expect(screen.getByRole("button", { name: /rotate signing secret/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^edit$/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^disable endpoint$/i })).toBeInTheDocument();
+  });
+
+  it("never renders a manage control for an unauthorized (support_agent) role", async () => {
+    signIn([FIXTURE_WORKSPACE_ACME]); // support_agent
+    seedWebhookEndpoints(FIXTURE_WORKSPACE_ACME.id, [
       makeWebhookEndpointFixture({ id: ENDPOINT_ID, name: "Endpoint" }),
     ]);
 
@@ -135,6 +149,6 @@ describe("WebhookEndpointDetailPage", () => {
     await screen.findByRole("heading", { name: "Endpoint" });
     expect(screen.queryByRole("button", { name: /rotate/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^edit$/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /^disable$/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /disable/i })).not.toBeInTheDocument();
   });
 });

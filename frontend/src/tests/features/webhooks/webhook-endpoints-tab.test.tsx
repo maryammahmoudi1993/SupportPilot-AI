@@ -21,12 +21,13 @@ vi.mock("next/navigation", () => ({
 
 function setupNavigationMocks(initialQuery = "?tab=webhooks") {
   const replace = vi.fn();
-  vi.mocked(useRouter).mockReturnValue({ replace } as unknown as ReturnType<typeof useRouter>);
+  const push = vi.fn();
+  vi.mocked(useRouter).mockReturnValue({ replace, push } as unknown as ReturnType<typeof useRouter>);
   vi.mocked(usePathname).mockReturnValue("/app/integrations");
   vi.mocked(useSearchParams).mockReturnValue(
     new URLSearchParams(initialQuery) as unknown as ReturnType<typeof useSearchParams>,
   );
-  return { replace };
+  return { replace, push };
 }
 
 function signIn(workspaces: { id: string; name: string; slug: string; role: string }[]) {
@@ -147,9 +148,24 @@ describe("WebhookEndpointsTab (via IntegrationsListPage)", () => {
     expect(await screen.findByRole("link", { name: "Globex-only endpoint" })).toBeInTheDocument();
   });
 
-  it("never renders a create/edit/delete/enable-disable control (deferred to a later chunk)", async () => {
-    signIn([FIXTURE_WORKSPACE_GLOBEX]); // admin — canManageWebhooks would be true if manage roles applied
+  it("renders a New endpoint control for an authorized (admin) role (Phase 22 Chunk 3)", async () => {
+    signIn([FIXTURE_WORKSPACE_GLOBEX]); // admin — a real CanManageWebhooks role
     seedWebhookEndpoints(FIXTURE_WORKSPACE_GLOBEX.id, [
+      makeWebhookEndpointFixture({ id: "ep-1", name: "Some endpoint" }),
+    ]);
+    setupNavigationMocks();
+
+    renderAuthenticated(<IntegrationsListPage />);
+    await screen.findByRole("link", { name: "Some endpoint" });
+
+    expect(screen.getByRole("button", { name: /new endpoint/i })).toBeInTheDocument();
+    // No delete control anywhere — webhooks/urls.py defines no delete endpoint.
+    expect(screen.queryByRole("button", { name: /^delete$/i })).not.toBeInTheDocument();
+  });
+
+  it("never renders a manage control for an unauthorized (support_agent) role", async () => {
+    signIn([FIXTURE_WORKSPACE_ACME]); // support_agent — not in CanManageWebhooks.WEBHOOK_MANAGE_ROLES
+    seedWebhookEndpoints(FIXTURE_WORKSPACE_ACME.id, [
       makeWebhookEndpointFixture({ id: "ep-1", name: "Some endpoint" }),
     ]);
     setupNavigationMocks();
@@ -161,5 +177,26 @@ describe("WebhookEndpointsTab (via IntegrationsListPage)", () => {
     expect(screen.queryByRole("button", { name: /^delete$/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^disable$/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /rotate secret/i })).not.toBeInTheDocument();
+  });
+
+  it("creates a new endpoint, reveals its signing secret exactly once, and navigates to it on confirmation", async () => {
+    signIn([FIXTURE_WORKSPACE_GLOBEX]);
+    setupNavigationMocks();
+
+    renderAuthenticated(<IntegrationsListPage />);
+    await screen.findByText("No webhook endpoints yet");
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: /new endpoint/i }));
+    await user.type(screen.getByLabelText("Name"), "New relay");
+    await user.type(screen.getByLabelText("Destination URL"), "https://example.com/hooks/new");
+    await user.click(screen.getByLabelText(/approval requested/i));
+    await user.click(screen.getByRole("button", { name: /^create endpoint$/i }));
+
+    const secretPanel = await screen.findByRole("alert", { name: /webhook signing secret/i });
+    expect(within(secretPanel).getByDisplayValue("test-signing-secret-not-real")).toBeInTheDocument();
+
+    await user.click(within(secretPanel).getByRole("button", { name: /saved this secret/i }));
+    expect(screen.queryByDisplayValue("test-signing-secret-not-real")).not.toBeInTheDocument();
   });
 });

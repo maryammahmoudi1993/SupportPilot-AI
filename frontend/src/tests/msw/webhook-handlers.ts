@@ -85,6 +85,12 @@ export const webhookMockState = {
   endpointListNetworkError: false,
   deliveryListNetworkError: false,
   deliveryDetailCallCount: 0,
+  /** Phase 22 Chunk 3: a single mutation-error scenario, applied by every mutation handler below when set — mirrors the real backend's `{error:{code,message}}` envelope (common/exceptions.py). */
+  mutationError: null as { code: string; message: string; status: number } | null,
+  nextCreatedSecret: "test-signing-secret-not-real",
+  nextRotatedSecret: "test-rotated-secret-not-real",
+  /** Test-only: artificially holds the redrive response open, so a test can observe the confirm button's disabled/loading state while the request is genuinely in flight. */
+  redriveDelayMs: 0,
 };
 
 export function seedWebhookEndpoints(
@@ -107,6 +113,10 @@ export function resetWebhookMockState(): void {
   webhookMockState.endpointListNetworkError = false;
   webhookMockState.deliveryListNetworkError = false;
   webhookMockState.deliveryDetailCallCount = 0;
+  webhookMockState.mutationError = null;
+  webhookMockState.nextCreatedSecret = "test-signing-secret-not-real";
+  webhookMockState.nextRotatedSecret = "test-rotated-secret-not-real";
+  webhookMockState.redriveDelayMs = 0;
 }
 
 function paginate<T>(items: T[], url: URL) {
@@ -179,6 +189,139 @@ export const webhookHandlers = [
         );
       }
       return HttpResponse.json(delivery);
+    },
+  ),
+
+  // --- Mutations (Phase 22 Chunk 3) -------------------------------------
+
+  http.post(`${BASE}/api/v1/workspaces/:workspaceId/webhooks/endpoints/`, async ({ request, params }) => {
+    if (webhookMockState.mutationError) {
+      const { code, message, status } = webhookMockState.mutationError;
+      return HttpResponse.json({ error: { code, message } }, { status });
+    }
+    const workspaceId = params.workspaceId as string;
+    const body = (await request.json()) as {
+      name: string;
+      url: string;
+      subscribed_event_types: string[];
+    };
+    const endpoint = makeWebhookEndpointFixture({
+      id: `ep-created-${Date.now()}`,
+      name: body.name,
+      url: body.url,
+      subscribed_event_types: body.subscribed_event_types,
+      secret_configured: true,
+      secret_created_at: "2026-01-01T00:00:00Z",
+    });
+    webhookMockState.endpointsByWorkspace[workspaceId] = [
+      ...(webhookMockState.endpointsByWorkspace[workspaceId] ?? []),
+      endpoint,
+    ];
+    return HttpResponse.json({ ...endpoint, signing_secret: webhookMockState.nextCreatedSecret }, {
+      status: 201,
+    });
+  }),
+
+  http.patch(
+    `${BASE}/api/v1/workspaces/:workspaceId/webhooks/endpoints/:endpointId/`,
+    async ({ request, params }) => {
+      if (webhookMockState.mutationError) {
+        const { code, message, status } = webhookMockState.mutationError;
+        return HttpResponse.json({ error: { code, message } }, { status });
+      }
+      const workspaceId = params.workspaceId as string;
+      const endpointId = params.endpointId as string;
+      const body = (await request.json()) as Partial<WebhookEndpointFixture>;
+      const list = webhookMockState.endpointsByWorkspace[workspaceId] ?? [];
+      const index = list.findIndex((e) => e.id === endpointId);
+      if (index === -1) {
+        return HttpResponse.json(
+          { error: { code: "not_found", message: "Webhook endpoint not found." } },
+          { status: 404 },
+        );
+      }
+      list[index] = { ...list[index], ...body, updated_at: "2026-01-02T00:00:00Z" };
+      return HttpResponse.json(list[index]);
+    },
+  ),
+
+  http.patch(
+    `${BASE}/api/v1/workspaces/:workspaceId/webhooks/endpoints/:endpointId/status/`,
+    async ({ request, params }) => {
+      if (webhookMockState.mutationError) {
+        const { code, message, status } = webhookMockState.mutationError;
+        return HttpResponse.json({ error: { code, message } }, { status });
+      }
+      const workspaceId = params.workspaceId as string;
+      const endpointId = params.endpointId as string;
+      const body = (await request.json()) as { status: "active" | "disabled" };
+      const list = webhookMockState.endpointsByWorkspace[workspaceId] ?? [];
+      const index = list.findIndex((e) => e.id === endpointId);
+      if (index === -1) {
+        return HttpResponse.json(
+          { error: { code: "not_found", message: "Webhook endpoint not found." } },
+          { status: 404 },
+        );
+      }
+      list[index] = { ...list[index], status: body.status, updated_at: "2026-01-02T00:00:00Z" };
+      return HttpResponse.json(list[index]);
+    },
+  ),
+
+  http.post(
+    `${BASE}/api/v1/workspaces/:workspaceId/webhooks/endpoints/:endpointId/rotate-secret/`,
+    async ({ params }) => {
+      if (webhookMockState.mutationError) {
+        const { code, message, status } = webhookMockState.mutationError;
+        return HttpResponse.json({ error: { code, message } }, { status });
+      }
+      const workspaceId = params.workspaceId as string;
+      const endpointId = params.endpointId as string;
+      const list = webhookMockState.endpointsByWorkspace[workspaceId] ?? [];
+      const index = list.findIndex((e) => e.id === endpointId);
+      if (index === -1) {
+        return HttpResponse.json(
+          { error: { code: "not_found", message: "Webhook endpoint not found." } },
+          { status: 404 },
+        );
+      }
+      list[index] = {
+        ...list[index],
+        secret_configured: true,
+        secret_created_at: "2026-01-02T00:00:00Z",
+        updated_at: "2026-01-02T00:00:00Z",
+      };
+      return HttpResponse.json({ signing_secret: webhookMockState.nextRotatedSecret });
+    },
+  ),
+
+  http.post(
+    `${BASE}/api/v1/workspaces/:workspaceId/webhooks/deliveries/:deliveryId/redrive/`,
+    async ({ params }) => {
+      if (webhookMockState.redriveDelayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, webhookMockState.redriveDelayMs));
+      }
+      if (webhookMockState.mutationError) {
+        const { code, message, status } = webhookMockState.mutationError;
+        return HttpResponse.json({ error: { code, message } }, { status });
+      }
+      const workspaceId = params.workspaceId as string;
+      const deliveryId = params.deliveryId as string;
+      const list = webhookMockState.deliveriesByWorkspace[workspaceId] ?? [];
+      const index = list.findIndex((d) => d.delivery_id === deliveryId);
+      if (index === -1) {
+        return HttpResponse.json(
+          { error: { code: "not_found", message: "Webhook delivery not found." } },
+          { status: 404 },
+        );
+      }
+      // Mirrors `redrive_webhook_delivery`'s real real state transition:
+      // status -> pending, failed_at cleared, attempt bookkeeping untouched
+      // — never a second logical delivery (see mutations.ts's doc comment
+      // on the real safety limitation this mocks around for the success
+      // path only).
+      list[index] = { ...list[index], status: "pending", failed_at: null };
+      return HttpResponse.json(list[index]);
     },
   ),
 ];

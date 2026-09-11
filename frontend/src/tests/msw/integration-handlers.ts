@@ -63,6 +63,8 @@ export function makeIntegrationConnectionFixture(
 export const integrationMockState = {
   connectionsByWorkspace: {} as Record<string, IntegrationConnectionFixture[]>,
   connectionListNetworkError: false,
+  /** Phase 22 Chunk 3: a single mutation-error scenario, applied by every mutation handler below when set. */
+  mutationError: null as { code: string; message: string; status: number } | null,
 };
 
 export function seedIntegrationConnections(
@@ -75,6 +77,7 @@ export function seedIntegrationConnections(
 export function resetIntegrationMockState(): void {
   integrationMockState.connectionsByWorkspace = {};
   integrationMockState.connectionListNetworkError = false;
+  integrationMockState.mutationError = null;
 }
 
 function paginate<T>(items: T[], url: URL) {
@@ -118,6 +121,139 @@ export const integrationHandlers = [
         );
       }
       return HttpResponse.json(connection);
+    },
+  ),
+
+  // --- Mutations (Phase 22 Chunk 3) -------------------------------------
+
+  http.post(`${BASE}/api/v1/workspaces/:workspaceId/integrations/`, async ({ request, params }) => {
+    if (integrationMockState.mutationError) {
+      const { code, message, status } = integrationMockState.mutationError;
+      return HttpResponse.json({ error: { code, message } }, { status });
+    }
+    const workspaceId = params.workspaceId as string;
+    const body = (await request.json()) as {
+      provider: IntegrationConnectionFixture["provider"];
+      display_name?: string;
+      environment: "test" | "live";
+      configuration?: unknown;
+    };
+    const connection = makeIntegrationConnectionFixture({
+      id: `conn-created-${Date.now()}`,
+      provider: body.provider,
+      display_name: body.display_name ?? "",
+      environment: body.environment,
+      configuration: body.configuration ?? {},
+    });
+    integrationMockState.connectionsByWorkspace[workspaceId] = [
+      ...(integrationMockState.connectionsByWorkspace[workspaceId] ?? []),
+      connection,
+    ];
+    return HttpResponse.json(connection, { status: 201 });
+  }),
+
+  http.patch(
+    `${BASE}/api/v1/workspaces/:workspaceId/integrations/:connectionId/`,
+    async ({ request, params }) => {
+      if (integrationMockState.mutationError) {
+        const { code, message, status } = integrationMockState.mutationError;
+        return HttpResponse.json({ error: { code, message } }, { status });
+      }
+      const workspaceId = params.workspaceId as string;
+      const connectionId = params.connectionId as string;
+      const body = (await request.json()) as { display_name?: string; configuration?: unknown };
+      const list = integrationMockState.connectionsByWorkspace[workspaceId] ?? [];
+      const index = list.findIndex((c) => c.id === connectionId);
+      if (index === -1) {
+        return HttpResponse.json(
+          { error: { code: "not_found", message: "Integration connection not found." } },
+          { status: 404 },
+        );
+      }
+      list[index] = {
+        ...list[index],
+        ...(body.display_name !== undefined ? { display_name: body.display_name } : {}),
+        ...(body.configuration !== undefined ? { configuration: body.configuration } : {}),
+        updated_at: "2026-01-02T00:00:00Z",
+      };
+      return HttpResponse.json(list[index]);
+    },
+  ),
+
+  http.put(
+    `${BASE}/api/v1/workspaces/:workspaceId/integrations/:connectionId/credentials/`,
+    async ({ params }) => {
+      if (integrationMockState.mutationError) {
+        const { code, message, status } = integrationMockState.mutationError;
+        return HttpResponse.json({ error: { code, message } }, { status });
+      }
+      const workspaceId = params.workspaceId as string;
+      const connectionId = params.connectionId as string;
+      const list = integrationMockState.connectionsByWorkspace[workspaceId] ?? [];
+      const index = list.findIndex((c) => c.id === connectionId);
+      if (index === -1) {
+        return HttpResponse.json(
+          { error: { code: "not_found", message: "Integration connection not found." } },
+          { status: 404 },
+        );
+      }
+      list[index] = {
+        ...list[index],
+        credentials_configured: true,
+        credential_version: list[index].credential_version + 1,
+        status: "active",
+        updated_at: "2026-01-02T00:00:00Z",
+      };
+      return HttpResponse.json(list[index]);
+    },
+  ),
+
+  http.patch(
+    `${BASE}/api/v1/workspaces/:workspaceId/integrations/:connectionId/enabled/`,
+    async ({ request, params }) => {
+      if (integrationMockState.mutationError) {
+        const { code, message, status } = integrationMockState.mutationError;
+        return HttpResponse.json({ error: { code, message } }, { status });
+      }
+      const workspaceId = params.workspaceId as string;
+      const connectionId = params.connectionId as string;
+      const body = (await request.json()) as { enabled: boolean };
+      const list = integrationMockState.connectionsByWorkspace[workspaceId] ?? [];
+      const index = list.findIndex((c) => c.id === connectionId);
+      if (index === -1) {
+        return HttpResponse.json(
+          { error: { code: "not_found", message: "Integration connection not found." } },
+          { status: 404 },
+        );
+      }
+      list[index] = {
+        ...list[index],
+        status: body.enabled ? "active" : "disabled",
+        updated_at: "2026-01-02T00:00:00Z",
+      };
+      return HttpResponse.json(list[index]);
+    },
+  ),
+
+  http.post(
+    `${BASE}/api/v1/workspaces/:workspaceId/integrations/:connectionId/test/`,
+    async ({ params }) => {
+      if (integrationMockState.mutationError) {
+        const { code, message, status } = integrationMockState.mutationError;
+        return HttpResponse.json({ error: { code, message } }, { status });
+      }
+      const workspaceId = params.workspaceId as string;
+      const connectionId = params.connectionId as string;
+      const connection = integrationMockState.connectionsByWorkspace[workspaceId]?.find(
+        (c) => c.id === connectionId,
+      );
+      if (!connection) {
+        return HttpResponse.json(
+          { error: { code: "not_found", message: "Integration connection not found." } },
+          { status: 404 },
+        );
+      }
+      return HttpResponse.json({ ok: true, status: connection.status, error_code: null });
     },
   ),
 ];

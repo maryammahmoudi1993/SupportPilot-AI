@@ -139,7 +139,7 @@ describe("WebhookDeliveryDetailPage", () => {
     expect(await screen.findByText("Webhook delivery not found")).toBeInTheDocument();
   });
 
-  it("never renders a redrive control (deferred to a later chunk)", async () => {
+  it("renders a redrive control for a failed delivery and an authorized (admin) role (Phase 22 Chunk 3)", async () => {
     signIn([FIXTURE_WORKSPACE_GLOBEX]); // admin
     seedWebhookDeliveries(FIXTURE_WORKSPACE_GLOBEX.id, [
       makeWebhookDeliveryFixture({
@@ -153,7 +153,40 @@ describe("WebhookDeliveryDetailPage", () => {
     renderAuthenticated(<WebhookDeliveryDetailPage deliveryId={DELIVERY_ID} />);
 
     await screen.findByText("Failed");
+    expect(screen.getByRole("button", { name: /redrive delivery/i })).toBeInTheDocument();
+  });
+
+  it("never renders a redrive control for a delivered (terminal, non-redrivable) delivery", async () => {
+    signIn([FIXTURE_WORKSPACE_GLOBEX]); // admin
+    seedWebhookDeliveries(FIXTURE_WORKSPACE_GLOBEX.id, [
+      makeWebhookDeliveryFixture({
+        delivery_id: DELIVERY_ID,
+        endpoint_id: "ep-1",
+        endpoint_name: "Endpoint",
+        status: "delivered",
+      }),
+    ]);
+
+    renderAuthenticated(<WebhookDeliveryDetailPage deliveryId={DELIVERY_ID} />);
+
+    await screen.findByText("Delivered");
     expect(screen.queryByRole("button", { name: /redrive/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /^retry$/i })).not.toBeInTheDocument();
+  });
+
+  it("never renders a redrive control for an unauthorized (support_agent) role, even on a failed delivery", async () => {
+    signIn([FIXTURE_WORKSPACE_ACME]); // support_agent
+    seedWebhookDeliveries(FIXTURE_WORKSPACE_ACME.id, [
+      makeWebhookDeliveryFixture({
+        delivery_id: DELIVERY_ID,
+        endpoint_id: "ep-1",
+        endpoint_name: "Endpoint",
+        status: "failed",
+      }),
+    ]);
+
+    renderAuthenticated(<WebhookDeliveryDetailPage deliveryId={DELIVERY_ID} />);
+
+    await screen.findByText("Failed");
+    expect(screen.queryByRole("button", { name: /redrive/i })).not.toBeInTheDocument();
   });
 });
