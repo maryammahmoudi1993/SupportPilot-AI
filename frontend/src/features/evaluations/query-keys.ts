@@ -10,6 +10,8 @@
  * this chunk is "the results for one Evaluation Run".
  */
 import type {
+  EvaluationCaseListParams,
+  EvaluationDatasetListParams,
   EvaluationResultListParams,
   EvaluationRunListParams,
 } from "@/features/evaluations/types";
@@ -27,4 +29,18 @@ export const evaluationKeys = {
     [...evaluationKeys.runDetail(workspaceId, runId), "results"] as const,
   resultList: (workspaceId: string, runId: string, params: EvaluationResultListParams) =>
     [...evaluationKeys.results(workspaceId, runId), "list", params] as const,
+
+  datasetsAll: (workspaceId: string) => [...evaluationKeys.all(workspaceId), "datasets"] as const,
+  datasetLists: (workspaceId: string) =>
+    [...evaluationKeys.datasetsAll(workspaceId), "list"] as const,
+  datasetList: (workspaceId: string, params: EvaluationDatasetListParams) =>
+    [...evaluationKeys.datasetLists(workspaceId), params] as const,
+  datasetDetails: (workspaceId: string) =>
+    [...evaluationKeys.datasetsAll(workspaceId), "detail"] as const,
+  datasetDetail: (workspaceId: string, datasetId: string) =>
+    [...evaluationKeys.datasetDetails(workspaceId), datasetId] as const,
+  cases: (workspaceId: string, datasetId: string) =>
+    [...evaluationKeys.datasetDetail(workspaceId, datasetId), "cases"] as const,
+  caseList: (workspaceId: string, datasetId: string, params: EvaluationCaseListParams) =>
+    [...evaluationKeys.cases(workspaceId, datasetId), "list", params] as const,
 };

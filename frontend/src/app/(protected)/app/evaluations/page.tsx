@@ -1,7 +1,7 @@
 "use client";
 
-import { EvaluationRunsListPage } from "@/features/evaluations/components/evaluation-runs-list-page";
+import { EvaluationsListPage } from "@/features/evaluations/components/evaluations-list-page";
 
 export default function Page() {
-  return <EvaluationRunsListPage />;
+  return <EvaluationsListPage />;
 }

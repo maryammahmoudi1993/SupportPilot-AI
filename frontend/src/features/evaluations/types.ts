@@ -103,3 +103,126 @@ export const DEFAULT_EVALUATION_RESULT_LIST_PARAMS: EvaluationResultListParams =
   page: 1,
   passed: "all",
 };
+
+/**
+ * Dataset/Case domain types (Phase 23 Chunk 2: Evaluation Datasets + Cases
+ * Management).
+ *
+ * Schema gap register additions (Phase 23 Chunk 2 — Category B, non-blocking):
+ *
+ * 4. `EvaluationCase.status` / `EvaluationCaseWrite.status` /
+ *    `PatchedEvaluationCaseWrite.status` are generated as
+ *    `WebhookEndpointStatusEnum` rather than a case-specific enum name —
+ *    drf-spectacular's component-naming collision (identical to the
+ *    `ToolDefinition.status` gap documented in
+ *    features/tool-executions/types.ts): both real enums are the same
+ *    two-value `"active" | "disabled"` shape (evaluations/models.py
+ *    `EvaluationCaseStatus`), so the values are correct, only the generated
+ *    TypeScript name is confusing. Re-typed below as
+ *    `EvaluationCaseStatusValue`.
+ *
+ * 5. `evaluations_datasets_create` and `evaluations_datasets_cases_create`
+ *    both generate their 201 response as the *request* write shape
+ *    (`EvaluationDatasetWrite` / `EvaluationCaseWrite`) instead of the real
+ *    full body the view actually returns (`evaluations/views.py` —
+ *    `EvaluationDatasetListCreateView.create` /
+ *    `EvaluationCaseListCreateView.create` both call
+ *    `Response(<ReadSerializer>(obj).data, status=201)`, i.e. the same full
+ *    `EvaluationDataset`/`EvaluationCase` shape as the read endpoints). Same
+ *    generated-schema deficiency already documented for Integrations'
+ *    `integrations_create` gap. `createEvaluationDataset`/`createEvaluationCase`
+ *    in api.ts declare the real return type explicitly rather than trusting
+ *    the generated 201 response type.
+ *
+ * 6. `EvaluationCaseWrite`/`PatchedEvaluationCaseWrite` both generate `key`
+ *    as a writable field, but `evaluations/services.py
+ *    update_evaluation_case` only ever reads
+ *    `("name", "status", "input_message", "seeded_context", "expectations")`
+ *    from the PATCH payload — `key` is silently ignored on update, never
+ *    applied and never rejected (verified directly against the service, not
+ *    inferred). `key` is therefore treated as create-only in this chunk's
+ *    UI: the edit form never offers to change it, and shows it as read-only
+ *    text instead of an editable field, so the UI never implies a no-op
+ *    write would succeed.
+ */
+export type EvaluationDataset = components["schemas"]["EvaluationDataset"];
+export type PaginatedEvaluationDatasetList =
+  components["schemas"]["PaginatedEvaluationDatasetList"];
+export type EvaluationDatasetStatusValue = components["schemas"]["EvaluationDatasetStatusEnum"];
+
+export type EvaluationCaseStatusValue = "active" | "disabled";
+export type EvaluationCase = Omit<components["schemas"]["EvaluationCase"], "status"> & {
+  status: EvaluationCaseStatusValue;
+};
+export type PaginatedEvaluationCaseList = Omit<
+  components["schemas"]["PaginatedEvaluationCaseList"],
+  "results"
+> & { results: EvaluationCase[] };
+
+/** `"all"` omits the corresponding filter from the request entirely. */
+export type EvaluationDatasetStatusFilter = "all" | EvaluationDatasetStatusValue;
+export type EvaluationCaseStatusFilter = "all" | EvaluationCaseStatusValue;
+
+export interface EvaluationDatasetListParams {
+  page: number;
+  status: EvaluationDatasetStatusFilter;
+}
+
+export const DEFAULT_EVALUATION_DATASET_LIST_PARAMS: EvaluationDatasetListParams = {
+  page: 1,
+  status: "all",
+};
+
+export interface EvaluationCaseListParams {
+  page: number;
+  status: EvaluationCaseStatusFilter;
+}
+
+export const DEFAULT_EVALUATION_CASE_LIST_PARAMS: EvaluationCaseListParams = {
+  page: 1,
+  status: "all",
+};
+
+export interface CreateEvaluationDatasetInput {
+  name: string;
+  description?: string;
+  status?: EvaluationDatasetStatusValue;
+}
+
+export interface UpdateEvaluationDatasetInput {
+  name?: string;
+  description?: string;
+  status?: EvaluationDatasetStatusValue;
+}
+
+export interface CreateEvaluationCaseInput {
+  key: string;
+  name: string;
+  status?: EvaluationCaseStatusValue;
+  input_message: string;
+  seeded_context?: unknown;
+  expectations?: unknown;
+}
+
+/** `key` deliberately absent — see schema gap 6 above: the backend never applies it on update. */
+export interface UpdateEvaluationCaseInput {
+  name?: string;
+  status?: EvaluationCaseStatusValue;
+  input_message?: string;
+  seeded_context?: unknown;
+  expectations?: unknown;
+}
+
+/**
+ * Dataset/case management roles (evaluations/permissions.py
+ * `EVALUATION_MANAGE_ROLES` — owner/admin/support_manager). Mirrored here
+ * as UX-only gating (master prompt Part D §15): the backend
+ * `CanManageEvaluations` permission is the sole authority — this only
+ * controls whether a write control renders, never whether a request
+ * succeeds.
+ */
+const EVALUATION_MANAGE_ROLES = new Set(["owner", "admin", "support_manager"]);
+
+export function canManageEvaluations(role: string | undefined): boolean {
+  return role !== undefined && EVALUATION_MANAGE_ROLES.has(role);
+}

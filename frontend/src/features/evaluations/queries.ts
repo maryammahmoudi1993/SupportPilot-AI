@@ -22,15 +22,23 @@
 import { useQuery } from "@tanstack/react-query";
 
 import {
+  fetchEvaluationCaseList,
+  fetchEvaluationDatasetDetail,
+  fetchEvaluationDatasetList,
   fetchEvaluationResultList,
   fetchEvaluationRunDetail,
   fetchEvaluationRunList,
 } from "@/features/evaluations/api";
 import { evaluationKeys } from "@/features/evaluations/query-keys";
 import type {
+  EvaluationCaseListParams,
+  EvaluationDataset,
+  EvaluationDatasetListParams,
   EvaluationResultListParams,
   EvaluationRun,
   EvaluationRunListParams,
+  PaginatedEvaluationCaseList,
+  PaginatedEvaluationDatasetList,
   PaginatedEvaluationResultList,
   PaginatedEvaluationRunList,
 } from "@/features/evaluations/types";
@@ -113,6 +121,56 @@ export function useEvaluationResultListQuery(
     refetchIntervalInBackground: false,
     placeholderData: (previousData, previousQuery) => {
       if (workspaceId === null || runId === null || !previousQuery) {
+        return undefined;
+      }
+      return isSameWorkspaceQuery(previousQuery.queryKey, workspaceId) ? previousData : undefined;
+    },
+  });
+}
+
+/** Datasets/Cases (Phase 23 Chunk 2). No polling: dataset/case content only
+ * changes on an explicit operator write, never asynchronously. */
+export function useEvaluationDatasetListQuery(
+  workspaceId: string | null,
+  params: EvaluationDatasetListParams,
+) {
+  return useQuery<PaginatedEvaluationDatasetList, ApiError>({
+    queryKey: evaluationKeys.datasetList(workspaceId ?? NO_WORKSPACE, params),
+    queryFn: ({ signal }) => fetchEvaluationDatasetList(workspaceId as string, params, signal),
+    enabled: workspaceId !== null,
+    placeholderData: (previousData, previousQuery) => {
+      if (workspaceId === null || !previousQuery) {
+        return undefined;
+      }
+      return isSameWorkspaceQuery(previousQuery.queryKey, workspaceId) ? previousData : undefined;
+    },
+  });
+}
+
+export function useEvaluationDatasetDetailQuery(
+  workspaceId: string | null,
+  datasetId: string | null,
+) {
+  return useQuery<EvaluationDataset, ApiError>({
+    queryKey: evaluationKeys.datasetDetail(workspaceId ?? NO_WORKSPACE, datasetId ?? ""),
+    queryFn: ({ signal }) =>
+      fetchEvaluationDatasetDetail(workspaceId as string, datasetId as string, signal),
+    enabled: workspaceId !== null && datasetId !== null,
+  });
+}
+
+export function useEvaluationCaseListQuery(
+  workspaceId: string | null,
+  datasetId: string | null,
+  params: EvaluationCaseListParams,
+) {
+  return useQuery<PaginatedEvaluationCaseList, ApiError>({
+    queryKey: evaluationKeys.caseList(workspaceId ?? NO_WORKSPACE, datasetId ?? "", params),
+    queryFn: ({ signal }) =>
+      fetchEvaluationCaseList(workspaceId as string, datasetId as string, params, signal),
+    enabled: workspaceId !== null && datasetId !== null,
+    placeholderData: (previousData, previousQuery) => {
+      if (workspaceId === null || datasetId === null || !previousQuery) {
         return undefined;
       }
       return isSameWorkspaceQuery(previousQuery.queryKey, workspaceId) ? previousData : undefined;

@@ -1,6 +1,8 @@
 import { Badge } from "@/components/ui/badge";
 import { EnumBadge } from "@/components/support/enum-badge";
 import type {
+  EvaluationCaseStatusValue,
+  EvaluationDatasetStatusValue,
   EvaluationResultStatusValue,
   EvaluationRunStatusValue,
 } from "@/features/evaluations/types";
@@ -75,4 +77,40 @@ export function EvaluationPassedBadge({ passed }: { passed: boolean | null }) {
   ) : (
     <Badge variant="danger">Failed</Badge>
   );
+}
+
+const DATASET_STATUS_LABELS: Partial<Record<EvaluationDatasetStatusValue, string>> = {
+  draft: "Draft",
+  active: "Active",
+  archived: "Archived",
+};
+
+const DATASET_STATUS_VARIANTS: Partial<
+  Record<EvaluationDatasetStatusValue, "success" | "warning" | "neutral" | "primary" | "danger">
+> = {
+  draft: "neutral",
+  active: "success",
+  archived: "warning",
+};
+
+export function EvaluationDatasetStatusBadge({ status }: { status: EvaluationDatasetStatusValue }) {
+  return (
+    <EnumBadge value={status} labels={DATASET_STATUS_LABELS} variants={DATASET_STATUS_VARIANTS} />
+  );
+}
+
+const CASE_STATUS_LABELS: Partial<Record<EvaluationCaseStatusValue, string>> = {
+  active: "Active",
+  disabled: "Disabled",
+};
+
+const CASE_STATUS_VARIANTS: Partial<
+  Record<EvaluationCaseStatusValue, "success" | "neutral" | "primary" | "warning" | "danger">
+> = {
+  active: "success",
+  disabled: "neutral",
+};
+
+export function EvaluationCaseStatusBadge({ status }: { status: EvaluationCaseStatusValue }) {
+  return <EnumBadge value={status} labels={CASE_STATUS_LABELS} variants={CASE_STATUS_VARIANTS} />;
 }

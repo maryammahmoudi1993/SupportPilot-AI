@@ -1,24 +1,18 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { Suspense } from "react";
+import { useRouter, usePathname } from "next/navigation";
 import type { ChangeEvent } from "react";
 
 import { EvaluationRunStatusBadge } from "@/features/evaluations/components/evaluation-badges";
 import { useEvaluationRunListQuery } from "@/features/evaluations/queries";
 import type { EvaluationRunListParams, EvaluationRunStatusFilter } from "@/features/evaluations/types";
-import {
-  buildEvaluationRunListQueryString,
-  parseEvaluationRunListParams,
-} from "@/features/evaluations/url-params";
-import { useWorkspace } from "@/features/workspace/workspace-provider";
+import { buildEvaluationRunListQueryString } from "@/features/evaluations/url-params";
 import { ListError } from "@/components/support/list-error";
 import { Pagination } from "@/components/support/pagination";
 import { Timestamp } from "@/components/support/timestamp";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
 
 const STATUS_OPTIONS: { value: EvaluationRunStatusFilter; label: string }[] = [
@@ -31,14 +25,17 @@ const STATUS_OPTIONS: { value: EvaluationRunStatusFilter; label: string }[] = [
   { value: "cancelled", label: "Cancelled" },
 ];
 
-function EvaluationRunsListContent() {
-  const workspace = useWorkspace();
+/** Runs tab content (Phase 23 Chunk 1, extracted into a tab in Chunk 2 —
+ * see evaluations-list-page.tsx). */
+export function EvaluationRunsTab({
+  workspaceId,
+  params,
+}: {
+  workspaceId: string;
+  params: EvaluationRunListParams;
+}) {
   const router = useRouter();
   const pathname = usePathname();
-  const searchParams = useSearchParams();
-
-  const params = parseEvaluationRunListParams(searchParams);
-  const workspaceId = workspace.activeWorkspace?.id ?? null;
   const query = useEvaluationRunListQuery(workspaceId, params);
 
   function pushParams(next: EvaluationRunListParams) {
@@ -53,14 +50,6 @@ function EvaluationRunsListContent() {
 
   return (
     <div className="flex flex-col gap-6">
-      <div>
-        <h1 className="text-text-primary text-xl font-semibold">Evaluations</h1>
-        <p className="text-text-secondary text-sm">
-          Real evaluation runs executed against this workspace&apos;s agent versions —
-          deterministic, offline scoring against recorded execution evidence.
-        </p>
-      </div>
-
       <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">
         <div className="w-full sm:w-56">
           <Label htmlFor="evaluation-run-status-filter">Status</Label>
@@ -173,7 +162,7 @@ function EvaluationRunsListContent() {
   );
 }
 
-function EvaluationRunsListSkeleton() {
+export function EvaluationRunsListSkeleton() {
   return (
     <div className="flex flex-col gap-2" role="status" aria-label="Loading evaluation runs">
       {Array.from({ length: 6 }).map((_, index) => (
@@ -181,29 +170,5 @@ function EvaluationRunsListSkeleton() {
       ))}
       <span className="sr-only">Loading evaluation runs</span>
     </div>
-  );
-}
-
-export function EvaluationRunsListPage() {
-  const workspace = useWorkspace();
-
-  if (workspace.status !== "ready" || !workspace.activeWorkspace) {
-    return (
-      <div className="flex flex-1 items-center justify-center py-16">
-        <Spinner label="Loading your workspace" />
-      </div>
-    );
-  }
-
-  return (
-    <Suspense
-      fallback={
-        <div className="flex flex-1 items-center justify-center py-16">
-          <Spinner label="Loading evaluations" />
-        </div>
-      }
-    >
-      <EvaluationRunsListContent />
-    </Suspense>
   );
 }

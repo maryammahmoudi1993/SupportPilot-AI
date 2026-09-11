@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { describe, expect, it, vi } from "vitest";
 
-import { EvaluationRunsListPage } from "@/features/evaluations/components/evaluation-runs-list-page";
+import { EvaluationsListPage } from "@/features/evaluations/components/evaluations-list-page";
 import { useWorkspace } from "@/features/workspace/workspace-provider";
 import {
   FIXTURE_USER,
@@ -42,7 +42,7 @@ function signIn(workspaces: { id: string; name: string; slug: string; role: stri
 const DATASET_1 = "22222222-2222-4222-8222-222222222222";
 const VERSION_1 = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 
-describe("EvaluationRunsListPage", () => {
+describe("EvaluationsListPage", () => {
   it("renders real evaluation run rows returned by the API — real fields, no invented labels", async () => {
     signIn([FIXTURE_WORKSPACE_ACME]);
     seedEvaluationRuns(FIXTURE_WORKSPACE_ACME.id, [
@@ -59,7 +59,7 @@ describe("EvaluationRunsListPage", () => {
     ]);
     setupNavigationMocks();
 
-    renderAuthenticated(<EvaluationRunsListPage />);
+    renderAuthenticated(<EvaluationsListPage />);
 
     expect(await screen.findByRole("link", { name: "Run #run-1" })).toBeInTheDocument();
     const table = screen.getByRole("table");
@@ -73,7 +73,7 @@ describe("EvaluationRunsListPage", () => {
     signIn([FIXTURE_WORKSPACE_ACME]);
     setupNavigationMocks();
 
-    renderAuthenticated(<EvaluationRunsListPage />);
+    renderAuthenticated(<EvaluationsListPage />);
 
     expect(await screen.findByText("No evaluation runs yet")).toBeInTheDocument();
   });
@@ -83,7 +83,7 @@ describe("EvaluationRunsListPage", () => {
     evaluationMockState.listNetworkError = true;
     setupNavigationMocks();
 
-    renderAuthenticated(<EvaluationRunsListPage />);
+    renderAuthenticated(<EvaluationsListPage />);
 
     expect(await screen.findByText("Something went wrong")).toBeInTheDocument();
     expect(screen.queryByText("No evaluation runs yet")).not.toBeInTheDocument();
@@ -101,7 +101,7 @@ describe("EvaluationRunsListPage", () => {
     signIn([FIXTURE_WORKSPACE_ACME]);
     const { replace } = setupNavigationMocks("page=3");
 
-    renderAuthenticated(<EvaluationRunsListPage />);
+    renderAuthenticated(<EvaluationsListPage />);
     await screen.findByText("No evaluation runs yet");
 
     await userEvent.setup().selectOptions(screen.getByLabelText("Status"), "running");
@@ -124,7 +124,7 @@ describe("EvaluationRunsListPage", () => {
     );
     const { replace } = setupNavigationMocks("status=running");
 
-    renderAuthenticated(<EvaluationRunsListPage />);
+    renderAuthenticated(<EvaluationsListPage />);
 
     const nextButton = await screen.findByRole("button", { name: "Next page" });
     expect(screen.getByRole("button", { name: "Previous page" })).toBeDisabled();
@@ -149,7 +149,7 @@ describe("EvaluationRunsListPage", () => {
     ]);
     setupNavigationMocks();
 
-    renderAuthenticated(<EvaluationRunsListPage />);
+    renderAuthenticated(<EvaluationsListPage />);
 
     expect(await screen.findByRole("link", { name: /Run #/ })).toBeInTheDocument();
     expect(screen.getByText("queued_for_review")).toBeInTheDocument();
@@ -179,7 +179,7 @@ describe("EvaluationRunsListPage", () => {
                 {`switch-to-${candidate.name}`}
               </button>
             ))}
-          <EvaluationRunsListPage />
+          <EvaluationsListPage />
         </>
       );
     }

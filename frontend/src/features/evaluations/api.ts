@@ -34,12 +34,22 @@
 import { apiClient } from "@/lib/api/client";
 import { unwrap, withRequestTimeout } from "@/lib/api/request";
 import type {
+  CreateEvaluationCaseInput,
+  CreateEvaluationDatasetInput,
+  EvaluationCase,
+  EvaluationCaseListParams,
+  EvaluationDataset,
+  EvaluationDatasetListParams,
   EvaluationResult,
   EvaluationResultListParams,
   EvaluationRun,
   EvaluationRunListParams,
+  PaginatedEvaluationCaseList,
+  PaginatedEvaluationDatasetList,
   PaginatedEvaluationResultList,
   PaginatedEvaluationRunList,
+  UpdateEvaluationCaseInput,
+  UpdateEvaluationDatasetInput,
 } from "@/features/evaluations/types";
 import type { paths } from "@/types/api";
 
@@ -165,6 +175,191 @@ export function fetchEvaluationResultDetail(
         ),
       undefined,
       signal,
+    ),
+  );
+}
+
+/**
+ * Dataset/Case API (Phase 23 Chunk 2). Real filters (see selectors.py
+ * `dataset_list_for_workspace`/`case_list_for_dataset`) are `status` for
+ * both lists; `ordering`/`search` are dead params, same gap as runs/results
+ * above — never sent.
+ */
+type GeneratedEvaluationDatasetListQuery = NonNullable<
+  paths["/api/v1/workspaces/{workspace_id}/evaluations/datasets/"]["get"]["parameters"]["query"]
+>;
+type EvaluationDatasetListQuery = Omit<
+  GeneratedEvaluationDatasetListQuery,
+  "ordering" | "search"
+> & { status?: string };
+
+type GeneratedEvaluationCaseListQuery = NonNullable<
+  paths["/api/v1/workspaces/{workspace_id}/evaluations/datasets/{dataset_id}/cases/"]["get"]["parameters"]["query"]
+>;
+type EvaluationCaseListQuery = Omit<GeneratedEvaluationCaseListQuery, "ordering" | "search"> & {
+  status?: string;
+};
+
+function toDatasetListQuery(params: EvaluationDatasetListParams): EvaluationDatasetListQuery {
+  const query: EvaluationDatasetListQuery = {};
+  if (params.page > 1) {
+    query.page = params.page;
+  }
+  if (params.status !== "all") {
+    query.status = params.status;
+  }
+  return query;
+}
+
+function toCaseListQuery(params: EvaluationCaseListParams): EvaluationCaseListQuery {
+  const query: EvaluationCaseListQuery = {};
+  if (params.page > 1) {
+    query.page = params.page;
+  }
+  if (params.status !== "all") {
+    query.status = params.status;
+  }
+  return query;
+}
+
+export function fetchEvaluationDatasetList(
+  workspaceId: string,
+  params: EvaluationDatasetListParams,
+  signal?: AbortSignal,
+): Promise<PaginatedEvaluationDatasetList> {
+  return unwrap(
+    withRequestTimeout(
+      (requestSignal) =>
+        apiClient.GET("/api/v1/workspaces/{workspace_id}/evaluations/datasets/", {
+          params: {
+            path: { workspace_id: workspaceId },
+            query: toDatasetListQuery(params),
+          },
+          signal: requestSignal,
+        }),
+      undefined,
+      signal,
+    ),
+  );
+}
+
+export function fetchEvaluationDatasetDetail(
+  workspaceId: string,
+  datasetId: string,
+  signal?: AbortSignal,
+): Promise<EvaluationDataset> {
+  return unwrap(
+    withRequestTimeout(
+      (requestSignal) =>
+        apiClient.GET("/api/v1/workspaces/{workspace_id}/evaluations/datasets/{dataset_id}/", {
+          params: { path: { workspace_id: workspaceId, dataset_id: datasetId } },
+          signal: requestSignal,
+        }),
+      undefined,
+      signal,
+    ),
+  );
+}
+
+/**
+ * Return type declared explicitly as the real `EvaluationDataset` —
+ * see types.ts schema gap 5: the generated 201 response is mistyped as the
+ * request write shape.
+ */
+export function createEvaluationDataset(
+  workspaceId: string,
+  input: CreateEvaluationDatasetInput,
+): Promise<EvaluationDataset> {
+  return unwrap(
+    withRequestTimeout((requestSignal) =>
+      apiClient.POST("/api/v1/workspaces/{workspace_id}/evaluations/datasets/", {
+        params: { path: { workspace_id: workspaceId } },
+        body: input,
+        signal: requestSignal,
+      }),
+    ),
+  ) as Promise<EvaluationDataset>;
+}
+
+export function updateEvaluationDataset(
+  workspaceId: string,
+  datasetId: string,
+  input: UpdateEvaluationDatasetInput,
+): Promise<EvaluationDataset> {
+  return unwrap(
+    withRequestTimeout((requestSignal) =>
+      apiClient.PATCH("/api/v1/workspaces/{workspace_id}/evaluations/datasets/{dataset_id}/", {
+        params: { path: { workspace_id: workspaceId, dataset_id: datasetId } },
+        body: input,
+        signal: requestSignal,
+      }),
+    ),
+  );
+}
+
+export function fetchEvaluationCaseList(
+  workspaceId: string,
+  datasetId: string,
+  params: EvaluationCaseListParams,
+  signal?: AbortSignal,
+): Promise<PaginatedEvaluationCaseList> {
+  return unwrap(
+    withRequestTimeout(
+      (requestSignal) =>
+        apiClient.GET(
+          "/api/v1/workspaces/{workspace_id}/evaluations/datasets/{dataset_id}/cases/",
+          {
+            params: {
+              path: { workspace_id: workspaceId, dataset_id: datasetId },
+              query: toCaseListQuery(params),
+            },
+            signal: requestSignal,
+          },
+        ),
+      undefined,
+      signal,
+    ),
+  );
+}
+
+/** Return type declared explicitly as the real `EvaluationCase` — see types.ts schema gap 5. */
+export function createEvaluationCase(
+  workspaceId: string,
+  datasetId: string,
+  input: CreateEvaluationCaseInput,
+): Promise<EvaluationCase> {
+  return unwrap(
+    withRequestTimeout((requestSignal) =>
+      apiClient.POST(
+        "/api/v1/workspaces/{workspace_id}/evaluations/datasets/{dataset_id}/cases/",
+        {
+          params: { path: { workspace_id: workspaceId, dataset_id: datasetId } },
+          body: input,
+          signal: requestSignal,
+        },
+      ),
+    ),
+  ) as Promise<EvaluationCase>;
+}
+
+export function updateEvaluationCase(
+  workspaceId: string,
+  datasetId: string,
+  caseId: string,
+  input: UpdateEvaluationCaseInput,
+): Promise<EvaluationCase> {
+  return unwrap(
+    withRequestTimeout((requestSignal) =>
+      apiClient.PATCH(
+        "/api/v1/workspaces/{workspace_id}/evaluations/datasets/{dataset_id}/cases/{case_id}/",
+        {
+          params: {
+            path: { workspace_id: workspaceId, dataset_id: datasetId, case_id: caseId },
+          },
+          body: input,
+          signal: requestSignal,
+        },
+      ),
     ),
   );
 }

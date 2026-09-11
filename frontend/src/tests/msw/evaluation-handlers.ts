@@ -95,6 +95,53 @@ export function makeEvaluationResultFixture(
   };
 }
 
+export interface EvaluationDatasetFixture {
+  id: string;
+  name: string;
+  description: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface EvaluationCaseFixture {
+  id: string;
+  key: string;
+  name: string;
+  status: string;
+  input_message: string;
+  seeded_context: unknown;
+  expectations: unknown;
+  created_at: string;
+  updated_at: string;
+}
+
+export function makeEvaluationDatasetFixture(
+  overrides: Partial<EvaluationDatasetFixture> & { id: string; name: string },
+): EvaluationDatasetFixture {
+  return {
+    description: "",
+    status: "active",
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z",
+    ...overrides,
+  };
+}
+
+export function makeEvaluationCaseFixture(
+  overrides: Partial<EvaluationCaseFixture> & { id: string; key: string; name: string },
+): EvaluationCaseFixture {
+  return {
+    status: "active",
+    input_message: "Hello.",
+    seeded_context: {},
+    expectations: {},
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z",
+    ...overrides,
+  };
+}
+
 export const evaluationMockState = {
   runsByWorkspace: {} as Record<string, EvaluationRunFixture[]>,
   /** Which workspace owns a given run ID — for the cross-workspace 404 check. */
@@ -106,6 +153,24 @@ export const evaluationMockState = {
   listCallCount: 0,
   detailCallCount: 0,
   resultsCallCount: 0,
+
+  datasetsByWorkspace: {} as Record<string, EvaluationDatasetFixture[]>,
+  /** Which workspace owns a given dataset ID — for the cross-workspace 404 check. */
+  datasetWorkspace: {} as Record<string, string>,
+  casesByDataset: {} as Record<string, EvaluationCaseFixture[]>,
+  datasetListNetworkError: false,
+  datasetDetailNetworkError: false,
+  caseListNetworkError: false,
+  /** Returns a 400 on the next dataset/case create call, then clears itself. */
+  nextCreateDatasetError: null as { status: number; code: string; message: string } | null,
+  nextCreateCaseError: null as { status: number; code: string; message: string } | null,
+  datasetListCallCount: 0,
+  datasetDetailCallCount: 0,
+  caseListCallCount: 0,
+  datasetCreateCallCount: 0,
+  datasetUpdateCallCount: 0,
+  caseCreateCallCount: 0,
+  caseUpdateCallCount: 0,
 };
 
 export function seedEvaluationRuns(workspaceId: string, runs: EvaluationRunFixture[]): void {
@@ -119,6 +184,20 @@ export function seedEvaluationResults(runId: string, results: EvaluationResultFi
   evaluationMockState.resultsByRun[runId] = results;
 }
 
+export function seedEvaluationDatasets(
+  workspaceId: string,
+  datasets: EvaluationDatasetFixture[],
+): void {
+  evaluationMockState.datasetsByWorkspace[workspaceId] = datasets;
+  for (const dataset of datasets) {
+    evaluationMockState.datasetWorkspace[dataset.id] = workspaceId;
+  }
+}
+
+export function seedEvaluationCases(datasetId: string, cases: EvaluationCaseFixture[]): void {
+  evaluationMockState.casesByDataset[datasetId] = cases;
+}
+
 export function resetEvaluationMockState(): void {
   evaluationMockState.runsByWorkspace = {};
   evaluationMockState.runWorkspace = {};
@@ -129,11 +208,34 @@ export function resetEvaluationMockState(): void {
   evaluationMockState.listCallCount = 0;
   evaluationMockState.detailCallCount = 0;
   evaluationMockState.resultsCallCount = 0;
+
+  evaluationMockState.datasetsByWorkspace = {};
+  evaluationMockState.datasetWorkspace = {};
+  evaluationMockState.casesByDataset = {};
+  evaluationMockState.datasetListNetworkError = false;
+  evaluationMockState.datasetDetailNetworkError = false;
+  evaluationMockState.caseListNetworkError = false;
+  evaluationMockState.nextCreateDatasetError = null;
+  evaluationMockState.nextCreateCaseError = null;
+  evaluationMockState.datasetListCallCount = 0;
+  evaluationMockState.datasetDetailCallCount = 0;
+  evaluationMockState.caseListCallCount = 0;
+  evaluationMockState.datasetCreateCallCount = 0;
+  evaluationMockState.datasetUpdateCallCount = 0;
+  evaluationMockState.caseCreateCallCount = 0;
+  evaluationMockState.caseUpdateCallCount = 0;
 }
 
 function notFoundRun() {
   return HttpResponse.json(
     { error: { code: "not_found", message: "Evaluation run not found." } },
+    { status: 404 },
+  );
+}
+
+function notFoundDataset() {
+  return HttpResponse.json(
+    { error: { code: "not_found", message: "Evaluation dataset not found." } },
     { status: 404 },
   );
 }
@@ -224,6 +326,204 @@ export const evaluationHandlers = [
       }
 
       return HttpResponse.json(paginate(results, url));
+    },
+  ),
+
+  http.get(
+    `${BASE}/api/v1/workspaces/:workspaceId/evaluations/datasets/`,
+    async ({ request, params }) => {
+      evaluationMockState.datasetListCallCount += 1;
+
+      if (evaluationMockState.datasetListNetworkError) {
+        return HttpResponse.error();
+      }
+
+      const workspaceId = params.workspaceId as string;
+      const url = new URL(request.url);
+      const status = url.searchParams.get("status");
+
+      let results = evaluationMockState.datasetsByWorkspace[workspaceId] ?? [];
+      if (status) {
+        results = results.filter((dataset) => dataset.status === status);
+      }
+
+      return HttpResponse.json(paginate(results, url));
+    },
+  ),
+
+  http.post(
+    `${BASE}/api/v1/workspaces/:workspaceId/evaluations/datasets/`,
+    async ({ request, params }) => {
+      evaluationMockState.datasetCreateCallCount += 1;
+
+      if (evaluationMockState.nextCreateDatasetError) {
+        const { status, code, message } = evaluationMockState.nextCreateDatasetError;
+        evaluationMockState.nextCreateDatasetError = null;
+        return HttpResponse.json({ error: { code, message } }, { status });
+      }
+
+      const workspaceId = params.workspaceId as string;
+      const body = (await request.json()) as { name: string; description?: string; status?: string };
+      const existing = evaluationMockState.datasetsByWorkspace[workspaceId] ?? [];
+      if (existing.some((dataset) => dataset.name === body.name)) {
+        return HttpResponse.json(
+          { error: { code: "invalid", message: "A dataset with this name already exists." } },
+          { status: 400 },
+        );
+      }
+
+      const dataset = makeEvaluationDatasetFixture({
+        id: `dataset-${existing.length + 1}-${Date.now()}`,
+        name: body.name,
+        description: body.description ?? "",
+        status: body.status ?? "draft",
+      });
+      evaluationMockState.datasetsByWorkspace[workspaceId] = [...existing, dataset];
+      evaluationMockState.datasetWorkspace[dataset.id] = workspaceId;
+
+      return HttpResponse.json(dataset, { status: 201 });
+    },
+  ),
+
+  http.get(
+    `${BASE}/api/v1/workspaces/:workspaceId/evaluations/datasets/:datasetId/`,
+    async ({ params }) => {
+      evaluationMockState.datasetDetailCallCount += 1;
+
+      if (evaluationMockState.datasetDetailNetworkError) {
+        return HttpResponse.error();
+      }
+
+      const workspaceId = params.workspaceId as string;
+      const datasetId = params.datasetId as string;
+      const dataset = (evaluationMockState.datasetsByWorkspace[workspaceId] ?? []).find(
+        (candidate) => candidate.id === datasetId,
+      );
+      if (!dataset) {
+        return notFoundDataset();
+      }
+      return HttpResponse.json(dataset);
+    },
+  ),
+
+  http.patch(
+    `${BASE}/api/v1/workspaces/:workspaceId/evaluations/datasets/:datasetId/`,
+    async ({ request, params }) => {
+      evaluationMockState.datasetUpdateCallCount += 1;
+
+      const workspaceId = params.workspaceId as string;
+      const datasetId = params.datasetId as string;
+      const list = evaluationMockState.datasetsByWorkspace[workspaceId] ?? [];
+      const dataset = list.find((candidate) => candidate.id === datasetId);
+      if (!dataset) {
+        return notFoundDataset();
+      }
+
+      const body = (await request.json()) as Partial<EvaluationDatasetFixture>;
+      Object.assign(dataset, body);
+      return HttpResponse.json(dataset);
+    },
+  ),
+
+  http.get(
+    `${BASE}/api/v1/workspaces/:workspaceId/evaluations/datasets/:datasetId/cases/`,
+    async ({ request, params }) => {
+      evaluationMockState.caseListCallCount += 1;
+
+      if (evaluationMockState.caseListNetworkError) {
+        return HttpResponse.error();
+      }
+
+      const workspaceId = params.workspaceId as string;
+      const datasetId = params.datasetId as string;
+      const dataset = (evaluationMockState.datasetsByWorkspace[workspaceId] ?? []).find(
+        (candidate) => candidate.id === datasetId,
+      );
+      if (!dataset) {
+        return notFoundDataset();
+      }
+
+      const url = new URL(request.url);
+      const status = url.searchParams.get("status");
+      let results = evaluationMockState.casesByDataset[datasetId] ?? [];
+      if (status) {
+        results = results.filter((evaluationCase) => evaluationCase.status === status);
+      }
+
+      return HttpResponse.json(paginate(results, url));
+    },
+  ),
+
+  http.post(
+    `${BASE}/api/v1/workspaces/:workspaceId/evaluations/datasets/:datasetId/cases/`,
+    async ({ request, params }) => {
+      evaluationMockState.caseCreateCallCount += 1;
+
+      if (evaluationMockState.nextCreateCaseError) {
+        const { status, code, message } = evaluationMockState.nextCreateCaseError;
+        evaluationMockState.nextCreateCaseError = null;
+        return HttpResponse.json({ error: { code, message } }, { status });
+      }
+
+      const workspaceId = params.workspaceId as string;
+      const datasetId = params.datasetId as string;
+      const dataset = (evaluationMockState.datasetsByWorkspace[workspaceId] ?? []).find(
+        (candidate) => candidate.id === datasetId,
+      );
+      if (!dataset) {
+        return notFoundDataset();
+      }
+
+      const body = (await request.json()) as {
+        key: string;
+        name: string;
+        status?: string;
+        input_message: string;
+        seeded_context?: unknown;
+        expectations?: unknown;
+      };
+      const existing = evaluationMockState.casesByDataset[datasetId] ?? [];
+      if (existing.some((evaluationCase) => evaluationCase.key === body.key)) {
+        return HttpResponse.json(
+          { error: { code: "invalid", message: "A case with this key already exists in this dataset." } },
+          { status: 400 },
+        );
+      }
+
+      const evaluationCase = makeEvaluationCaseFixture({
+        id: `case-${existing.length + 1}-${Date.now()}`,
+        key: body.key,
+        name: body.name,
+        status: body.status ?? "active",
+        input_message: body.input_message,
+        seeded_context: body.seeded_context ?? {},
+        expectations: body.expectations ?? {},
+      });
+      evaluationMockState.casesByDataset[datasetId] = [...existing, evaluationCase];
+
+      return HttpResponse.json(evaluationCase, { status: 201 });
+    },
+  ),
+
+  http.patch(
+    `${BASE}/api/v1/workspaces/:workspaceId/evaluations/datasets/:datasetId/cases/:caseId/`,
+    async ({ request, params }) => {
+      evaluationMockState.caseUpdateCallCount += 1;
+
+      const datasetId = params.datasetId as string;
+      const caseId = params.caseId as string;
+      const list = evaluationMockState.casesByDataset[datasetId] ?? [];
+      const evaluationCase = list.find((candidate) => candidate.id === caseId);
+      if (!evaluationCase) {
+        return HttpResponse.json(
+          { error: { code: "not_found", message: "Evaluation case not found." } },
+          { status: 404 },
+        );
+      }
+
+      const body = (await request.json()) as Partial<EvaluationCaseFixture>;
+      Object.assign(evaluationCase, body);
+      return HttpResponse.json(evaluationCase);
     },
   ),
 ];
