@@ -754,6 +754,39 @@ WebhookDelivery.objects.create(
     event=ws_a_webhook_event,
 )
 
+# Phase 22 Chunk 3: a real DISABLED endpoint + a real FAILED delivery on it,
+# both on Workspace A (the primary user's OWNER — and CanManageWebhooks —
+# membership), so the real-backend redrive-mutation E2E can click the real
+# "Redrive delivery" control, confirm, and observe the real, safe
+# webhook_endpoint_disabled rejection (webhooks/services.py
+# redrive_webhook_delivery's endpoint-status guard, checked before any
+# delivery-state change or dispatch) — never a genuine successful redrive,
+# which would schedule a real Celery dispatch (see the module docstring
+# above, and master prompt Part F's safety limitation, documented in
+# frontend/README.md).
+ws_a_webhook_endpoint_disabled = WebhookEndpoint.objects.create(
+    workspace=ws_a, name="Workspace A disabled relay", url="https://example.com/hooks/workspace-a-disabled",
+    status=WebhookEndpointStatus.DISABLED,
+    subscribed_event_types=[WebhookEventType.APPROVAL_REQUESTED],
+)
+ws_a_webhook_event_disabled = WebhookEvent.objects.create(
+    workspace=ws_a, event_type=WebhookEventType.APPROVAL_REQUESTED, version=1,
+    payload_snapshot={"summary": "workspace a disabled-endpoint fixture"},
+)
+ws_a_webhook_delivery_disabled_endpoint = Delivery.objects.create(
+    workspace=ws_a, channel=DeliveryChannel.WEBHOOK,
+    max_attempts=1, next_attempt_at=timezone.now(),
+)
+WebhookDelivery.objects.create(
+    delivery=ws_a_webhook_delivery_disabled_endpoint, workspace=ws_a,
+    endpoint=ws_a_webhook_endpoint_disabled, event=ws_a_webhook_event_disabled,
+)
+_, ws_a_disabled_failed_token = claim_delivery(delivery_id=ws_a_webhook_delivery_disabled_endpoint.id)
+complete_delivery_failure(
+    delivery_id=ws_a_webhook_delivery_disabled_endpoint.id, claim_token=ws_a_disabled_failed_token,
+    safe_error_code="webhook_http_500", retryable=True, response_status_code=500,
+)
+
 print(json.dumps({
     "primaryEmail": primary.email,
     "primaryPassword": PASSWORD,
@@ -829,6 +862,8 @@ print(json.dumps({
     "workspaceBWebhookDeliveryFailedId": str(failed_delivery.id),
     "workspaceAWebhookEndpointId": str(ws_a_webhook_endpoint.id),
     "workspaceAWebhookDeliveryId": str(ws_a_webhook_delivery.id),
+    "workspaceAWebhookEndpointDisabledId": str(ws_a_webhook_endpoint_disabled.id),
+    "workspaceAWebhookDeliveryFailedDisabledEndpointId": str(ws_a_webhook_delivery_disabled_endpoint.id),
 }))
 `;
 

@@ -78,6 +78,8 @@ export interface E2EData {
   workspaceBWebhookDeliveryFailedId: string;
   workspaceAWebhookEndpointId: string;
   workspaceAWebhookDeliveryId: string;
+  workspaceAWebhookEndpointDisabledId: string;
+  workspaceAWebhookDeliveryFailedDisabledEndpointId: string;
 }
 
 let cached: E2EData | null = null;
