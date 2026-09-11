@@ -372,6 +372,141 @@ test.describe("Accessibility (axe)", () => {
       [],
     );
   });
+
+  // Phase 22 Chunk 4 (final integrations/webhook acceptance gate, Part K
+  // §40): Integration Connection / Webhook Endpoint / Webhook Delivery
+  // list/detail surfaces, scanned with the real OWNER (CanManageIntegrations
+  // + CanManageWebhooks) membership in Workspace A.
+  const INTEGRATION_WEBHOOK_PAGES: {
+    name: string;
+    path: (data: ReturnType<typeof e2eData>) => string;
+  }[] = [
+    { name: "Integrations: connection list", path: () => "/app/integrations" },
+    {
+      name: "Integrations: connection detail (Stripe)",
+      path: (data) => `/app/integrations/${data.workspaceBIntegrationStripeId}`,
+    },
+    { name: "Integrations: webhook endpoints tab", path: () => "/app/integrations?tab=webhooks" },
+    {
+      name: "Integrations: webhook endpoint detail",
+      path: (data) => `/app/integrations/webhooks/${data.workspaceBWebhookEndpointId}`,
+    },
+    { name: "Integrations: deliveries tab", path: () => "/app/integrations?tab=deliveries" },
+    {
+      name: "Webhook delivery detail (non-terminal, pending)",
+      path: (data) => `/app/integrations/deliveries/${data.workspaceBWebhookDeliveryPendingId}`,
+    },
+    {
+      name: "Webhook delivery detail (failed, redrivable)",
+      path: (data) => `/app/integrations/deliveries/${data.workspaceBWebhookDeliveryFailedId}`,
+    },
+  ];
+
+  for (const { name, path } of INTEGRATION_WEBHOOK_PAGES) {
+    test(`${name} has no serious/critical violations`, async ({ page }) => {
+      const data = e2eData();
+      await login(page, data.primaryEmail, data.primaryPassword);
+      await page.goto(path(data));
+      await expect(page.locator("table, h1, h2, h3, form").first()).toBeVisible();
+
+      const results = await new AxeBuilder({ page }).analyze();
+      expect(
+        seriousOrCritical(results),
+        JSON.stringify(seriousOrCritical(results), null, 2),
+      ).toEqual([]);
+    });
+  }
+
+  test("the connection create form (open) has no serious/critical violations", async ({
+    page,
+  }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+    await page.getByRole("button", { name: data.defaultWorkspaceName }).click();
+    await page.getByRole("menuitem", { name: new RegExp(data.otherWorkspaceName) }).click();
+    await page.goto("/app/integrations");
+    await page.getByRole("button", { name: "New connection" }).click();
+    await expect(page.getByRole("form", { name: "New integration connection" })).toBeVisible();
+
+    const results = await new AxeBuilder({ page }).analyze();
+    expect(seriousOrCritical(results), JSON.stringify(seriousOrCritical(results), null, 2)).toEqual(
+      [],
+    );
+  });
+
+  test("the credential-rotation form (open, on a real connection) has no serious/critical violations", async ({
+    page,
+  }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+    await page.getByRole("button", { name: data.defaultWorkspaceName }).click();
+    await page.getByRole("menuitem", { name: new RegExp(data.otherWorkspaceName) }).click();
+    await page.goto(`/app/integrations/${data.workspaceAIntegrationCalendarId}`);
+    await page.getByRole("button", { name: "Rotate credentials" }).click();
+    await expect(page.getByText("New credentials")).toBeVisible();
+
+    const results = await new AxeBuilder({ page }).analyze();
+    expect(seriousOrCritical(results), JSON.stringify(seriousOrCritical(results), null, 2)).toEqual(
+      [],
+    );
+  });
+
+  test("the webhook endpoint create form (open) has no serious/critical violations", async ({
+    page,
+  }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+    await page.getByRole("button", { name: data.defaultWorkspaceName }).click();
+    await page.getByRole("menuitem", { name: new RegExp(data.otherWorkspaceName) }).click();
+    await page.goto("/app/integrations?tab=webhooks");
+    await page.getByRole("button", { name: "New endpoint" }).click();
+    await expect(page.getByRole("form", { name: "New webhook endpoint" })).toBeVisible();
+
+    const results = await new AxeBuilder({ page }).analyze();
+    expect(seriousOrCritical(results), JSON.stringify(seriousOrCritical(results), null, 2)).toEqual(
+      [],
+    );
+  });
+
+  test("the redrive confirmation dialog (real failed delivery) has no serious/critical violations", async ({
+    page,
+  }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+    await page.getByRole("button", { name: data.defaultWorkspaceName }).click();
+    await page.getByRole("menuitem", { name: new RegExp(data.otherWorkspaceName) }).click();
+    await page.goto(
+      `/app/integrations/deliveries/${data.workspaceAWebhookDeliveryFailedDisabledEndpointId}`,
+    );
+    await page.getByRole("button", { name: "Redrive delivery" }).click();
+    await expect(page.getByRole("dialog", { name: "Redrive this delivery?" })).toBeVisible();
+
+    const results = await new AxeBuilder({ page }).analyze();
+    expect(seriousOrCritical(results), JSON.stringify(seriousOrCritical(results), null, 2)).toEqual(
+      [],
+    );
+  });
+
+  // Permission-denied/error state (master prompt Part K §40): the real
+  // support_agent role in Workspace B has neither CanManageIntegrations nor
+  // CanManageWebhooks — no mutation controls render at all, which is itself
+  // the state under test here (RBAC is server-authoritative; the frontend's
+  // read-only rendering must remain accessible on its own).
+  test("Integrations surfaces for a role without manage permissions have no serious/critical violations", async ({
+    page,
+  }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+    // Default active workspace is B (support_agent) — no workspace switch.
+    await page.goto(`/app/integrations/webhooks/${data.workspaceBWebhookEndpointId}`);
+    await expect(page.getByRole("button", { name: "Edit" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Rotate signing secret" })).toHaveCount(0);
+
+    const results = await new AxeBuilder({ page }).analyze();
+    expect(seriousOrCritical(results), JSON.stringify(seriousOrCritical(results), null, 2)).toEqual(
+      [],
+    );
+  });
 });
 
 test.describe("Keyboard-only pass", () => {

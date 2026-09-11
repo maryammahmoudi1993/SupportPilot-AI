@@ -128,6 +128,40 @@ for (const viewport of VIEWPORTS) {
         await assertNoHorizontalOverflow(page);
       });
     }
+
+    // Phase 22 Chunk 4 (final integrations/webhook acceptance gate, Part L
+    // §43): Integration Connection / Webhook Endpoint / Webhook Delivery
+    // list/detail surfaces, at every required viewport.
+    const INTEGRATION_WEBHOOK_PAGES: {
+      name: string;
+      path: (data: ReturnType<typeof e2eData>) => string;
+    }[] = [
+      { name: "Integrations: connection list", path: () => "/app/integrations" },
+      {
+        name: "Integrations: connection detail (Stripe)",
+        path: (data) => `/app/integrations/${data.workspaceBIntegrationStripeId}`,
+      },
+      { name: "Integrations: webhook endpoints tab", path: () => "/app/integrations?tab=webhooks" },
+      {
+        name: "Integrations: webhook endpoint detail",
+        path: (data) => `/app/integrations/webhooks/${data.workspaceBWebhookEndpointId}`,
+      },
+      { name: "Integrations: deliveries tab", path: () => "/app/integrations?tab=deliveries" },
+      {
+        name: "Webhook delivery detail (failed, redrivable)",
+        path: (data) => `/app/integrations/deliveries/${data.workspaceBWebhookDeliveryFailedId}`,
+      },
+    ];
+
+    for (const { name, path } of INTEGRATION_WEBHOOK_PAGES) {
+      test(`${name} has no horizontal overflow`, async ({ page }) => {
+        const data = e2eData();
+        await login(page, data.primaryEmail, data.primaryPassword);
+        await page.goto(path(data));
+        await expect(page.locator("table, h1, h2, h3, form").first()).toBeVisible();
+        await assertNoHorizontalOverflow(page);
+      });
+    }
   });
 }
 
@@ -303,6 +337,77 @@ test.describe("Mobile shell (375px)", () => {
     await form.getByRole("button", { name: "Upload" }).click();
 
     await expect(page.getByText("This upload was rejected")).toBeVisible();
+    await assertNoHorizontalOverflow(page);
+  });
+
+  // Phase 22 Chunk 4 (final integrations/webhook acceptance gate, Part L
+  // §44): at 375px, credential inputs, the webhook one-time-secret-reveal
+  // flow, and event-subscription checkboxes all remain usable without
+  // clipping — and the raw secret is never left visible after dismissal.
+  test("Webhook endpoint create form is usable at mobile width: fields, event subscriptions, and the one-time secret reveal are all readable and dismissable", async ({
+    page,
+  }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+    await page.getByRole("button", { name: data.defaultWorkspaceName }).click();
+    await page.getByRole("menuitem", { name: new RegExp(data.otherWorkspaceName) }).click();
+    await page.goto("/app/integrations?tab=webhooks");
+    await page.getByRole("button", { name: "New endpoint" }).click();
+
+    const form = page.getByRole("form", { name: "New webhook endpoint" });
+    await expect(form.getByLabel("Name")).toBeVisible();
+    await expect(form.getByLabel("Destination URL")).toBeVisible();
+    await expect(form.getByLabel(/approval requested/i)).toBeVisible();
+    await assertNoHorizontalOverflow(page);
+
+    await form.getByLabel("Name").fill("Mobile relay");
+    await form.getByLabel("Destination URL").fill("https://example.com/hooks/e2e-mobile");
+    await form.getByLabel(/approval requested/i).check();
+    await form.getByRole("button", { name: "Create endpoint" }).click();
+
+    const secretPanel = page.getByRole("alert", { name: "Webhook signing secret" });
+    await expect(secretPanel).toBeVisible();
+    await assertNoHorizontalOverflow(page);
+
+    // The real button label carries a typographic apostrophe ("I’ve"), not
+    // a straight one — matched by substring so this doesn't silently drift
+    // out of sync with the component's copy again.
+    await page.getByRole("button", { name: /saved this secret/i }).click();
+    await expect(secretPanel).toBeHidden();
+  });
+
+  // Phase 22 Chunk 4 (final integrations/webhook acceptance gate, Part L
+  // §44): a real credential-bearing provider's fields remain usable at
+  // 375px, and a submitted secret is absent from the rendered page
+  // afterwards. Uses credential ROTATION on the pre-seeded Workspace A
+  // Google Calendar connection (`workspaceAIntegrationCalendarId`, created
+  // once in `global-setup.ts`) rather than a new CREATE: every provider
+  // slot `uniq_integration_conn_ws_provider` allows in Workspace A is
+  // already claimed by the real-backend mutation spec's own connections
+  // (demo_commerce/email/stripe) plus this pre-seeded calendar fixture, so
+  // a fifth create in the same workspace would collide — the same class of
+  // fixture collision documented as PHASE22-3-03 below.
+  test("Credential rotation (Google Calendar) is usable at mobile width: fields readable, submitted secret never rendered back", async ({
+    page,
+  }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+    await page.getByRole("button", { name: data.defaultWorkspaceName }).click();
+    await page.getByRole("menuitem", { name: new RegExp(data.otherWorkspaceName) }).click();
+    await page.goto(`/app/integrations/${data.workspaceAIntegrationCalendarId}`);
+    await page.getByRole("button", { name: "Rotate credentials" }).click();
+
+    const rotateSecretField = page.getByLabel(/service account/i);
+    await expect(rotateSecretField).toBeVisible();
+    await assertNoHorizontalOverflow(page);
+
+    await rotateSecretField.fill('{"type": "service_account", "project_id": "mobile-e2e"}');
+    await page.getByRole("button", { name: "Rotate credentials" }).click();
+    await expect(page.getByRole("dialog", { name: "Rotate credentials?" })).toBeVisible();
+    await page.getByRole("dialog").getByRole("button", { name: "Rotate credentials" }).click();
+
+    await expect(page.getByRole("button", { name: "Rotate credentials" })).toBeVisible();
+    await expect(page.getByText("mobile-e2e")).toHaveCount(0);
     await assertNoHorizontalOverflow(page);
   });
 
