@@ -63,6 +63,23 @@ export interface E2EData {
   workspaceAKnowledgeDocumentProcessingId: string;
   workspaceARetrievalSourceId: string;
   workspaceARetrievalDocumentId: string;
+  workspaceAKnowledgeJourneySourceId: string;
+  workspaceAKnowledgeJourneySourceName: string;
+  workspaceBIntegrationStripeId: string;
+  workspaceBIntegrationEmailId: string;
+  workspaceAIntegrationCalendarId: string;
+  workspaceBWebhookEndpointId: string;
+  workspaceBWebhookEndpointDisabledId: string;
+  workspaceBWebhookDeliveryPendingId: string;
+  workspaceBWebhookDeliveryClaimedId: string;
+  workspaceBWebhookDeliveryDeliveredId: string;
+  workspaceBWebhookDeliveryRetryScheduledId: string;
+  workspaceBWebhookDeliveryDeadId: string;
+  workspaceBWebhookDeliveryFailedId: string;
+  workspaceAWebhookEndpointId: string;
+  workspaceAWebhookDeliveryId: string;
+  workspaceAWebhookEndpointDisabledId: string;
+  workspaceAWebhookDeliveryFailedDisabledEndpointId: string;
 }
 
 let cached: E2EData | null = null;

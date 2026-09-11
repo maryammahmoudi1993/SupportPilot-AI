@@ -1752,6 +1752,471 @@ duplicate filenames are allowed, and the pre-existing dev-only
 `js-yaml`/`@redocly/openapi-core` audit advisory remains untouched
 (production dependencies: 0 vulnerabilities throughout).
 
+### Integration Connections (Phase 22 Chunk 1)
+
+Read-only foundation over the real, already-built backend integrations
+domain (`backend/integrations/`, a Phase 7 feature — nothing about provider
+adapters, credential encryption, or the connection lifecycle was redesigned
+or invented for the frontend). One real, workspace-scoped entity —
+`IntegrationConnection` — is exposed. Webhook endpoints/deliveries and
+notification delivery are real, separate backend domains
+(`backend/webhooks/`, `backend/notifications/`) explicitly **out of scope**
+for this chunk (Chunk 2/3) — see "Deferred Phase 22 capabilities" below.
+
+**Public API contract discovered** (verified against
+`integrations/views.py`, `integrations/selectors.py`,
+`integrations/serializers.py`, and `integrations/permissions.py` — never
+inferred from models/services alone):
+
+| Capability | Status |
+| --- | --- |
+| Connection list/detail | **Real**, implemented this chunk. `GET .../integrations/`, `GET .../integrations/{id}/`. Any active workspace member can read (no manage permission required). |
+| Create connection | Real endpoint (`POST .../integrations/`, owner/admin only) — **not implemented this chunk**. Accepts raw provider credentials directly; deferred to a later chunk once its credential-entry UI can be reviewed on its own (see "Mutation deferral decision" below). |
+| Update configuration | Real (`PATCH .../integrations/{id}/`, owner/admin only, non-secret `display_name`/`configuration` only) — **not implemented this chunk**. |
+| Rotate credentials | Real (`PUT .../integrations/{id}/credentials/`, owner/admin only, throttled as a sensitive mutation) — **not implemented this chunk**. Accepts raw credentials directly, same deferral reasoning as create. |
+| Enable/disable | Real (`PATCH .../integrations/{id}/enabled/`, owner/admin only) — **not implemented this chunk**. |
+| Test connection | Real (`POST .../integrations/{id}/test/`, owner/admin only) — **not implemented this chunk**. A genuine mutation (persists `last_checked_at`/`last_success_at`/`last_error_code`), not read-only metadata, so it doesn't qualify for this chunk's "embed as read-only detail metadata" allowance. |
+| OAuth | **Not supported at all.** No OAuth initiation/callback endpoint exists anywhere in `integrations/urls.py` — credentials are always submitted directly (API keys, tokens, refresh tokens, depending on provider). No "Connect with Stripe"-style flow was built or implied. |
+| Provider catalog | Server-owned enum only (`integrations/models.py IntegrationProvider`) — `stripe`, `google_calendar`, `email`, `demo_commerce`. No public catalog/discovery endpoint; mirrored (not imported) in `features/integrations/components/integration-badges.tsx`, same pattern as every other domain's status-label mirror. |
+| Webhook endpoints/deliveries | Real, separate domain (`backend/webhooks/`) with its own full public CRUD + redrive contract — **not implemented this chunk** (Chunk 2). |
+| Notifications | **Internal only** — `backend/notifications/` has no `urls.py`/`views.py`/`serializers.py` at all; verified directly against the app's file listing and `config/urls.py`'s route table (notifications are never `include()`d). No public API exists for this chunk (or any chunk) to expose. |
+
+**Mutation deferral decision** (master prompt Part J §35): this chunk
+implements list + detail only. Every one of the five write endpoints above
+is a real, unambiguous backend contract, but each either accepts raw
+provider credentials directly (create, credential rotate) or is a
+genuinely separate operational action (enable/disable, test) that deserves
+its own reviewed UI rather than being bolted onto a foundation chunk. None
+is essential to make the Connections UI operational — a workspace's
+connections already exist from earlier-phase business-integration setup
+(real E2E fixtures below are created directly via the ORM, exactly as a
+real Phase 7 setup flow would persist them), so a read-only list/detail is
+a fully real, useful surface on its own. See `features/integrations/types.ts`
+for the same decision recorded next to the code.
+
+**Credential safety**: `IntegrationConnectionSerializer`
+(`integrations/serializers.py`) never includes `encrypted_credentials` or
+any plaintext — its field list is exhaustive and secret-free by
+construction. The only credential signal this chunk ever renders is the
+boolean `credentials_configured` ("Configured"/"Not configured") plus the
+opaque `credential_version` counter (a rotation counter, never a secret
+value in itself). Proven both in a unit test (asserting the raw DOM never
+contains `encrypted_credentials` or a `"credentials":` key) and the
+real-backend E2E smoke (a real Stripe connection seeded with a genuine
+encrypted API-key-shaped credential; the rendered page HTML, `localStorage`,
+`sessionStorage`, and URL are all asserted to never contain it).
+
+**Statuses**: `IntegrationConnection.status` — `active`, `disabled`,
+`invalid_credentials`, `degraded` (`IntegrationConnectionStatusEnum`). An
+unrecognized future status renders safely via the shared `EnumBadge`
+fallback, same as every other domain — proven in both a unit test and the
+real-backend E2E smoke.
+
+**Filters/pagination**: `IntegrationConnectionListCreateView` declares no
+`filter_backends` and no `ordering_fields` at all (verified directly against
+`integrations/views.py`) — the generated OpenAPI schema types
+`ordering`/`search` anyway (Category B schema gap, same shape as Knowledge's
+document-list gap), but both are dead: the list is always ordered
+`provider, id` (`integrations/selectors.py connection_list_for_workspace`)
+and cannot be filtered or searched. Real DRF `PageNumberPagination`
+(`page`/`page_size`, 50/page default) still applies — `page` is the only
+real, exposed list param this chunk's UI offers.
+
+**Routes**: one canonical route family, `/app/integrations` (list) and
+`/app/integrations/[connectionId]` (detail) — matching the master prompt's
+preferred shape. One top-level nav entry, "Integrations" — not separate
+Webhooks/Notifications/Deliveries entries; those, once implemented, will
+live under this same route family as tabs/subroutes rather than new
+top-level nav items (master prompt Part G §27).
+
+**Server state**: `["workspaces", wsId, "integrations", "connections", "list"|"detail", ...]`
+query keys (`features/integrations/query-keys.ts`) — same workspace-first
+policy as every other domain. No polling: unlike a Knowledge document's
+ingestion status, a connection's `status`/`last_checked_at` only ever change
+as the result of an explicit operator action this chunk doesn't expose yet,
+so there is no asynchronous state for a detail-page poll to watch.
+
+**Content safety**: `configuration` (arbitrary non-secret provider JSON) is
+rendered through the existing shared `StructuredPayload` viewer
+(`JSON.stringify` into a `<pre>`, never `dangerouslySetInnerHTML`) — proven
+both in a unit test and the real-backend E2E smoke with genuine
+HTML/script-looking configuration content that renders as inert text.
+
+**Deferred Phase 22 capabilities** (real backend endpoints exist; no
+frontend surface yet): connection create/update/credential-rotate/
+enable-disable/test, webhook endpoint management, webhook delivery
+visibility/redrive. Notifications have no public API at all (see the
+contract table above) and are not planned for any later chunk unless a real
+public endpoint is added first.
+
+**Known Phase 22 Chunk 1 schema gaps** (none blocking):
+
+| Endpoint | Gap | Blocking? |
+| --- | --- | --- |
+| `integrations_list` | Generated schema types `ordering`/`search`; neither is real (no filter backend on the view at all). Only `page` is real. | No — narrowed locally in `features/integrations/api.ts`. |
+| `integrations_create` (deferred) | Generated 201 response is typed as `IntegrationConnectionCreate` (the *request* shape) instead of the real full `IntegrationConnection` body (`IntegrationConnectionListCreateView.create` returns `IntegrationConnectionSerializer(connection).data`). | No — not exercised this chunk (create is deferred); documented for whichever later chunk implements it. |
+
+### Webhook Endpoints + Deliveries (Phase 22 Chunk 2)
+
+Read-only operational visibility over the real, already-built backend
+webhooks domain (`backend/webhooks/`, a Phase 10 feature). Two real,
+workspace-scoped entities are exposed — `WebhookEndpoint` and
+`WebhookDelivery` — as two more tabs on the same `/app/integrations` page
+Chunk 1 built (master prompt Part E §17: one coherent Integrations section,
+never a separate top-level Webhooks/Deliveries nav entry).
+
+**Public API contract discovered** (verified against `webhooks/views.py`,
+`webhooks/selectors.py`, `webhooks/serializers.py`, `webhooks/services.py`,
+and `webhooks/permissions.py` — never inferred from models/services alone):
+
+| Capability | Status |
+| --- | --- |
+| Endpoint list/detail | **Real**, implemented this chunk. `GET .../webhooks/endpoints/`, `GET .../webhooks/endpoints/{id}/`. Any active workspace member can read. |
+| Endpoint create | Real (`POST .../webhooks/endpoints/`, support_manager/admin/owner) — **not implemented this chunk**. Accepts a raw destination URL and produces a raw signing secret, once. |
+| Endpoint update | Real (`PATCH .../webhooks/endpoints/{id}/`, name/url/subscribed_event_types) — **not implemented this chunk**. |
+| Endpoint enable/disable | Real (`PATCH .../webhooks/endpoints/{id}/status/`) — **not implemented this chunk**. |
+| Rotate signing secret | Real (`POST .../webhooks/endpoints/{id}/rotate-secret/`, throttled as a sensitive mutation) — **not implemented this chunk**. |
+| Endpoint delete | **Not a real endpoint at all.** No delete view exists in `webhooks/urls.py` — an endpoint can only be disabled, never deleted, through the public API. |
+| Delivery list/detail | **Real**, implemented this chunk. `GET .../webhooks/deliveries/`, `GET .../webhooks/deliveries/{id}/`. Any active workspace member can read (same permission as endpoints — not the manage-only permission Chunk 1 assumed for Integrations). |
+| Redrive | Real (`POST .../webhooks/deliveries/{id}/redrive/`, support_manager/admin/owner, only from a terminal `failed`/`dead` delivery) — **discovered and documented, not implemented this chunk** (master prompt Part D §16 — Chunk 3 territory). |
+| Individual attempt rows | **Not a real endpoint at all.** `DeliveryAttempt` is a real model (`notifications/models.py`) with no public list/detail view anywhere — `WebhookDeliverySerializer` only ever exposes the aggregate `attempt_count`/`max_attempts` plus the single latest attempt's `last_http_status` (a `SerializerMethodField` reading `delivery.attempts.order_by("-attempt_number").first()`). No per-attempt timeline is fetched or fabricated. |
+| Request payload / response body / headers | **Not exposed by any public serializer at all** — verified directly against `WebhookDeliverySerializer`'s exhaustive field list. There is nothing to render as untrusted response content beyond the already-safe `last_error_code` string and `last_http_status` integer. |
+
+**Mutation deferral decision** (same posture as Chunk 1's Integration
+Connections decision, master prompt's explicit "read/operations visibility"
+framing for this chunk): every write endpoint above is real, but each
+either accepts a raw destination URL/produces a raw signing secret (create,
+rotate) or is a genuine operational mutation (status, redrive) the master
+prompt explicitly reserves for a later chunk. Redrive in particular was
+fully discovered (allowed states: only `failed`/`dead`; reuses the same
+logical `WebhookDelivery`/event, never creates a second one; grants
+`WEBHOOKS_REDRIVE_ATTEMPT_ALLOWANCE` additional attempts by raising
+`max_attempts`; a disabled endpoint is rejected before any state change) but
+deliberately has no UI control yet.
+
+**Endpoint model**: `status` — `active`/`disabled`
+(`WebhookEndpointStatusEnum`). `subscribed_event_types` — a real
+`WebhookEventType` allowlist (`approval.requested`, `approval.approved`,
+`approval.rejected`, `approval.expired`, `handoff.created`); an unrecognized
+value falls back safely. The destination URL is real, workspace-member-
+visible configuration data — shown as plain text, **never** auto-linked (no
+existing safe-external-link policy in this app covers an arbitrary
+operator-entered destination) and never injected into HTML.
+
+**Signing secret safety**: never returned by list/detail at all — only
+`secret_configured` (bool) and `secret_created_at` (timestamp) are ever
+rendered, proven in both a unit test (asserting the raw DOM never contains
+`encrypted_signing_secret` or a `"signing_secret":` key) and the
+real-backend E2E smoke (a real endpoint seeded with a genuine encrypted
+signing secret; page HTML/`localStorage`/`sessionStorage` all asserted to
+never contain it).
+
+**Delivery model**: `status` is one of the real
+`notifications.models.DeliveryStatus` values — `pending`, `claimed`,
+`retry_scheduled`, `delivered`, `failed`, `dead`
+(`DELIVERY_TERMINAL_STATUSES` = delivered/failed/dead). Attempt
+representation is Option A (one `WebhookDelivery` row + `attempt_count`/
+`max_attempts` + latest `last_http_status` only — see the contract table
+above), never a fabricated per-attempt timeline.
+
+**At-least-once honesty** (master prompt Part D §14): this platform never
+guarantees exactly-once external delivery — the delivery detail page states
+this explicitly ("Delivered" means the endpoint returned 2xx *at least
+once*, not that it was called exactly once). Automatic retry is real,
+deterministic, bounded exponential backoff
+(`notifications/backoff.py compute_retry_delay_seconds`, base/cap server
+settings only) — never estimated or countdown-animated client-side; the
+real `next_attempt_at` timestamp is shown as-is, and **only** while the
+delivery is non-terminal (`Delivery.next_attempt_at` is never null, but its
+value is stale/meaningless once terminal — never labeled as a real retry
+ETA for a settled delivery).
+
+**Schema gaps** (Category B, all non-blocking): the generated
+`WebhookDelivery.status`/`event_type` fields are typed plain `string` (no
+enum at all — `webhooks/serializers.py WebhookDeliverySerializer` declares
+`status`/`event_type` as plain `CharField(source=...)` on a non-
+`ModelSerializer`, which drf-spectacular can't infer choices from); the
+real values are mirrored locally in `features/webhooks/types.ts`.
+`WebhookDelivery.delivered_at`/`failed_at` are typed as required non-null
+`string`, but the real model fields are nullable and DRF's read
+serialization passes a `None` model value through as JSON `null` regardless
+of `allow_null` — widened to `string | null` via `SafeWebhookDelivery`/
+`toSafeWebhookDelivery`. `WebhookEndpoint.subscribed_event_types` is typed
+`unknown` (no element type inferable for a plain `JSONField(default=list)`)
+— narrowed via `subscribedEventTypes()`. Same `ordering`/`search`-typed-but-
+dead, only-`page`-is-real gap as Integrations' Chunk 1 list (no
+`filter_backends` on either webhooks list view).
+
+**Routes**: `/app/integrations?tab=webhooks` and `?tab=deliveries` (list),
+`/app/integrations/webhooks/[endpointId]` and
+`/app/integrations/deliveries/[deliveryId]` (detail) — no new top-level nav
+entry. **Server state**:
+`["workspaces", wsId, "integrations", "webhooks", "endpoints"|"deliveries", "list"|"detail", ...]`
+query keys (`features/webhooks/query-keys.ts`), nested under the same
+`integrations` root as connections. **Polling**: only Delivery *detail*
+polls, and only while non-terminal — same `refetchInterval`-reads-latest-
+data pattern as Knowledge's document polling; the Delivery *list* and
+Endpoint list/detail are never polled.
+
+**Notifications**: confirmed, again, to have no public API at all
+(`backend/notifications/` has no `urls.py`/`views.py`/`serializers.py`,
+never `include()`d in `config/urls.py`) — no Notifications UI exists or is
+planned for any later chunk unless a real public endpoint is added first.
+
+**Real-backend E2E note**: every delivery status fixture
+(`e2e/global-setup.ts`) is reached through the real, pure-DB
+`notifications.services` functions (`claim_delivery`/
+`complete_delivery_success`/`complete_delivery_failure`) against a
+`Delivery` row created directly via the ORM — deliberately **not**
+`notifications.services.create_delivery`, whose real `transaction.on_commit`
+Celery dispatch would otherwise be picked up by this suite's real worker and
+attempt genuine outbound HTTP delivery to the fixture's destination URL
+(caught and fixed during this chunk's own real-backend run — see the Chunk
+2 defect ledger). No live external webhook destination is ever contacted by
+this suite.
+
+### Integration and Webhook Mutations (Phase 22 Chunk 3)
+
+Safe, real public mutations for the two Chunk 1/2 surfaces — Integration
+Connections and Webhook Endpoints — plus Webhook Delivery redrive, all
+gated on the real backend RBAC re-discovered from
+`integrations/permissions.py`/`webhooks/permissions.py`, never a frontend
+assumption.
+
+**Connection mutation contract** (`integrations/views.py`,
+`integrations/services.py`, `integrations/schemas.py`):
+
+| Mutation | Endpoint | Permission | Status |
+| --- | --- | --- | --- |
+| Create | `POST .../integrations/` | owner/admin (`CanManageIntegrations`) | Implemented |
+| Update (display name, configuration) | `PATCH .../integrations/{id}/` | owner/admin | Implemented |
+| Credential rotation | `PUT .../integrations/{id}/credentials/` | owner/admin, throttled (`sensitive_mutation`) | Implemented |
+| Enable/disable | `PATCH .../integrations/{id}/enabled/` | owner/admin | Implemented |
+| Test connection | `POST .../integrations/{id}/test/` | owner/admin | Implemented |
+
+**Provider credential/configuration schemas are real and exact**
+(`integrations/schemas.py` — `pydantic`, `extra="forbid"`), so this chunk
+builds real named fields per provider rather than a free-form secret
+editor: Stripe (`secret_key`), Google Calendar (`service_account_info` — a
+full service-account JSON key, genuinely unbounded by the real schema
+itself, hence the one JSON textarea; configuration `calendar_id`), Email
+(`host`/`port`/`username`/`password`/`use_tls`; configuration
+`from_email`), Demo commerce (no credentials at all; configuration
+`orders`/`shipments`, a genuinely free-form demo catalog per the real
+schema — the second JSON textarea). `demo_commerce` is the one provider
+with no secret material and no real network call at all
+(`integrations/providers/demo_commerce.py` — `probe()` always returns
+`None`, always used regardless of `INTEGRATIONS_LIVE_PROVIDERS_ENABLED`),
+so it is both the form's default selection and the only provider this
+chunk's real-backend E2E creates/edits/rotates/enables/disables/tests
+end-to-end. Stripe/Google/Email are exercised only for their real client-
+side field shapes and secret-absence-after-mutation (an `email`
+connection's password is proven absent from the DOM/`localStorage`/
+`sessionStorage`/URL after a confirmed create) — `INTEGRATIONS_LIVE_PROVIDERS_ENABLED`
+is `False` by default, so even a live create for those three providers
+would resolve to the deterministic in-process fake adapter, never real
+Stripe/Google/SMTP traffic; this chunk still never submits real credentials
+for them.
+
+**Webhook endpoint mutation contract** (`webhooks/views.py`,
+`webhooks/services.py`):
+
+| Mutation | Endpoint | Permission | Status |
+| --- | --- | --- | --- |
+| Create | `POST .../webhooks/endpoints/` | support_manager/admin/owner (`CanManageWebhooks`) | Implemented |
+| Update (name, URL, subscribed events) | `PATCH .../webhooks/endpoints/{id}/` | support_manager/admin/owner | Implemented |
+| Enable/disable | `PATCH .../webhooks/endpoints/{id}/status/` | support_manager/admin/owner | Implemented |
+| Rotate signing secret | `POST .../webhooks/endpoints/{id}/rotate-secret/`, throttled | support_manager/admin/owner | Implemented |
+| Delete | — | — | **Absent** — no delete view exists in `webhooks/urls.py`; confirmed again this chunk. No delete control was built. |
+
+**One-time secret reveal**: both endpoint create and secret rotation return
+the plaintext signing secret exactly once, in the mutation response body
+only (`webhooks/views.py _reveal_secret_once` /
+`WebhookRotateSecretResponseSerializer`) — never on any subsequent read.
+The UI shows it in a dismissible panel immediately after a confirmed
+success and never persists it (no `localStorage`/`sessionStorage`, no
+re-render after the panel is dismissed); proven in both component tests
+and the real-backend E2E (the created/rotated secret value is asserted
+absent from the page's HTML immediately after dismissal).
+
+**URL/SSRF validation stays entirely backend-authoritative**
+(`webhooks/security.py resolve_and_validate` — a fail-closed
+global-routability allowlist: loopback/private/link-local/cloud-metadata/
+carrier-grade-NAT/benchmarking/documentation ranges are all rejected, and
+even *creating* an endpoint against one of those addresses is rejected
+synchronously by `_best_effort_ssrf_check` at create/update time, before
+any delivery is ever scheduled). The frontend never weakens or duplicates
+this — it submits whatever URL the operator enters and renders the real
+server validation error verbatim.
+
+**Redrive** (`webhooks/services.py redrive_webhook_delivery`): shown only
+for a `failed`/`dead` delivery and an authorized role
+(`isRedrivableDeliveryStatus`/`canManageWebhooks`, both UX-only — the
+backend re-checks both independently). Reuses the exact same logical
+`WebhookDelivery`/event (never creates a second one), grants
+`WEBHOOKS_REDRIVE_ATTEMPT_ALLOWANCE` additional attempts by raising
+`max_attempts`, and rejects a disabled endpoint before any delivery-state
+change. The confirmation dialog is deliberately honest about at-least-once
+semantics — it never says "safe retry," "exactly once," or "will not
+duplicate," because a redrive really can cause an external side effect to
+be repeated if an earlier attempt actually reached the endpoint.
+
+**Critical safety limitation, by design (not a defect)**: a genuinely
+*successful* redrive always schedules a real Celery dispatch on commit
+(`redrive_webhook_delivery`'s `transaction.on_commit(partial(
+dispatch_delivery_for_processing, ...))`), which — in an environment
+running a real Celery worker against the real Redis broker, as this
+project's E2E suite deliberately does (Phase 22 Chunk 1A) — would attempt
+genuine outbound HTTP to whatever URL the delivery's endpoint carries.
+This repository has no safe, non-internet transport to substitute (unlike
+`integrations.providers.factory`'s fake adapters, `webhooks/transport.py`
+has no settings-gated fake; its only test seam, `pool_factory`, is a
+backend-internal `pytest` parameter, not reachable from outside the
+process). Consequently:
+
+- The real-backend E2E proves only redrive's **rejection** paths: a
+  disabled endpoint (click-through, with a real confirmation dialog and a
+  real server rejection rendered honestly, never a fabricated "queued"
+  message), an already-non-terminal delivery (`webhook_delivery_not_redrivable`,
+  400 — every `WebhookError` subclass in `webhooks/errors.py` inherits
+  `SafeAPIError`'s default `status_code`, never overridden to 409; see
+  PHASE22-3-02 below), an unauthorized role (403), and a foreign-workspace
+  delivery (404) — see `e2e/integration-webhook-mutations.spec.ts`.
+- The **successful** redrive path (button disappears once the delivery is
+  no longer redrivable, the real "Delivery queued for another attempt."
+  message stays visible, the delivery list/detail refetch) is proven only
+  by component tests against a mocked response
+  (`src/tests/features/webhooks/redrive-delivery-control.test.tsx`), never
+  against the real backend.
+- Both the Django and Celery worker logs were grepped after every E2E run
+  in this chunk for `handle_webhook_delivery_attempt`/`send_pinned_request`
+  — zero occurrences, confirming no real outbound HTTP transport attempt
+  ever executed.
+
+**Mutation safety conventions** (every mutation hook in
+`features/integrations/mutations.ts`/`features/webhooks/mutations.ts`):
+`retry: 0` (no blind automatic resubmission of a create/rotate/status/
+redrive request); every destructive/sensitive action (disable, credential/
+secret rotation, redrive) requires an explicit `ConfirmDialog`
+(`components/ui/confirm-dialog.tsx`, a Radix Dialog — focus trap, Escape-
+to-close, focus return, `aria-modal`) before the mutation fires, and the
+dialog's own confirm button disables itself while the request is in
+flight so a duplicate click cannot queue a second request; success
+handlers invalidate/replace only the affected connection/endpoint/delivery
+query, never the whole cache.
+
+**Schema gap**: the generated `IntegrationConnectionCreate` operation types
+its 201 response as the *request* shape (same drf-spectacular limitation as
+every other `Serializer`-only create response in this codebase) rather than
+the real `IntegrationConnectionSerializer` body `IntegrationConnectionListCreateView.create`
+actually returns — an explicit, narrow cast at the one call site, same
+pattern as `createKnowledgeSource`.
+
+### Refresh-token rotation concurrency (Phase 22 Chunk 3A)
+
+The backend rotates the HttpOnly refresh cookie on every successful
+`POST /api/v1/auth/refresh/` and blacklists the token just used
+(`config/settings.py SIMPLE_JWT["ROTATE_REFRESH_TOKENS"]`/
+`["BLACKLIST_AFTER_ROTATION"]`, both `True`) — a deliberate, non-negotiable
+security property never weakened by anything below (see
+`backend/accounts/tests/test_auth_views.py
+test_old_refresh_token_cannot_be_reused`, unchanged and still passing).
+`ensureFreshAccessToken()` (`src/lib/api/session.ts`) already deduped
+concurrent refresh callers *within one document* via a module-level
+`refreshInFlight` promise; this chunk closes two further real races that
+same-document dedup cannot reach:
+
+1. **Cross-tab/cross-document racing**: two independent documents (most
+   realistically, two open tabs) can each read the same not-yet-rotated
+   refresh cookie and both attempt to refresh with it — only one wins, the
+   other gets a real, correct 401 (genuine token reuse) and could be pushed
+   to `/login`. `withCrossTabRefreshLock` (`src/lib/api/refresh-lock.ts`)
+   serializes every refresh attempt across the whole origin via the **Web
+   Locks API** (`navigator.locks`, feature-detected — an environment
+   without it, including this project's Vitest/jsdom unit tests, falls
+   back to the pre-existing same-document-only behavior, never worse than
+   before). No data of any kind — session-derived or otherwise — passes
+   through the lock; only a fixed, static lock name coordinates ordering.
+   Each document still performs its own real refresh call and gets its own
+   real access token (in-memory only, per `token-store.ts` — access tokens
+   are never shared between documents by design); the lock only ever
+   changes *when* that call is sent.
+2. **Response loss on navigation**: a hard navigation starting mid-request
+   can sever the connection *after* the backend has already committed a
+   rotation but *before* the browser applies the response's `Set-Cookie`.
+   `keepalive: true` on the refresh fetch lets the browser finish that one
+   in-flight request in the background, including applying its
+   `Set-Cookie`, even after the initiating document is gone — the same
+   mechanism `navigator.sendBeacon` relies on.
+
+**Verified real-backend E2E** (`e2e/auth-refresh-concurrency.spec.ts`):
+two tabs bootstrapping concurrently both end up authenticated against the
+same cookie (every observed refresh response is a real 200); a genuinely
+revoked session converges every concurrent bootstrap to `/login` with
+exactly one refresh attempt per document — no storm, no loop, no stuck
+spinner.
+
+**Known, tracked residual gap**: a third scenario — two hard navigations
+fired with *zero* settle time between them in a single tab — still has an
+open race (`e2e/auth-refresh-concurrency.spec.ts`'s `test.fixme`,
+reproduced directly in ~1 of 3 runs during this chunk's investigation).
+`navigator.locks` releases a document's lock the instant that document is
+torn down, but a `keepalive: true` request it started can still be
+completing on the wire *after* that release — a second, freshly-navigated
+document can then acquire the now-free lock and send its own refresh
+using the still-old cookie while the first (abandoned) document's request
+is still in flight server-side, reopening the exact race the lock exists
+to prevent. This is not reachable by normal pointer/keyboard interaction
+(no real user can fire two top-level navigations this close together);
+it is a genuine gap for rapid *programmatic* navigation. Closing it fully
+would need either a persistent (Service-Worker-backed) coordinator that
+outlives any single document, or a narrow backend accommodation — the
+latter was deliberately not pursued here: any design where a request
+carrying an already-consumed refresh token could receive a successful
+rotated-token response would weaken real replay protection, and is exactly
+the class of change this project's security posture requires explicit
+human sign-off on before implementation, not a unilateral fix. See
+PHASE22-3-04 below.
+
+### Known defects — Phase 22 Chunk 3A
+
+- **PHASE22-3-04 — refresh-token rotation concurrency** (reclassified from
+  Chunk 3's initial "test infrastructure" label to **product /
+  authentication concurrency** once investigated — the original test-level
+  workaround only stopped triggering the race, it did not fix it).
+  **Severity**: medium — real product behavior, but requires either two
+  open tabs racing a bootstrap, or (for the still-open residual case) two
+  hard navigations fired with no settle time, neither of which a real
+  interactive user can trigger through normal pointer/keyboard use.
+  **Root cause**: `ensureFreshAccessToken`'s same-document
+  `refreshInFlight` mutex cannot coordinate across a hard navigation (a new
+  document is a new JS realm) or across tabs; two independent documents
+  could read the same not-yet-rotated refresh cookie and both attempt to
+  refresh, with the loser receiving a real, correct-per-the-backend 401
+  (genuine single-use-token reuse) and being pushed to `/login`.
+  **Fix**: `withCrossTabRefreshLock` (Web Locks API, `src/lib/api/
+  refresh-lock.ts`) serializes every refresh attempt across tabs/documents
+  sharing an origin, with no token material passed through the
+  coordination signal; `keepalive: true` on the refresh fetch
+  (`src/lib/api/session.ts`) prevents a navigation-severed connection from
+  silently losing a just-committed rotation's `Set-Cookie`.
+  **Replay protection preserved**: YES — unchanged backend
+  (`ROTATE_REFRESH_TOKENS`/`BLACKLIST_AFTER_ROTATION` both still `True`,
+  zero backend files modified); `test_old_refresh_token_cannot_be_reused`
+  still passes unmodified.
+  **Regression**: `e2e/auth-refresh-concurrency.spec.ts` (multi-tab
+  concurrent bootstrap, and invalid-session convergence, both real-backend,
+  both run repeatedly with no failures); full Playwright suite 239 passed /
+  1 intentionally-fixme'd / 0 failed on two consecutive full clean runs;
+  Vitest 494/494; backend focused auth suite 56/56 unmodified.
+  **Residual risk**: the third scenario above (zero-settle-time
+  back-to-back hard navigation in one tab) remains open, tracked via a
+  `test.fixme` (not deleted, not silently weakened) rather than closed —
+  closing it fully needs either a persistent cross-document coordinator
+  (Service Worker) or a backend design decision explicitly requiring human
+  sign-off before implementation (see above). No change of any kind was
+  made to backend replay-protection semantics to work around this.
+
 ## Local development
 
 1. Start the backend (see `../README.md`) so `NEXT_PUBLIC_API_BASE_URL`
@@ -2031,7 +2496,7 @@ empty/error/workspace-isolation/unknown-status coverage as every other
 domain, plus a conversation-scoped test proving only the real
 `conversation`-filtered rows render.
 
-## End-to-end tests (`e2e/`, Phase 18 Chunk 4; extended Phase 19 Chunks 1-3, Phase 20 Chunks 1-3)
+## End-to-end tests (`e2e/`, Phase 18 Chunk 4; extended Phase 19 Chunks 1-3, Phase 20 Chunks 1-3, Phase 22 Chunks 1-2)
 
 Playwright (`@playwright/test`), Chromium only — the mandatory acceptance
 browser for this phase; Firefox/WebKit weren't added (single-browser

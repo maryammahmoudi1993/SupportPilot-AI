@@ -5,11 +5,15 @@
  * This is the piece that makes the "10 parallel requests get 401, only 1
  * refresh happens" invariant hold: `ensureFreshAccessToken()` is a mutex —
  * every caller while a refresh is already in flight awaits the same
- * promise instead of starting its own.
+ * promise instead of starting its own. `refreshInFlight` is a same-document
+ * mutex only; `withCrossTabRefreshLock` (refresh-lock.ts) additionally
+ * serializes across tabs/windows/hard-navigation-replaced documents — see
+ * that module's doc comment for the full PHASE22-3-04 race this closes.
  */
 import { apiClient } from "@/lib/api/client";
 import { ensureCsrfCookie } from "@/lib/api/csrf";
 import { ApiError, normalizeTransportError } from "@/lib/api/errors";
+import { withCrossTabRefreshLock } from "@/lib/api/refresh-lock";
 import { requestWithTimeout, unwrap } from "@/lib/api/request";
 import { notifySessionExpired, setAccessToken } from "@/lib/api/token-store";
 
@@ -41,13 +45,20 @@ let refreshInFlight: Promise<RefreshResult> | null = null;
  * that couldn't reach the network at all (`network_error`/`timeout`), so a
  * caller can tell "you're logged out" from "try again" (see
  * `withAccessTokenRetry` below and AuthProvider's `error` field).
+ *
+ * Cross-tab/hard-navigation safety (PHASE22-3-04): the actual network call
+ * below runs inside `withCrossTabRefreshLock`, which additionally
+ * serializes it against every other same-origin document doing the same —
+ * never against anything else, and never sharing any token material to do
+ * so (see refresh-lock.ts). `refreshInFlight` still short-circuits a
+ * same-document duplicate call without even reaching the lock.
  */
 export function ensureFreshAccessToken(): Promise<RefreshResult> {
   if (refreshInFlight) {
     return refreshInFlight;
   }
 
-  refreshInFlight = (async (): Promise<RefreshResult> => {
+  refreshInFlight = withCrossTabRefreshLock(async (): Promise<RefreshResult> => {
     try {
       // `ensureCsrfCookie()` bounds its own priming request internally
       // (see csrf.ts) — this refresh call gets its own separate bounded
@@ -61,12 +72,36 @@ export function ensureFreshAccessToken(): Promise<RefreshResult> {
       // `normalizeTransportError` maps to a "timeout" ApiError, which
       // `isUncertainSessionError` treats the same as a plain network
       // failure — never as a confirmed invalid session.
+      //
+      // `keepalive: true` (PHASE22-3-04, reclassified — see refresh-lock.ts
+      // and README.md): a hard navigation starting while this request is
+      // still in flight normally aborts it client-side. If the request had
+      // already reached the backend by then, the *server* can still fully
+      // commit the rotation (new token issued, old one blacklisted) before
+      // the connection drops — the browser then never applies the
+      // response's `Set-Cookie`, silently leaving the cookie jar holding a
+      // refresh token the backend has already invalidated. Every later
+      // attempt (from this document or a fresh one) then fails, correctly
+      // but unrecoverably, on a token that really was already consumed —
+      // not a race between two competing rotations (the lock above already
+      // prevents that), but a single rotation whose own response was lost.
+      // `keepalive` (https://fetch.spec.whatwg.org/#request-keepalive-flag)
+      // is the browser-native primitive for exactly this: it lets the
+      // browser finish an in-flight fetch — including applying its
+      // response's `Set-Cookie` — even after the initiating document is
+      // gone, the same mechanism `navigator.sendBeacon` relies on, just
+      // with the custom CSRF header this endpoint requires. The request
+      // carries no body (well under every browser's keepalive payload
+      // cap), and the existing `signal`-based timeout still applies
+      // unchanged for a genuinely slow/hung backend — this only changes
+      // what happens on navigation-triggered abandonment, never on an
+      // explicit timeout.
       await ensureCsrfCookie();
       const body = await requestWithTimeout<RefreshResponseBody>(
         (signal) =>
           // Cast documented in the interface above: the generated response
           // type is `content?: never`, which doesn't reflect the real body.
-          apiClient.POST("/api/v1/auth/refresh/", { signal }) as unknown as Promise<{
+          apiClient.POST("/api/v1/auth/refresh/", { signal, keepalive: true }) as unknown as Promise<{
             data?: RefreshResponseBody;
             error?: unknown;
             response: Response;
@@ -82,7 +117,7 @@ export function ensureFreshAccessToken(): Promise<RefreshResult> {
     } finally {
       refreshInFlight = null;
     }
-  })();
+  });
 
   return refreshInFlight;
 }

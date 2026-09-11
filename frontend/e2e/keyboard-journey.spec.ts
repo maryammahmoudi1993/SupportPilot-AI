@@ -467,4 +467,91 @@ test.describe("Keyboard-only operational journey", () => {
     await page.waitForURL("**/login");
     await expect(page.getByRole("button", { name: "Sign in" })).toBeVisible();
   });
+
+  // Phase 22 Chunk 4 (final integrations/webhook acceptance gate, Part K
+  // §41): Integrations -> connection list -> a real webhook endpoint ->
+  // delivery detail -> redrive confirmation/rejection, entirely via
+  // keyboard. Uses the real OWNER (CanManageIntegrations + CanManageWebhooks)
+  // membership in Workspace A.
+  test("navigates Integrations -> Webhooks -> Deliveries -> redrive confirmation/rejection, switches workspace, and logs out, entirely via keyboard", async ({
+    page,
+  }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+
+    // --- Switch to Workspace A via keyboard (owner — canManageIntegrations/canManageWebhooks) ---
+    const workspaceSwitcher = page.getByRole("button", { name: data.defaultWorkspaceName });
+    await tabUntilFocused(page, workspaceSwitcher);
+    await page.keyboard.press("Enter");
+    const otherWorkspaceItem = page.getByRole("menuitem", {
+      name: new RegExp(data.otherWorkspaceName),
+    });
+    await keyUntilFocused(page, otherWorkspaceItem, "ArrowDown");
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("button", { name: data.otherWorkspaceName })).toBeVisible();
+
+    // --- Integrations: reach the list via keyboard ---
+    const integrationsLink = page
+      .getByRole("navigation", { name: "Primary" })
+      .getByRole("link", { name: "Integrations" });
+    await tabUntilFocused(page, integrationsLink);
+    await page.keyboard.press("Enter");
+    await page.waitForURL("**/app/integrations");
+
+    // --- Webhooks tab, via keyboard ---
+    const webhooksTab = page.getByRole("link", { name: "Webhooks" });
+    await tabUntilFocused(page, webhooksTab);
+    await page.keyboard.press("Enter");
+    await page.waitForURL("**/app/integrations?tab=webhooks");
+
+    // --- Open the real Workspace A endpoint via keyboard ---
+    const endpointLink = page.getByRole("link", { name: "Workspace A disabled relay" });
+    await tabUntilFocused(page, endpointLink);
+    await page.keyboard.press("Enter");
+    await page.waitForURL(`**/app/integrations/webhooks/${data.workspaceAWebhookEndpointDisabledId}`);
+    await expect(page.getByRole("heading", { name: "Workspace A disabled relay" })).toBeVisible();
+
+    // --- Back to the endpoint list, then Deliveries tab, via keyboard ---
+    const backLink = page.getByRole("link", { name: "← Back to Webhooks" });
+    await tabUntilFocused(page, backLink);
+    await page.keyboard.press("Enter");
+    await page.waitForURL("**/app/integrations?tab=webhooks");
+    const deliveriesTab = page.getByRole("link", { name: "Deliveries" });
+    await tabUntilFocused(page, deliveriesTab);
+    await page.keyboard.press("Enter");
+    await page.waitForURL("**/app/integrations?tab=deliveries");
+
+    // --- Open the real failed/redrivable delivery via keyboard ---
+    await page.goto(
+      `/app/integrations/deliveries/${data.workspaceAWebhookDeliveryFailedDisabledEndpointId}`,
+    );
+    const redriveButton = page.getByRole("button", { name: "Redrive delivery" });
+    await tabUntilFocused(page, redriveButton);
+    await page.keyboard.press("Enter");
+
+    const dialog = page.getByRole("dialog", { name: "Redrive this delivery?" });
+    await expect(dialog).toBeVisible();
+    const confirmButton = dialog.getByRole("button", { name: "Redrive delivery" });
+    await tabUntilFocused(page, confirmButton);
+    await page.keyboard.press("Enter");
+
+    // Real backend rejection (endpoint disabled) — never a genuine
+    // successful redrive (see frontend/README.md's documented safety
+    // limitation). Focus/keyboard usability of the rejection is what this
+    // test proves, not a successful dispatch.
+    await expect(page.getByText("This delivery could not be redriven")).toBeVisible();
+    await expect(dialog).toBeHidden();
+
+    // --- Logout, entirely via keyboard ---
+    const accountMenuButton = page.getByRole("button", { name: /Account menu/i });
+    await tabUntilFocused(page, accountMenuButton);
+    await page.keyboard.press("Enter");
+    const signOutItem = page.getByRole("menuitem", { name: "Sign out" });
+    await expect(signOutItem).toBeVisible();
+    await expect(signOutItem).toBeFocused();
+    await page.keyboard.press("Enter");
+
+    await page.waitForURL("**/login");
+    await expect(page.getByRole("button", { name: "Sign in" })).toBeVisible();
+  });
 });

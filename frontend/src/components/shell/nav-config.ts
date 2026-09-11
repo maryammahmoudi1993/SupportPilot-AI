@@ -13,7 +13,11 @@
  * unclickable/fake nav entry is worse than a short sidebar. Phase 20 Chunk 3
  * adds "Approvals" and "Handoffs" now that `/app/approvals` and
  * `/app/handoffs` are real. Phase 21 Chunk 1 adds "Knowledge" now that
- * `/app/knowledge` is real.
+ * `/app/knowledge` is real. Phase 22 Chunk 1 adds "Integrations" now that
+ * `/app/integrations` is real — one coherent entry per master prompt Part G
+ * §27, not separate Webhooks/Notifications/Deliveries entries (those remain
+ * deferred to a later Phase 22 chunk, and will live under this same route
+ * family as tabs/subroutes rather than new top-level nav items).
  */
 export interface NavItem {
   id: string;
@@ -31,4 +35,5 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { id: "approvals", label: "Approvals", path: "/app/approvals" },
   { id: "handoffs", label: "Handoffs", path: "/app/handoffs" },
   { id: "knowledge", label: "Knowledge", path: "/app/knowledge" },
+  { id: "integrations", label: "Integrations", path: "/app/integrations" },
 ];

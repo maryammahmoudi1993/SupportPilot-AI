@@ -14,9 +14,11 @@ import { resetAuthMockState } from "@/tests/msw/handlers";
 import { resetCustomerMockState } from "@/tests/msw/customer-handlers";
 import { resetConversationMockState } from "@/tests/msw/conversation-handlers";
 import { resetHandoffMockState } from "@/tests/msw/handoff-handlers";
+import { resetIntegrationMockState } from "@/tests/msw/integration-handlers";
 import { resetKnowledgeMockState } from "@/tests/msw/knowledge-handlers";
 import { resetTicketMockState } from "@/tests/msw/ticket-handlers";
 import { resetToolExecutionMockState } from "@/tests/msw/tool-execution-handlers";
+import { resetWebhookMockState } from "@/tests/msw/webhook-handlers";
 import { server } from "@/tests/msw/server";
 
 // jsdom's own `File` class and Node's real `fetch` (undici, used by MSW's
@@ -65,6 +67,8 @@ beforeEach(() => {
   resetApprovalMockState();
   resetHandoffMockState();
   resetKnowledgeMockState();
+  resetIntegrationMockState();
+  resetWebhookMockState();
   localStorage.clear();
   sessionStorage.clear();
 });
