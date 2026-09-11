@@ -1975,6 +1975,141 @@ attempt genuine outbound HTTP delivery to the fixture's destination URL
 2 defect ledger). No live external webhook destination is ever contacted by
 this suite.
 
+### Integration and Webhook Mutations (Phase 22 Chunk 3)
+
+Safe, real public mutations for the two Chunk 1/2 surfaces — Integration
+Connections and Webhook Endpoints — plus Webhook Delivery redrive, all
+gated on the real backend RBAC re-discovered from
+`integrations/permissions.py`/`webhooks/permissions.py`, never a frontend
+assumption.
+
+**Connection mutation contract** (`integrations/views.py`,
+`integrations/services.py`, `integrations/schemas.py`):
+
+| Mutation | Endpoint | Permission | Status |
+| --- | --- | --- | --- |
+| Create | `POST .../integrations/` | owner/admin (`CanManageIntegrations`) | Implemented |
+| Update (display name, configuration) | `PATCH .../integrations/{id}/` | owner/admin | Implemented |
+| Credential rotation | `PUT .../integrations/{id}/credentials/` | owner/admin, throttled (`sensitive_mutation`) | Implemented |
+| Enable/disable | `PATCH .../integrations/{id}/enabled/` | owner/admin | Implemented |
+| Test connection | `POST .../integrations/{id}/test/` | owner/admin | Implemented |
+
+**Provider credential/configuration schemas are real and exact**
+(`integrations/schemas.py` — `pydantic`, `extra="forbid"`), so this chunk
+builds real named fields per provider rather than a free-form secret
+editor: Stripe (`secret_key`), Google Calendar (`service_account_info` — a
+full service-account JSON key, genuinely unbounded by the real schema
+itself, hence the one JSON textarea; configuration `calendar_id`), Email
+(`host`/`port`/`username`/`password`/`use_tls`; configuration
+`from_email`), Demo commerce (no credentials at all; configuration
+`orders`/`shipments`, a genuinely free-form demo catalog per the real
+schema — the second JSON textarea). `demo_commerce` is the one provider
+with no secret material and no real network call at all
+(`integrations/providers/demo_commerce.py` — `probe()` always returns
+`None`, always used regardless of `INTEGRATIONS_LIVE_PROVIDERS_ENABLED`),
+so it is both the form's default selection and the only provider this
+chunk's real-backend E2E creates/edits/rotates/enables/disables/tests
+end-to-end. Stripe/Google/Email are exercised only for their real client-
+side field shapes and secret-absence-after-mutation (an `email`
+connection's password is proven absent from the DOM/`localStorage`/
+`sessionStorage`/URL after a confirmed create) — `INTEGRATIONS_LIVE_PROVIDERS_ENABLED`
+is `False` by default, so even a live create for those three providers
+would resolve to the deterministic in-process fake adapter, never real
+Stripe/Google/SMTP traffic; this chunk still never submits real credentials
+for them.
+
+**Webhook endpoint mutation contract** (`webhooks/views.py`,
+`webhooks/services.py`):
+
+| Mutation | Endpoint | Permission | Status |
+| --- | --- | --- | --- |
+| Create | `POST .../webhooks/endpoints/` | support_manager/admin/owner (`CanManageWebhooks`) | Implemented |
+| Update (name, URL, subscribed events) | `PATCH .../webhooks/endpoints/{id}/` | support_manager/admin/owner | Implemented |
+| Enable/disable | `PATCH .../webhooks/endpoints/{id}/status/` | support_manager/admin/owner | Implemented |
+| Rotate signing secret | `POST .../webhooks/endpoints/{id}/rotate-secret/`, throttled | support_manager/admin/owner | Implemented |
+| Delete | — | — | **Absent** — no delete view exists in `webhooks/urls.py`; confirmed again this chunk. No delete control was built. |
+
+**One-time secret reveal**: both endpoint create and secret rotation return
+the plaintext signing secret exactly once, in the mutation response body
+only (`webhooks/views.py _reveal_secret_once` /
+`WebhookRotateSecretResponseSerializer`) — never on any subsequent read.
+The UI shows it in a dismissible panel immediately after a confirmed
+success and never persists it (no `localStorage`/`sessionStorage`, no
+re-render after the panel is dismissed); proven in both component tests
+and the real-backend E2E (the created/rotated secret value is asserted
+absent from the page's HTML immediately after dismissal).
+
+**URL/SSRF validation stays entirely backend-authoritative**
+(`webhooks/security.py resolve_and_validate` — a fail-closed
+global-routability allowlist: loopback/private/link-local/cloud-metadata/
+carrier-grade-NAT/benchmarking/documentation ranges are all rejected, and
+even *creating* an endpoint against one of those addresses is rejected
+synchronously by `_best_effort_ssrf_check` at create/update time, before
+any delivery is ever scheduled). The frontend never weakens or duplicates
+this — it submits whatever URL the operator enters and renders the real
+server validation error verbatim.
+
+**Redrive** (`webhooks/services.py redrive_webhook_delivery`): shown only
+for a `failed`/`dead` delivery and an authorized role
+(`isRedrivableDeliveryStatus`/`canManageWebhooks`, both UX-only — the
+backend re-checks both independently). Reuses the exact same logical
+`WebhookDelivery`/event (never creates a second one), grants
+`WEBHOOKS_REDRIVE_ATTEMPT_ALLOWANCE` additional attempts by raising
+`max_attempts`, and rejects a disabled endpoint before any delivery-state
+change. The confirmation dialog is deliberately honest about at-least-once
+semantics — it never says "safe retry," "exactly once," or "will not
+duplicate," because a redrive really can cause an external side effect to
+be repeated if an earlier attempt actually reached the endpoint.
+
+**Critical safety limitation, by design (not a defect)**: a genuinely
+*successful* redrive always schedules a real Celery dispatch on commit
+(`redrive_webhook_delivery`'s `transaction.on_commit(partial(
+dispatch_delivery_for_processing, ...))`), which — in an environment
+running a real Celery worker against the real Redis broker, as this
+project's E2E suite deliberately does (Phase 22 Chunk 1A) — would attempt
+genuine outbound HTTP to whatever URL the delivery's endpoint carries.
+This repository has no safe, non-internet transport to substitute (unlike
+`integrations.providers.factory`'s fake adapters, `webhooks/transport.py`
+has no settings-gated fake; its only test seam, `pool_factory`, is a
+backend-internal `pytest` parameter, not reachable from outside the
+process). Consequently:
+
+- The real-backend E2E proves only redrive's **rejection** paths: a
+  disabled endpoint (click-through, with a real confirmation dialog and a
+  real server rejection rendered honestly, never a fabricated "queued"
+  message), an already-non-terminal delivery (`webhook_delivery_not_redrivable`,
+  409), an unauthorized role (403), and a foreign-workspace delivery (404)
+  — see `e2e/integration-webhook-mutations.spec.ts`.
+- The **successful** redrive path (button disappears once the delivery is
+  no longer redrivable, the real "Delivery queued for another attempt."
+  message stays visible, the delivery list/detail refetch) is proven only
+  by component tests against a mocked response
+  (`src/tests/features/webhooks/redrive-delivery-control.test.tsx`), never
+  against the real backend.
+- Both the Django and Celery worker logs were grepped after every E2E run
+  in this chunk for `handle_webhook_delivery_attempt`/`send_pinned_request`
+  — zero occurrences, confirming no real outbound HTTP transport attempt
+  ever executed.
+
+**Mutation safety conventions** (every mutation hook in
+`features/integrations/mutations.ts`/`features/webhooks/mutations.ts`):
+`retry: 0` (no blind automatic resubmission of a create/rotate/status/
+redrive request); every destructive/sensitive action (disable, credential/
+secret rotation, redrive) requires an explicit `ConfirmDialog`
+(`components/ui/confirm-dialog.tsx`, a Radix Dialog — focus trap, Escape-
+to-close, focus return, `aria-modal`) before the mutation fires, and the
+dialog's own confirm button disables itself while the request is in
+flight so a duplicate click cannot queue a second request; success
+handlers invalidate/replace only the affected connection/endpoint/delivery
+query, never the whole cache.
+
+**Schema gap**: the generated `IntegrationConnectionCreate` operation types
+its 201 response as the *request* shape (same drf-spectacular limitation as
+every other `Serializer`-only create response in this codebase) rather than
+the real `IntegrationConnectionSerializer` body `IntegrationConnectionListCreateView.create`
+actually returns — an explicit, narrow cast at the one call site, same
+pattern as `createKnowledgeSource`.
+
 ## Local development
 
 1. Start the backend (see `../README.md`) so `NEXT_PUBLIC_API_BASE_URL`
