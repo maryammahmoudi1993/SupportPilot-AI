@@ -39,6 +39,11 @@ export interface E2EData {
   workspaceBAgentRunRunningId: string;
   workspaceAAgentRunId: string;
   workspaceAAgentRunResponse: string;
+  workspaceBEvaluationRunSucceededId: string;
+  workspaceBEvaluationRunRunningId: string;
+  workspaceBEvaluationResultPassId: string;
+  workspaceBEvaluationResultFailId: string;
+  workspaceAEvaluationRunId: string;
   workspaceBToolExecutionSucceededId: string;
   workspaceBToolExecutionFailedId: string;
   workspaceBToolExecutionWaitingId: string;

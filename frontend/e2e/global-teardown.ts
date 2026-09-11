@@ -12,6 +12,7 @@ const CLEANUP_SCRIPT = `
 from accounts.models import User
 from agents.models import AgentRun
 from approvals.models import ApprovalRequest
+from evaluations.models import EvaluationRun
 from knowledge.models import KnowledgeDocument, KnowledgeSource, RetrievalEvent
 from notifications.models import Delivery
 from tickets.models import HumanHandoff
@@ -31,6 +32,13 @@ from workspaces.models import Workspace
 # workspace cascade can proceed. HumanHandoff has no PROTECT relations
 # (workspace CASCADE, agent_run/ticket SET_NULL) so it needs no special
 # ordering, but is deleted explicitly here for a clean, auditable log line.
+# Phase 23 Chunk 1: EvaluationRun.dataset/.agent_version are both
+# on_delete=PROTECT (evaluations/models.py) — the identical "PROTECT blocks
+# even a row about to be co-deleted" hazard as AgentRun.agent_version above,
+# so real E2E EvaluationRun rows (which CASCADE their own
+# EvaluationCaseSnapshot/EvaluationResult rows) must be deleted before
+# AgentRun/Workspace, in that order.
+#
 # ToolDefinition rows are global/code-owned (no workspace FK) and are never
 # deleted here — sync_tool_definitions() is safely re-run/no-op on the next
 # E2E setup. KnowledgeDocument.source is on_delete=PROTECT, but both
@@ -65,10 +73,11 @@ deleted_handoffs = HumanHandoff.objects.filter(workspace__name__startswith="E2E 
 deleted_knowledge_documents = KnowledgeDocument.objects.filter(workspace__name__startswith="E2E ").delete()
 deleted_knowledge_sources = KnowledgeSource.objects.filter(workspace__name__startswith="E2E ").delete()
 deleted_tool_executions = ToolExecution.objects.filter(workspace__name__startswith="E2E ").delete()
+deleted_evaluation_runs = EvaluationRun.objects.filter(workspace__name__startswith="E2E ").delete()
 deleted_runs = AgentRun.objects.filter(workspace__name__startswith="E2E ").delete()
 deleted_users = User.objects.filter(email__startswith="e2e-").delete()
 deleted_workspaces = Workspace.objects.filter(name__startswith="E2E ").delete()
-print("E2E cleanup:", deleted_webhook_deliveries, deleted_retrieval_events, deleted_approvals, deleted_handoffs, deleted_knowledge_documents, deleted_knowledge_sources, deleted_tool_executions, deleted_runs, deleted_users, deleted_workspaces)
+print("E2E cleanup:", deleted_webhook_deliveries, deleted_retrieval_events, deleted_approvals, deleted_handoffs, deleted_knowledge_documents, deleted_knowledge_sources, deleted_tool_executions, deleted_evaluation_runs, deleted_runs, deleted_users, deleted_workspaces)
 `;
 
 export default async function globalTeardown(): Promise<void> {
