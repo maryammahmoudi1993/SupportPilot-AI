@@ -2237,7 +2237,7 @@ but is explicitly **out of scope** — see "Deferred capabilities" below.
 | --- | --- |
 | Run list/detail | **Real**, implemented this chunk. `GET .../evaluations/runs/`, `GET .../evaluations/runs/{run_id}/`. Any active workspace member with `CanViewEvaluations` (owner/admin/support_manager/support_agent/viewer — every real role) can read. |
 | Result list/detail | **Real**, implemented this chunk. `GET .../evaluations/runs/{run_id}/results/`, `GET .../evaluations/runs/{run_id}/results/{result_id}/` (detail endpoint exists but this chunk's list view already renders every field the detail endpoint would add — no separate detail fetch is made). |
-| Dataset/Case list/detail/create/update | Real endpoints (`.../evaluations/datasets/`, `.../evaluations/datasets/{id}/cases/`, owner/admin/support_manager to manage) — **not implemented this chunk**. A `EvaluationRun`'s `dataset_id` is rendered as a plain, unlinked identifier (no dataset browse/picker UI exists yet to link to). |
+| Dataset/Case list/detail/create/update | **Real**, implemented Phase 23 Chunk 2 (see below). No delete/archive/reorder/bulk endpoint exists — soft-removal is the real `status="archived"` value via the same PATCH used for every other edit. `EvaluationRun.dataset_id` remains a plain, unlinked identifier on the Run detail page — no dataset-scoped run filter/browse UI exists yet. |
 | Start run (`POST .../evaluations/runs/`) | Real, throttled (`evaluation_execution` scope), owner/admin/support_manager only — **not implemented this chunk**. Chunk 1 is read-only by design (master prompt Part C §15). |
 | Cancel run (`POST .../evaluations/runs/{run_id}/cancel/`) | Real — **not implemented this chunk**. |
 | Replay result (`POST .../evaluations/runs/{run_id}/results/{result_id}/replay/`) | Real — **not implemented this chunk**. |
@@ -2344,9 +2344,115 @@ content that renders as inert text, with no unsafe auto-linking.
 
 **Deferred Phase 23 capabilities** (real backend endpoints/entities exist;
 no frontend surface yet): evaluation execution (start run), cancel run,
-replay result, compare runs, Evaluation Dataset/Case management, and any
-future workspace-scoped observability/trace resource (none exists publicly
-today — see the contract table above).
+replay result, compare runs, and any future workspace-scoped
+observability/trace resource (none exists publicly today — see the
+contract table above). Evaluation Dataset/Case management is implemented
+as of Chunk 2 (below).
+
+### Evaluation Datasets + Cases management (Phase 23 Chunk 2)
+
+Real management surface over `EvaluationDataset`/`EvaluationCase`
+(`backend/evaluations/`) — the dataset/case content that Runs execute
+against. Contract re-verified directly against `evaluations/views.py`,
+`evaluations/selectors.py`, `evaluations/serializers.py`,
+`evaluations/permissions.py`, and `evaluations/models.py` for this chunk
+(never inferred from models/services alone).
+
+**Public API contract**:
+
+| Capability | Status |
+| --- | --- |
+| Dataset list | **Real.** `GET .../evaluations/datasets/`. Real, backend-tested `status` filter (`draft`/`active`/`archived`); `ordering`/`search` are dead generated params, never sent. Any `CanViewEvaluations` role (every real workspace role) can read. |
+| Dataset detail | **Real.** `GET .../evaluations/datasets/{dataset_id}/`. |
+| Dataset create | **Real**, implemented. `POST .../evaluations/datasets/` — `name` (required, unique per workspace — a real `IntegrityError`-backed 400 on collision), `description`, `status`. `CanManageEvaluations` (owner/admin/support_manager) only. |
+| Dataset update | **Real**, implemented. `PATCH .../evaluations/datasets/{dataset_id}/`, same mutable fields as create. `evaluations/services.py update_evaluation_dataset` unconditionally overwrites whatever fields are sent — no optimistic-concurrency guard (`updated_at`/version/ETag) exists, so the frontend invents none. |
+| Dataset delete/archive | **No delete/archive endpoint exists.** Setting `status="active"`/`"archived"` via the same edit form IS the real, only soft-removal path (`EvaluationDatasetStatus.ARCHIVED`) — never a separate destructive control. |
+| Case list | **Real.** `GET .../evaluations/datasets/{dataset_id}/cases/`. Real `status` filter (`active`/`disabled`); server ordering is `dataset_id, key` (`EvaluationCase.Meta.ordering`) — never client-re-sorted. |
+| Case detail | Real endpoint exists (`GET .../cases/{case_id}/`) but **not called separately** — the list response already carries every field the detail endpoint would add (`EvaluationCaseSerializer`'s full field set), so a case row expands in place to an edit form instead of navigating to a second route (master prompt Part C §14). |
+| Case create | **Real**, implemented. `POST .../evaluations/datasets/{dataset_id}/cases/` — `key` (required, slug, unique per dataset — a real 400 on collision), `name`, `status`, `input_message`, `seeded_context` (JSON), `expectations` (JSON). |
+| Case update | **Real**, implemented. `PATCH .../evaluations/datasets/{dataset_id}/cases/{case_id}/` — `name`/`status`/`input_message`/`seeded_context`/`expectations` only. `key` is generated as a writable field but `evaluations/services.py update_evaluation_case` only ever reads the five fields above from the PATCH payload — `key` is silently ignored on update (verified directly against the service). The edit form never offers to change it, showing it as read-only text instead, so the UI never implies a no-op write would succeed. |
+| Case delete | **No delete endpoint exists.** Not implemented — nothing to protect/cascade-check. |
+| Case reorder / bulk import / bulk update / copy | **No such endpoint exists.** Not implemented. Server ordering (`dataset_id, key`) is the only ordering there is. |
+
+**Snapshot semantics** (master prompt Part 6/26-28 — verified directly
+against `evaluations/models.py`): `EvaluationDataset`/`EvaluationCase` are
+plain, mutable, live content. `EvaluationCaseSnapshot` is a separate,
+internal-only model — never exposed on any public route — created once per
+`EvaluationRun` at run-creation time, copying every case the run will
+execute (`key`/`name`/`input_message`/`seeded_context`/`expectations`) into
+an immutable row that `EvaluationResult` (via `case_snapshot`) actually
+scores against. A run's meaning therefore can never change because someone
+later edited or deleted the live case — Chunk 1's `EvaluationResult`
+rendering (`case_key`, the Run detail page) has always been reading
+snapshot data, not live `EvaluationCase` rows, from the start.
+**Consequence for this chunk's UI**: editing or disabling a live
+`EvaluationCase` is stated explicitly, in real UI copy on the Dataset
+detail page, to only affect *future* evaluation runs — never described as
+versioning (no such concept exists in the public contract; snapshotting is
+not dataset versioning) and never implying a past run's results will
+change. Proven directly in the real-backend E2E (`e2e/evaluations.spec.ts`,
+"editing a live case does not alter a past evaluation run's recorded
+results") by visiting a historical run whose snapshot evidence
+(`refund-flow`/`unsafe-content-case`) is unrelated to, and unaffected by,
+the separate live `EvaluationCase` fixtures used for the create/edit flows.
+
+**RBAC**: read — every real workspace role (`CanViewEvaluations`); manage
+(create/update dataset or case) — owner/admin/support_manager
+(`CanManageEvaluations`, the same `EVALUATION_MANAGE_ROLES` Chunk 1
+discovered). Mirrored client-side as `canManageEvaluations()` in
+`features/evaluations/types.ts` for UX gating only (hides "New
+dataset"/"New case"/"Edit" controls for support_agent/viewer) — the backend
+permission class is the sole authority; proven both in a unit test and the
+real-backend E2E (Workspace B's real support_agent role sees no manage
+controls at all).
+
+**Structured input safety**: `seeded_context`/`expectations` are bounded,
+`extra="forbid"` Pydantic-validated structures server-side
+(`evaluations/schemas.py`) with no single stable, fully-typed public field
+list for every nested shape they can carry — edited as controlled JSON
+textareas (`EvaluationCaseForm`), `JSON.parse`-validated client-side before
+submit (a parse failure is a safe, local, never-sent error), never
+`eval`/`new Function`. A case's `input_message`/`seeded_context`/
+`expectations` may literally contain HTML/script-looking or
+prompt-injection-looking text (e.g. `<script>...</script>`, "Ignore
+previous instructions") — rendered as plain React text / through the
+shared `StructuredPayload` viewer exactly like every other domain's
+untrusted content, proven inert in both a unit test and the real-backend
+E2E with a genuine `<script>` payload that never executes.
+
+**Routes**: `/app/evaluations?tab=datasets` (Datasets tab, alongside the
+existing default Runs tab — plain `<Link>`s with `aria-current`, same
+pattern as Knowledge's Documents/Sources tabs, no new top-level nav item)
+and `/app/evaluations/datasets/[datasetId]` (dataset detail — metadata,
+edit form, and its cases list with create/edit). No separate case-detail
+route (see the contract table above).
+
+**Server state**: `["workspaces", wsId, "evaluations", "datasets", "list"|"detail", ...]`
+and `["workspaces", wsId, "evaluations", "datasets", "detail", datasetId, "cases", "list", params]`
+query keys (`features/evaluations/query-keys.ts`) — same workspace-first
+policy as every other domain, proven in both a unit test (A→B switch,
+zero stale-A leakage) and the real-backend E2E. No polling — dataset/case
+content only changes on an explicit operator write, never asynchronously.
+
+**Mutation safety**: every dataset/case mutation is `retry: 0` (blind
+retry could double-submit a create); duplicate submit while pending is
+blocked at the calling form (`mutation.isPending` checked before
+`mutate()`); no optimistic-concurrency guard is invented client-side since
+none exists server-side (see "Dataset update" above).
+
+**Network**: dataset list — one request; dataset detail — one request;
+case list — one bounded request regardless of case-row count (no N+1,
+proven in a unit test asserting an exact call count); one request per
+mutation.
+
+**Phase 23 Chunk 2 schema gap register** (continuing Chunk 1's three; none
+blocking):
+
+| # | Endpoint / field | Gap | Frontend narrowing | Blocking? |
+| --- | --- | --- | --- | --- |
+| 4 | `EvaluationCase.status` / `EvaluationCaseWrite.status` / `PatchedEvaluationCaseWrite.status` | Generated as `WebhookEndpointStatusEnum` — a drf-spectacular component-naming collision (identical two-value `"active" \| "disabled"` shape as `ToolDefinition.status`'s prior gap), never the real semantics. | Re-typed locally as `EvaluationCaseStatusValue` in `features/evaluations/types.ts`. | No |
+| 5 | `evaluations_datasets_create`, `evaluations_datasets_cases_create` | Both generate their 201 response as the *request* write shape instead of the real full body the view returns (`Response(<ReadSerializer>(obj).data, status=201)`) — same generated-schema deficiency as Integrations' `integrations_create` gap. | `createEvaluationDataset`/`createEvaluationCase` in `features/evaluations/api.ts` declare the real return type explicitly. | No |
+| 6 | `EvaluationCaseWrite`/`PatchedEvaluationCaseWrite` `.key` | Generated as writable on update, but `update_evaluation_case` never reads it from the PATCH payload — see "Case update" above. | `UpdateEvaluationCaseInput` (`features/evaluations/types.ts`) omits `key` entirely; the edit form shows it as read-only text. | No |
 
 ## Local development
 
@@ -2627,7 +2733,7 @@ empty/error/workspace-isolation/unknown-status coverage as every other
 domain, plus a conversation-scoped test proving only the real
 `conversation`-filtered rows render.
 
-## End-to-end tests (`e2e/`, Phase 18 Chunk 4; extended Phase 19 Chunks 1-3, Phase 20 Chunks 1-3, Phase 22 Chunks 1-2, Phase 23 Chunk 1)
+## End-to-end tests (`e2e/`, Phase 18 Chunk 4; extended Phase 19 Chunks 1-3, Phase 20 Chunks 1-3, Phase 22 Chunks 1-2, Phase 23 Chunks 1-2)
 
 Playwright (`@playwright/test`), Chromium only — the mandatory acceptance
 browser for this phase; Firefox/WebKit weren't added (single-browser
@@ -2666,7 +2772,15 @@ content in its safe scorer fields, a non-terminal (running) Workspace B run
 for the detail-polling proof, and a distinct Workspace A run/result for
 isolation. `EvaluationRun.dataset`/`.agent_version` are both
 `on_delete=PROTECT` — cleaned up in the same dependency-ordered pattern as
-`AgentRun.agent_version` (see `global-teardown.ts`'s comments).
+`AgentRun.agent_version` (see `global-teardown.ts`'s comments). Extended
+again in Phase 23 Chunk 2 with real, live `EvaluationCase` rows (created
+directly via the ORM, independent of the immutable `EvaluationCaseSnapshot`
+fixtures above): two in Workspace A's dataset (one normal, one carrying
+genuine HTML/script/prompt-injection-looking content for the dataset/case
+management content-safety proof) and one in Workspace B's dataset (for the
+read-only-role/isolation proofs) — no separate teardown needed, since
+`EvaluationCase.dataset` cascade-deletes and `EvaluationDataset.workspace`
+cascade-deletes with the workspace (no `PROTECT` relation of its own).
 `playwright.config.ts`'s `webServer` array starts both halves itself —
 Django (`manage.py runserver`) and the frontend built and started in
 **production mode** (`next build && next start`, not `next dev`) — so the
