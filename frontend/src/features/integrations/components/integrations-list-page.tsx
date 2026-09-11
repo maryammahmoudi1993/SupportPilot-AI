@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { Suspense } from "react";
+import { Suspense, useState } from "react";
 import type { ReactNode } from "react";
 
 import {
@@ -10,8 +10,9 @@ import {
   IntegrationEnvironmentBadge,
   integrationProviderLabel,
 } from "@/features/integrations/components/integration-badges";
+import { CreateConnectionForm } from "@/features/integrations/components/create-connection-form";
 import { useIntegrationConnectionListQuery } from "@/features/integrations/queries";
-import type { IntegrationConnectionListParams } from "@/features/integrations/types";
+import { canManageIntegrations, type IntegrationConnectionListParams } from "@/features/integrations/types";
 import {
   buildIntegrationConnectionListQueryString,
   parseIntegrationConnectionListParams,
@@ -19,11 +20,13 @@ import {
 } from "@/features/integrations/url-params";
 import { WebhookDeliveriesTab } from "@/features/webhooks/components/webhook-deliveries-tab";
 import { WebhookEndpointsTab } from "@/features/webhooks/components/webhook-endpoints-tab";
+import { canManageWebhooks } from "@/features/webhooks/types";
 import { parseWebhookDeliveryListParams, parseWebhookEndpointListParams } from "@/features/webhooks/url-params";
 import { useWorkspace } from "@/features/workspace/workspace-provider";
 import { ListError } from "@/components/support/list-error";
 import { Pagination } from "@/components/support/pagination";
 import { Timestamp } from "@/components/support/timestamp";
+import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
@@ -68,13 +71,16 @@ function IntegrationsListContent({
   workspaceId,
   pathname,
   params,
+  canManage,
 }: {
   workspaceId: string;
   pathname: string;
   params: IntegrationConnectionListParams;
+  canManage: boolean;
 }) {
   const router = useRouter();
   const query = useIntegrationConnectionListQuery(workspaceId, params);
+  const [showCreateForm, setShowCreateForm] = useState(false);
 
   function pushParams(next: IntegrationConnectionListParams) {
     router.replace(`${pathname}${buildIntegrationConnectionListQueryString(next)}`, {
@@ -84,6 +90,23 @@ function IntegrationsListContent({
 
   return (
     <div className="flex flex-col gap-6">
+      {canManage && (
+        <div>
+          {showCreateForm ? (
+            <CreateConnectionForm
+              workspaceId={workspaceId}
+              onCreated={(connectionId) => {
+                setShowCreateForm(false);
+                router.push(`/app/integrations/${connectionId}`);
+              }}
+              onCancel={() => setShowCreateForm(false)}
+            />
+          ) : (
+            <Button onClick={() => setShowCreateForm(true)}>New connection</Button>
+          )}
+        </div>
+      )}
+
       {query.isPending && <IntegrationsListSkeleton />}
 
       {query.isError && (
@@ -228,9 +251,15 @@ function IntegrationsListInner() {
           workspaceId={workspaceId}
           pathname={pathname}
           params={connectionParams}
+          canManage={canManageIntegrations(workspace.activeWorkspace?.role)}
         />
       ) : tab === "webhooks" ? (
-        <WebhookEndpointsTab workspaceId={workspaceId} pathname={pathname} params={endpointParams} />
+        <WebhookEndpointsTab
+          workspaceId={workspaceId}
+          pathname={pathname}
+          params={endpointParams}
+          canManage={canManageWebhooks(workspace.activeWorkspace?.role)}
+        />
       ) : (
         <WebhookDeliveriesTab workspaceId={workspaceId} pathname={pathname} params={deliveryParams} />
       )}

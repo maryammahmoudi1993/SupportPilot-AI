@@ -8,7 +8,9 @@ import {
   IntegrationEnvironmentBadge,
   integrationProviderLabel,
 } from "@/features/integrations/components/integration-badges";
+import { ManageConnectionControls } from "@/features/integrations/components/manage-connection-controls";
 import { useIntegrationConnectionDetailQuery } from "@/features/integrations/queries";
+import { canManageIntegrations } from "@/features/integrations/types";
 import { useWorkspace } from "@/features/workspace/workspace-provider";
 import { EntityNotFound } from "@/components/support/entity-not-found";
 import { ListError } from "@/components/support/list-error";
@@ -51,6 +53,7 @@ function IntegrationConnectionDetailContent({
   workspaceId: string;
   connectionId: string;
 }) {
+  const workspace = useWorkspace();
   const connectionQuery = useIntegrationConnectionDetailQuery(workspaceId, connectionId);
 
   if (connectionQuery.isPending) {
@@ -172,6 +175,10 @@ function IntegrationConnectionDetailContent({
               />
             </div>
           </div>
+
+          {canManageIntegrations(workspace.activeWorkspace?.role) && (
+            <ManageConnectionControls workspaceId={workspaceId} connection={connection} />
+          )}
         </CardContent>
       </Card>
     </div>

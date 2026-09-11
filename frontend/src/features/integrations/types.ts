@@ -10,17 +10,14 @@
  * opaque `credential_version` counter. See api.ts for the exact fields and
  * the create-response schema gap.
  *
- * Chunk 1 scope decision (master prompt Part J §35): this chunk implements
- * list + detail only — no create/update/credential-rotate/enable-disable/
- * test-connection mutation. All five exist as real, unambiguous backend
- * endpoints (backend/integrations/urls.py), but every one of them either
- * accepts raw provider credentials directly (create, credential rotate) or
- * is a genuinely separate operational action (enable/disable, test) that
- * deserves its own reviewed UI rather than being bolted onto a foundation
- * chunk. None is "essential to make the Connections UI operational" — a
- * workspace's connections already exist from earlier-phase business
- * integration setup, so a read-only list/detail is a fully real, useful
- * surface on its own. Deferred to a later Phase 22 chunk.
+ * Chunk 1 scope decision (master prompt Part J §35): Chunk 1 implemented
+ * list + detail only. Chunk 3 (this addition) implements the five real
+ * mutation endpoints (backend/integrations/urls.py) — create, update
+ * (display_name/configuration only), credential rotation, enable/disable,
+ * and test connection — see the provider credential/configuration schemas
+ * below, mirrored directly from backend/integrations/schemas.py (the real,
+ * exact, `pydantic`-enforced per-provider shape — never an invented
+ * free-form secret editor, per master prompt Part C §8).
  */
 import type { components } from "@/types/api";
 
@@ -57,3 +54,94 @@ const INTEGRATION_MANAGE_ROLES: ReadonlySet<string> = new Set(["owner", "admin"]
 export function canManageIntegrations(role: string | undefined): boolean {
   return role !== undefined && INTEGRATION_MANAGE_ROLES.has(role);
 }
+
+// ---------------------------------------------------------------------------
+// Mutation contracts (Phase 22 Chunk 3)
+// ---------------------------------------------------------------------------
+
+/**
+ * `IntegrationConnection.credentials`/`configuration` are typed `unknown` by
+ * the generator (Category B schema gap — drf-spectacular cannot infer a
+ * shape from the `pydantic` validation `integrations/schemas.py` actually
+ * performs server-side). The exact per-provider shapes below are mirrored
+ * directly from that module, not guessed:
+ *
+ * - `stripe`: credentials `{ secret_key: string (8-500 chars) }`; no
+ *   configuration fields.
+ * - `google_calendar`: credentials `{ service_account_info: object }` — the
+ *   real schema is `dict[str, Any]` (a full Google service-account JSON key
+ *   file), genuinely unbounded/nested by design, never a flat field set;
+ *   configuration `{ calendar_id?: string }` (default `"primary"`).
+ * - `email`: credentials `{ host, port?, username, password, use_tls? }`;
+ *   configuration `{ from_email: string }`.
+ * - `demo_commerce`: no credentials (empty object); configuration
+ *   `{ orders?: object, shipments?: object }` — a genuinely free-form demo
+ *   catalog (`dict[str, dict[str, Any]]`), the one provider with zero
+ *   secret material and no real network call (`integrations/providers/
+ *   demo_commerce.py`) — the only provider this chunk's E2E exercises with
+ *   a live create/edit/rotate/enable/disable/test-connection flow.
+ */
+export interface StripeCredentialsInput {
+  secret_key: string;
+}
+
+export interface GoogleCalendarCredentialsInput {
+  service_account_info: Record<string, unknown>;
+}
+
+export interface SmtpCredentialsInput {
+  host: string;
+  port?: number;
+  username: string;
+  password: string;
+  use_tls?: boolean;
+}
+
+export interface DemoCommerceCredentialsInput {
+  [key: string]: never;
+}
+
+export type ProviderCredentialsInput =
+  | StripeCredentialsInput
+  | GoogleCalendarCredentialsInput
+  | SmtpCredentialsInput
+  | DemoCommerceCredentialsInput;
+
+export interface GoogleCalendarConfigurationInput {
+  calendar_id?: string;
+}
+
+export interface EmailConfigurationInput {
+  from_email: string;
+}
+
+export interface DemoCommerceConfigurationInput {
+  orders?: Record<string, unknown>;
+  shipments?: Record<string, unknown>;
+}
+
+export type ProviderConfigurationInput =
+  | Record<string, never>
+  | GoogleCalendarConfigurationInput
+  | EmailConfigurationInput
+  | DemoCommerceConfigurationInput;
+
+export interface CreateIntegrationConnectionInput {
+  provider: IntegrationProviderValue;
+  display_name?: string;
+  environment: IntegrationEnvironmentValue;
+  credentials: ProviderCredentialsInput;
+  configuration?: ProviderConfigurationInput;
+}
+
+export interface UpdateIntegrationConnectionInput {
+  display_name?: string;
+  configuration?: ProviderConfigurationInput;
+}
+
+export interface RotateIntegrationCredentialsInput {
+  credentials: ProviderCredentialsInput;
+}
+
+export type IntegrationConnectionTestResult =
+  components["schemas"]["IntegrationConnectionTestResult"];

@@ -26,11 +26,15 @@
  * for whichever later chunk implements it.
  */
 import { apiClient } from "@/lib/api/client";
-import { unwrap, withRequestTimeout } from "@/lib/api/request";
+import { requestWithTimeout, unwrap, withRequestTimeout } from "@/lib/api/request";
 import type {
+  CreateIntegrationConnectionInput,
   IntegrationConnection,
   IntegrationConnectionListParams,
+  IntegrationConnectionTestResult,
   PaginatedIntegrationConnectionList,
+  RotateIntegrationCredentialsInput,
+  UpdateIntegrationConnectionInput,
 } from "@/features/integrations/types";
 import type { paths } from "@/types/api";
 
@@ -84,5 +88,101 @@ export function fetchIntegrationConnectionDetail(
       undefined,
       signal,
     ),
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Mutations (Phase 22 Chunk 3)
+// ---------------------------------------------------------------------------
+
+/**
+ * `credentials`/`configuration` are typed `unknown` by the generated
+ * `IntegrationConnectionCreate` request schema (same Category B gap as the
+ * read side — see types.ts) — real per-provider validation happens
+ * server-side (`integrations/schemas.py`).
+ *
+ * Also a Category B response-shape gap (module doc comment above): the
+ * generated 201 response type is `IntegrationConnectionCreate` (the
+ * *request* shape) rather than the real response body — verified against
+ * `integrations/views.py IntegrationConnectionListCreateView.create`,
+ * which actually returns `IntegrationConnectionSerializer(connection).data`
+ * (the same safe shape as every other read). The explicit, narrow cast
+ * below reflects that real, verified response shape — same pattern as
+ * `createKnowledgeSource` in features/knowledge/api.ts — never `any`/
+ * `ts-ignore`.
+ */
+export function createIntegrationConnection(
+  workspaceId: string,
+  input: CreateIntegrationConnectionInput,
+): Promise<IntegrationConnection> {
+  return requestWithTimeout((signal) =>
+    apiClient.POST("/api/v1/workspaces/{workspace_id}/integrations/", {
+      params: { path: { workspace_id: workspaceId } },
+      body: {
+        provider: input.provider,
+        display_name: input.display_name,
+        environment: input.environment,
+        credentials: input.credentials,
+        configuration: input.configuration,
+      },
+      signal,
+    }),
+  ) as unknown as Promise<IntegrationConnection>;
+}
+
+export function updateIntegrationConnection(
+  workspaceId: string,
+  connectionId: string,
+  input: UpdateIntegrationConnectionInput,
+): Promise<IntegrationConnection> {
+  return requestWithTimeout((signal) =>
+    apiClient.PATCH("/api/v1/workspaces/{workspace_id}/integrations/{connection_id}/", {
+      params: { path: { workspace_id: workspaceId, connection_id: connectionId } },
+      body: {
+        display_name: input.display_name,
+        configuration: input.configuration,
+      },
+      signal,
+    }),
+  );
+}
+
+export function rotateIntegrationCredentials(
+  workspaceId: string,
+  connectionId: string,
+  input: RotateIntegrationCredentialsInput,
+): Promise<IntegrationConnection> {
+  return requestWithTimeout((signal) =>
+    apiClient.PUT("/api/v1/workspaces/{workspace_id}/integrations/{connection_id}/credentials/", {
+      params: { path: { workspace_id: workspaceId, connection_id: connectionId } },
+      body: { credentials: input.credentials },
+      signal,
+    }),
+  );
+}
+
+export function setIntegrationConnectionEnabled(
+  workspaceId: string,
+  connectionId: string,
+  enabled: boolean,
+): Promise<IntegrationConnection> {
+  return requestWithTimeout((signal) =>
+    apiClient.PATCH("/api/v1/workspaces/{workspace_id}/integrations/{connection_id}/enabled/", {
+      params: { path: { workspace_id: workspaceId, connection_id: connectionId } },
+      body: { enabled },
+      signal,
+    }),
+  );
+}
+
+export function testIntegrationConnection(
+  workspaceId: string,
+  connectionId: string,
+): Promise<IntegrationConnectionTestResult> {
+  return requestWithTimeout((signal) =>
+    apiClient.POST("/api/v1/workspaces/{workspace_id}/integrations/{connection_id}/test/", {
+      params: { path: { workspace_id: workspaceId, connection_id: connectionId } },
+      signal,
+    }),
   );
 }
