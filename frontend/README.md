@@ -2217,7 +2217,579 @@ PHASE22-3-04 below.
   sign-off before implementation (see above). No change of any kind was
   made to backend replay-protection semantics to work around this.
 
-## Local development
+### Evaluations — Runs + Results foundation (Phase 23 Chunk 1)
+
+Read-only foundation over the real, already-built backend Evaluation
+Framework (`backend/evaluations/`, a Phase 12 feature — nothing about the
+dataset/case/run lifecycle, the deterministic scoring pipeline, or the
+regression-threshold model was redesigned or invented for the frontend).
+Two real, workspace-scoped entities are exposed this chunk —
+`EvaluationRun` and, nested under it, `EvaluationResult` (per-case outcome).
+`EvaluationDataset`/`EvaluationCase` management has a real public API too
+but is explicitly **out of scope** — see "Deferred capabilities" below.
+
+**Public API contract discovered** (verified against
+`evaluations/views.py`, `evaluations/selectors.py`,
+`evaluations/serializers.py`, `evaluations/permissions.py`, and
+`evaluations/models.py` — never inferred from models/services alone):
+
+| Capability | Status |
+| --- | --- |
+| Run list/detail | **Real**, implemented this chunk. `GET .../evaluations/runs/`, `GET .../evaluations/runs/{run_id}/`. Any active workspace member with `CanViewEvaluations` (owner/admin/support_manager/support_agent/viewer — every real role) can read. |
+| Result list/detail | **Real**, implemented this chunk. `GET .../evaluations/runs/{run_id}/results/`, `GET .../evaluations/runs/{run_id}/results/{result_id}/` (detail endpoint exists but this chunk's list view already renders every field the detail endpoint would add — no separate detail fetch is made). |
+| Dataset/Case list/detail/create/update | **Real**, implemented Phase 23 Chunk 2 (see below). No delete/archive/reorder/bulk endpoint exists — soft-removal is the real `status="archived"` value via the same PATCH used for every other edit. `EvaluationRun.dataset_id` remains a plain, unlinked identifier on the Run detail page — no dataset-scoped run filter/browse UI exists yet. |
+| Start run (`POST .../evaluations/runs/`) | Real, throttled (`evaluation_execution` scope), owner/admin/support_manager only — **not implemented this chunk**. Chunk 1 is read-only by design (master prompt Part C §15). |
+| Cancel run (`POST .../evaluations/runs/{run_id}/cancel/`) | Real — **not implemented this chunk**. |
+| Replay result (`POST .../evaluations/runs/{run_id}/results/{result_id}/replay/`) | Real — **not implemented this chunk**. |
+| Compare runs (`POST .../evaluations/compare/`) | Real — **not implemented this chunk**; a genuine comparison action, not a read, and owner/admin/support_manager scoped. |
+| Observability (traces/spans) | **Internal-only.** `backend/observability/` exposes exactly one route, `GET /metrics/` — a Prometheus scrape endpoint wired directly at the top level in `config/urls.py`, explicitly documented in its own module docstring as "deployment infrastructure, not a tenant API": no workspace scoping, no auth, no JSON — a Prometheus text-exposition payload. There is no trace/span/event resource, no per-run telemetry endpoint, and no workspace-scoped observability API of any kind. No UI was built or implied for it — deferred to Chunk 2 for another contract-discovery pass in case a future backend change adds one; if none appears, Chunk 2 will document this as a permanent N/A rather than build a UI over internal-only data. |
+
+**Mutation deferral decision** (master prompt Part C §15): this chunk
+implements run + result **list and detail only** — no execute/cancel/
+replay/compare control anywhere in the UI. Every one of those write
+endpoints is real, but a read-only foundation needs real historical runs to
+render against regardless (this chunk's E2E fixtures create them directly
+via the ORM, exactly as a real `POST .../runs/` + Celery execution would
+persist them), so list/detail alone is already a fully real, useful
+surface. Execution/cancel/replay controls are explicitly Chunk 3's job
+(master prompt Part C, chunk plan) once they can be reviewed together with
+their own confirmation/error UX.
+
+**Metric semantics** (master prompt Part B): no field on `EvaluationRun`/
+`EvaluationResult` is a probability, a percentage, or a confidence score.
+The real fields are plain counts (`total_cases`/`completed_cases`/
+`passed_cases`/`failed_cases` on the run) and a server-authoritative
+boolean outcome (`EvaluationResult.passed`, computed by
+`evaluations/scoring.py score_case` — `not violations`, never a
+client-derived threshold). `EvaluationResult.scorer_output` is a
+`JSONField` with no fixed shape at the API layer
+(`evaluations/schemas.py EvaluationScorerOutput` — structured booleans/
+counts like `forbidden_tool_violation`, `outcome_assertions_passed`, never
+a single numeric "score"); rendered verbatim through the shared
+`StructuredPayload` viewer, never destructured, relabeled, or converted to
+a percentage. `passed` renders as "Passed"/"Failed"/"Not scored" (`null` —
+a case not yet scored, or one whose scoring itself failed) via a dedicated
+`EvaluationPassedBadge`, never inferred client-side from any numeric field.
+No invented labels ("confidence", "quality %", "reliability score") appear
+anywhere in this chunk's code or tests.
+
+**Statuses**: `EvaluationRun.status` — `pending`, `running`, `succeeded`,
+`partial`, `failed`, `cancelled` (`EvaluationRunStatusEnum`).
+`EvaluationResult.status` — `pending`, `running`, `succeeded`, `failed`,
+`cancelled` (`EvaluationResultStatusEnum`). An unrecognized future status
+renders safely via the shared `EnumBadge` fallback, same as every other
+domain — proven in both a unit test and the real-backend E2E smoke.
+
+**Filters/pagination**: real DRF `PageNumberPagination` (`page`/
+`page_size`, 50/page default) on both lists. Real, backend-tested filters —
+verified directly against `evaluations/views.py`/`evaluations/selectors.py`,
+not the generated schema (Category A gap, same shape as every prior
+domain: the generated query type only carries `ordering`/`page`/
+`page_size`/`search`, neither of which the views actually read) — are
+`status`/`dataset_id` for the run list and `status`/`passed` for the
+result list. This chunk's UI surfaces `status` as the run-list control
+(mirroring Agent Runs) and `passed` as the result-list control (the
+higher-value real signal for a read-only foundation); `dataset_id` (no
+dataset picker UI yet) and result `status` are typed in `api.ts` for
+completeness but unused, same deferral reasoning as Agent Runs' `agent_id`.
+
+**Routes**: one canonical route family, `/app/evaluations` (list) and
+`/app/evaluations/[runId]` (detail, with its per-case results panel) —
+matching the master prompt's preferred shape. One top-level nav entry,
+"Evaluations" — not separate Observability/Traces/Metrics entries; those,
+if a real public contract for them is ever found, will live under this
+same route family as tabs rather than new top-level nav items (master
+prompt Part D §16-17).
+
+**Server state**: `["workspaces", wsId, "evaluations", "runs", "list"|"detail", ...]`
+and `["workspaces", wsId, "evaluations", "runs", "detail", runId, "results", "list", params]`
+query keys (`features/evaluations/query-keys.ts`) — same workspace-first
+policy as every other domain. **Polling**: an `EvaluationRun` executes
+asynchronously server-side (Celery) exactly like an `AgentRun`, so its
+detail (and, driven by the same non-terminal condition, its results list)
+is polled at the same fixed 5s interval used by Agent Runs
+(`EVALUATION_RUN_POLL_INTERVAL_MS`), stopping for good the moment a fetch
+observes a terminal status (`EVALUATION_RUN_TERMINAL_STATUSES` —
+`succeeded`/`partial`/`failed`/`cancelled`, mirrored from
+`evaluations/models.py`). One bounded results-list request per interval,
+never one request per result (no N+1) — proven in a unit test asserting
+exact request counts.
+
+**Cross-domain links**: `EvaluationResult.agent_run_id` links directly to
+the existing `/app/agent-runs/[runId]` route by ID — no per-result
+supporting fetch (proven in a unit test asserting exact
+detail/results-list request counts stay at 1 each regardless of result
+count). The underlying model field is nullable (a result with no
+`AgentRun` recorded), so a `null` value renders the honest
+"— (no agent run recorded)" note rather than a broken/empty link — see the
+schema-gap note below. No Tool Execution/Conversation/Knowledge links are
+rendered this chunk: nothing in the public `EvaluationResult` contract
+carries a tool-execution, conversation, or knowledge-document ID directly.
+
+**Content safety**: `scorer_output` (arbitrary structured JSON) and
+`failure_message_safe`/`case_key` (plain server-controlled/redacted text)
+are rendered as plain React text / through the existing shared
+`StructuredPayload` viewer (`JSON.stringify` into a `<pre>`, never
+`dangerouslySetInnerHTML`) — proven both in a unit test and the
+real-backend E2E smoke with genuine HTML/script/prompt-injection-looking
+content that renders as inert text, with no unsafe auto-linking.
+
+**Phase 23 Chunk 1 schema gap register** (none blocking):
+
+| Endpoint / field | Gap | Frontend narrowing | Blocking? |
+| --- | --- | --- | --- |
+| `EvaluationRun.threshold_config`, `EvaluationResult.scorer_output` | Generated as `unknown` — both are plain `JSONField`s with no fixed shape at the API layer. | Rendered via `StructuredPayload`, never destructured into named fields. | No |
+| `EvaluationResult.agent_run_id`, `.replay_of_id` | Generated as required `string` (uuid), but the underlying model columns are nullable (`ForeignKey(..., null=True)`); DRF's plain `UUIDField(read_only=True)` still serializes `None` as JSON `null`. | Re-typed locally in `features/evaluations/types.ts` as `string \| null`; every render site handles the null case explicitly. | No |
+| `evaluations_runs_list`, `evaluations_runs_results_list` | Generated query type only carries `ordering`/`page`/`page_size`/`search`; the real filters (`status`/`dataset_id`, `status`/`passed`) are invisible to drf-spectacular because both views read `request.query_params` directly. | Narrowed locally in `features/evaluations/api.ts`, same pattern as every prior domain. | No |
+
+**Deferred Phase 23 capabilities**: any future workspace-scoped
+observability/trace resource (none exists publicly today — see the
+contract table above; still out of scope as of Chunk 3). Evaluation
+Dataset/Case management is implemented as of Chunk 2; run
+execution/cancel/replay/compare are implemented as of Chunk 3 (both
+below) — this note previously listed those four as deferred based on
+Chunk 1's contract discovery, which had not found the real cancel/replay/
+compare endpoints yet (see the Chunk 3 section for the corrected,
+re-verified contract).
+
+### Evaluation Datasets + Cases management (Phase 23 Chunk 2)
+
+Real management surface over `EvaluationDataset`/`EvaluationCase`
+(`backend/evaluations/`) — the dataset/case content that Runs execute
+against. Contract re-verified directly against `evaluations/views.py`,
+`evaluations/selectors.py`, `evaluations/serializers.py`,
+`evaluations/permissions.py`, and `evaluations/models.py` for this chunk
+(never inferred from models/services alone).
+
+**Public API contract**:
+
+| Capability | Status |
+| --- | --- |
+| Dataset list | **Real.** `GET .../evaluations/datasets/`. Real, backend-tested `status` filter (`draft`/`active`/`archived`); `ordering`/`search` are dead generated params, never sent. Any `CanViewEvaluations` role (every real workspace role) can read. |
+| Dataset detail | **Real.** `GET .../evaluations/datasets/{dataset_id}/`. |
+| Dataset create | **Real**, implemented. `POST .../evaluations/datasets/` — `name` (required, unique per workspace — a real `IntegrityError`-backed 400 on collision), `description`, `status`. `CanManageEvaluations` (owner/admin/support_manager) only. |
+| Dataset update | **Real**, implemented. `PATCH .../evaluations/datasets/{dataset_id}/`, same mutable fields as create. `evaluations/services.py update_evaluation_dataset` unconditionally overwrites whatever fields are sent — no optimistic-concurrency guard (`updated_at`/version/ETag) exists, so the frontend invents none. |
+| Dataset delete/archive | **No delete/archive endpoint exists.** Setting `status="active"`/`"archived"` via the same edit form IS the real, only soft-removal path (`EvaluationDatasetStatus.ARCHIVED`) — never a separate destructive control. |
+| Case list | **Real.** `GET .../evaluations/datasets/{dataset_id}/cases/`. Real `status` filter (`active`/`disabled`); server ordering is `dataset_id, key` (`EvaluationCase.Meta.ordering`) — never client-re-sorted. |
+| Case detail | Real endpoint exists (`GET .../cases/{case_id}/`) but **not called separately** — the list response already carries every field the detail endpoint would add (`EvaluationCaseSerializer`'s full field set), so a case row expands in place to an edit form instead of navigating to a second route (master prompt Part C §14). |
+| Case create | **Real**, implemented. `POST .../evaluations/datasets/{dataset_id}/cases/` — `key` (required, slug, unique per dataset — a real 400 on collision), `name`, `status`, `input_message`, `seeded_context` (JSON), `expectations` (JSON). |
+| Case update | **Real**, implemented. `PATCH .../evaluations/datasets/{dataset_id}/cases/{case_id}/` — `name`/`status`/`input_message`/`seeded_context`/`expectations` only. `key` is generated as a writable field but `evaluations/services.py update_evaluation_case` only ever reads the five fields above from the PATCH payload — `key` is silently ignored on update (verified directly against the service). The edit form never offers to change it, showing it as read-only text instead, so the UI never implies a no-op write would succeed. |
+| Case delete | **No delete endpoint exists.** Not implemented — nothing to protect/cascade-check. |
+| Case reorder / bulk import / bulk update / copy | **No such endpoint exists.** Not implemented. Server ordering (`dataset_id, key`) is the only ordering there is. |
+
+**Snapshot semantics** (master prompt Part 6/26-28 — verified directly
+against `evaluations/models.py`): `EvaluationDataset`/`EvaluationCase` are
+plain, mutable, live content. `EvaluationCaseSnapshot` is a separate,
+internal-only model — never exposed on any public route — created once per
+`EvaluationRun` at run-creation time, copying every case the run will
+execute (`key`/`name`/`input_message`/`seeded_context`/`expectations`) into
+an immutable row that `EvaluationResult` (via `case_snapshot`) actually
+scores against. A run's meaning therefore can never change because someone
+later edited or deleted the live case — Chunk 1's `EvaluationResult`
+rendering (`case_key`, the Run detail page) has always been reading
+snapshot data, not live `EvaluationCase` rows, from the start.
+**Consequence for this chunk's UI**: editing or disabling a live
+`EvaluationCase` is stated explicitly, in real UI copy on the Dataset
+detail page, to only affect *future* evaluation runs — never described as
+versioning (no such concept exists in the public contract; snapshotting is
+not dataset versioning) and never implying a past run's results will
+change. Proven directly in the real-backend E2E (`e2e/evaluations.spec.ts`,
+"editing a live case does not alter a past evaluation run's recorded
+results") by visiting a historical run whose snapshot evidence
+(`refund-flow`/`unsafe-content-case`) is unrelated to, and unaffected by,
+the separate live `EvaluationCase` fixtures used for the create/edit flows.
+
+**RBAC**: read — every real workspace role (`CanViewEvaluations`); manage
+(create/update dataset or case) — owner/admin/support_manager
+(`CanManageEvaluations`, the same `EVALUATION_MANAGE_ROLES` Chunk 1
+discovered). Mirrored client-side as `canManageEvaluations()` in
+`features/evaluations/types.ts` for UX gating only (hides "New
+dataset"/"New case"/"Edit" controls for support_agent/viewer) — the backend
+permission class is the sole authority; proven both in a unit test and the
+real-backend E2E (Workspace B's real support_agent role sees no manage
+controls at all).
+
+**Structured input safety**: `seeded_context`/`expectations` are bounded,
+`extra="forbid"` Pydantic-validated structures server-side
+(`evaluations/schemas.py`) with no single stable, fully-typed public field
+list for every nested shape they can carry — edited as controlled JSON
+textareas (`EvaluationCaseForm`), `JSON.parse`-validated client-side before
+submit (a parse failure is a safe, local, never-sent error), never
+`eval`/`new Function`. A case's `input_message`/`seeded_context`/
+`expectations` may literally contain HTML/script-looking or
+prompt-injection-looking text (e.g. `<script>...</script>`, "Ignore
+previous instructions") — rendered as plain React text / through the
+shared `StructuredPayload` viewer exactly like every other domain's
+untrusted content, proven inert in both a unit test and the real-backend
+E2E with a genuine `<script>` payload that never executes.
+
+**Routes**: `/app/evaluations?tab=datasets` (Datasets tab, alongside the
+existing default Runs tab — plain `<Link>`s with `aria-current`, same
+pattern as Knowledge's Documents/Sources tabs, no new top-level nav item)
+and `/app/evaluations/datasets/[datasetId]` (dataset detail — metadata,
+edit form, and its cases list with create/edit). No separate case-detail
+route (see the contract table above).
+
+**Server state**: `["workspaces", wsId, "evaluations", "datasets", "list"|"detail", ...]`
+and `["workspaces", wsId, "evaluations", "datasets", "detail", datasetId, "cases", "list", params]`
+query keys (`features/evaluations/query-keys.ts`) — same workspace-first
+policy as every other domain, proven in both a unit test (A→B switch,
+zero stale-A leakage) and the real-backend E2E. No polling — dataset/case
+content only changes on an explicit operator write, never asynchronously.
+
+**Mutation safety**: every dataset/case mutation is `retry: 0` (blind
+retry could double-submit a create); duplicate submit while pending is
+blocked at the calling form (`mutation.isPending` checked before
+`mutate()`); no optimistic-concurrency guard is invented client-side since
+none exists server-side (see "Dataset update" above).
+
+**Network**: dataset list — one request; dataset detail — one request;
+case list — one bounded request regardless of case-row count (no N+1,
+proven in a unit test asserting an exact call count); one request per
+mutation.
+
+**Phase 23 Chunk 2 schema gap register** (continuing Chunk 1's three; none
+blocking):
+
+| # | Endpoint / field | Gap | Frontend narrowing | Blocking? |
+| --- | --- | --- | --- | --- |
+| 4 | `EvaluationCase.status` / `EvaluationCaseWrite.status` / `PatchedEvaluationCaseWrite.status` | Generated as `WebhookEndpointStatusEnum` — a drf-spectacular component-naming collision (identical two-value `"active" \| "disabled"` shape as `ToolDefinition.status`'s prior gap), never the real semantics. | Re-typed locally as `EvaluationCaseStatusValue` in `features/evaluations/types.ts`. | No |
+| 5 | `evaluations_datasets_create`, `evaluations_datasets_cases_create` | Both generate their 201 response as the *request* write shape instead of the real full body the view returns (`Response(<ReadSerializer>(obj).data, status=201)`) — same generated-schema deficiency as Integrations' `integrations_create` gap. | `createEvaluationDataset`/`createEvaluationCase` in `features/evaluations/api.ts` declare the real return type explicitly. | No |
+| 6 | `EvaluationCaseWrite`/`PatchedEvaluationCaseWrite` `.key` | Generated as writable on update, but `update_evaluation_case` never reads it from the PATCH payload — see "Case update" above. | `UpdateEvaluationCaseInput` (`features/evaluations/types.ts`) omits `key` entirely; the edit form shows it as read-only text. | No |
+
+### Evaluation Run execution: start, cancel, replay, compare (Phase 23 Chunk 3)
+
+Contract re-discovery for this chunk read `evaluations/views.py`,
+`evaluations/services.py`, `evaluations/urls.py`, `evaluations/permissions.py`,
+and `evaluations/tests/test_views.py` directly rather than trusting Chunk 1's
+notes: Chunk 1 had found start/cancel but explicitly said no dedicated
+replay/compare endpoint was documented. Re-discovery found that both exist
+for real — `evaluations/urls.py` already routes
+`runs/{run_id}/results/{result_id}/replay/` and `compare/`, and
+`evaluations/services.py` (`replay_evaluation_case`,
+`compare_evaluation_runs`) implements both with real, tested behavior. This
+chunk therefore implements all four capabilities against their real
+contract, not the client-side-only compare fallback the chunk spec allowed
+for if no real endpoint existed.
+
+**Public API contract**:
+
+| Capability | Status |
+| --- | --- |
+| Start run | **Real.** `POST .../evaluations/runs/` — body `{dataset_id, agent_version_id, threshold_config?}`. `CanRunEvaluations` (owner/admin/support_manager — `EVALUATION_RUN_ROLES`, defined as `EVALUATION_MANAGE_ROLES` verbatim). Throttled (`evaluation_execution` scope) — listing is not. Creates the `EvaluationRun` in `pending` status and snapshots every active case in the dataset at creation time (`EvaluationCaseSnapshot`); a dataset with zero active cases is a real 400 (`evaluation_dataset_no_active_cases`); a non-published `agent_version_id` is a real 400 (`evaluation_agent_version_not_published`, re-validated server-side regardless of what the picker offers). Runs execute asynchronously (Celery, `evaluations/tasks.py`) — the response returns the `pending` run immediately; the UI does not block on completion. |
+| Cancel run | **Real.** `POST .../evaluations/runs/{run_id}/cancel/`, same `CanRunEvaluations` gate. Only valid for a non-terminal run (`pending`/`running`); an already-terminal run is a real 409 (`evaluation_run_not_cancellable`) — proven directly in `test_trigger_run_then_read_results_and_cancel`'s "cancel again is 409" assertion, mirrored by this chunk's own cancel-twice unit test. Any still-`pending` result is cancelled outright; a `running` result is left to finish. |
+| Replay result | **Real.** `POST .../evaluations/runs/{run_id}/results/{result_id}/replay/` — same `CanRunEvaluations` gate, same `evaluation_execution` throttle scope as start. Only valid for a result already in a terminal status (`succeeded`/`failed`/`cancelled`); replaying a still-`pending`/`running` result is a real 409 (`evaluation_result_not_replayable`). Never mutates the original result — creates a brand-new sibling `EvaluationResult` (`replay_of_id` pointing back at it) against the *same* case snapshot and the *same* run's own agent version (documented semantics — replaying against a different version is what start + compare are for, not replay). |
+| Compare runs | **Real** (corrected from Chunk 1's "not documented" note — see above). `POST .../evaluations/compare/` — body `{baseline_run_id, candidate_run_id}`, same `CanRunEvaluations` gate. Server computes real per-run metrics (`pass_rate`, `forbidden_tool_violations`, `approval_violations`, `handoff_rate`) over each run's own non-replay results, real `deltas` (candidate minus baseline, rounded server-side), and real threshold pass/fail verdicts against the *candidate* run's own `threshold_config` — this chunk renders exactly that response, inventing no additional score, confidence, or "% improvement" label. Two runs over different case sets (by `case_key`) are rejected outright as a real 400 (`evaluation_runs_not_comparable`) rather than silently comparing an incompatible subset. |
+
+**Statuses affected**: `EvaluationRunStatus` (`pending → running → {succeeded,
+partial, failed, cancelled}`, `EVALUATION_RUN_TERMINAL_STATUSES` from Chunk
+1) and `EvaluationResultStatus` (`pending → running → {succeeded, failed,
+cancelled}`, `EVALUATION_RESULT_TERMINAL_STATUSES`) — both re-confirmed
+unchanged against `evaluations/models.py` for this chunk; a replay's new
+result starts at `pending` exactly like a run's original results.
+
+**UI**:
+
+- **Start Run** — `EvaluationDatasetDetailPage`'s new "Run this dataset"
+  card (`StartRunPanel`/`StartEvaluationRunForm`,
+  `features/evaluations/components/start-evaluation-run-form.tsx`). The
+  dataset is fixed by page context, so the only real choice is which
+  *published* agent version to run — a bounded, coherent input contract, not
+  a free-form POST. There is no "list every published version across every
+  agent" backend endpoint (`agents/urls.py` only nests versions under one
+  agent), so the picker is a two-step Agent → Version select, backed by a
+  minimal new read-only slice (`fetchAgentDefinitionOptions`/
+  `fetchAgentVersionOptions` in `features/evaluations/api.ts` — id/name/
+  status only, not a new `features/agents` domain). `threshold_config` is
+  not exposed as a form field (free-form JSON with no fixed shape; a run
+  started here always uses `{}`, a real, valid input). A successful start
+  navigates straight to the new run's detail page, which polls it exactly
+  like any other run (Chunk 1's `pollWhileNonTerminalRun`).
+- **Cancel Run** — a button in the Run detail page's header
+  (`CancelRunControl`), shown only while `!isTerminalEvaluationRunStatus`.
+  Gated behind `ConfirmDialog` (same primitive as webhook redrive) — unlike
+  redrive, cancelling is not an at-least-once/duplicable external side
+  effect, so the copy is a plain, accurate description, not a duplicate-
+  effect warning.
+- **Replay** — a "Replay" button per result row in the Run detail page's
+  results list (`ReplayResultControl`), shown only for a result already
+  `isTerminalEvaluationResultStatus`. No confirmation dialog: replay creates
+  a new result rather than destroying anything, matching the risk level of
+  "New case"/dataset edits elsewhere in this domain, not "Cancel run"/
+  webhook redrive.
+- **Compare** — the Runs tab (`EvaluationRunsTab`) gets a checkbox per row
+  (RBAC-gated) bounded to selecting exactly two runs (a third pick replaces
+  the oldest selection) and a "Compare selected" button that calls the real
+  compare endpoint and renders `EvaluationRunCompareResultPanel`: baseline/
+  candidate metrics, real deltas, real threshold verdicts, and real
+  regressions — every field traced directly to `compare_evaluation_runs`'s
+  actual return shape (see schema gap 7 below), never a client-computed
+  score.
+
+**RBAC**: all four actions gated to `canRunEvaluations()`
+(`features/evaluations/types.ts` — owner/admin/support_manager, mirroring
+the backend's `CanRunEvaluations`/`EVALUATION_RUN_ROLES`) — hidden, not
+disabled, for support_agent/viewer, exactly like Chunk 2's manage gating.
+Kept as its own function (not reused from `canManageEvaluations`) since the
+backend defines run/manage as separate permission classes that could
+diverge independently, even though today's role sets are identical. The
+backend permission class remains the sole authority regardless of what
+renders client-side — proven in this chunk's unit tests (no route in this
+frontend calls these endpoints without going through the gated controls,
+and the backend's own permission tests independently cover a direct
+unauthorized API call).
+
+**Workspace isolation**: start/cancel/replay/compare all resolve their
+`run_id`/`result_id`/`dataset_id`/`agent_version_id` path and body
+arguments through the same workspace-scoped selectors as every other
+Evaluations endpoint (`run_get_for_workspace_or_404`,
+`case_get_for_workspace_or_404`, and the `AgentVersion` lookup in
+`EvaluationRunListCreateView.create` filtered by
+`agent_definition__workspace`) — a cross-workspace ID for any of the four
+is a real 404, never a leaked-existence 403/400, matching every other
+domain's tenant-isolation posture. No new frontend cache key crosses a
+workspace boundary: run/result mutations invalidate only
+`evaluationKeys.runLists`/`runDetail`/`results` for the *acting* workspace.
+
+**Mutation safety**: every mutation (`useStartEvaluationRunMutation`,
+`useCancelEvaluationRunMutation`, `useReplayEvaluationResultMutation`,
+`useCompareEvaluationRunsMutation`) is `retry: 0` — a blind retry on an
+ambiguous network completion could double-start a run, double-cancel,
+double-replay, or resubmit a comparison. Duplicate-submit-while-pending is
+blocked at each calling control by disabling the trigger while
+`mutation.isPending` (proven in a unit test per action, holding the mocked
+response open with a deterministic delay rather than a real sleep).
+Cancel is the only one of the four gated behind an explicit confirmation
+dialog — replay/compare/start are all additive (they create a new run/
+result or compute a read) rather than terminating something in progress.
+
+**Network**: one request per action — no polling added by this chunk (a
+replay's new `pending` result is picked up by the existing results-list
+poll once the run itself is non-terminal, or on the next manual
+refetch/mount if the run has already finished).
+
+**Phase 23 Chunk 3 schema gap register** (continuing Chunks 1-2's six; none
+blocking):
+
+| # | Endpoint / field | Gap | Frontend narrowing | Blocking? |
+| --- | --- | --- | --- | --- |
+| 7 | `api_v1_workspaces_evaluations_compare_create` | Generated 200 response has `content?: never` — drf-spectacular could not infer a body shape from `EvaluationRunCompareView.post`'s plain-dict `Response(...)` with only an `OpenApiResponse(description=...)`, no `response=` schema. | `EvaluationRunCompareResult` (`features/evaluations/types.ts`) is hand-typed directly from `services.compare_evaluation_runs`'s real return shape; `compareEvaluationRuns` in `api.ts` asserts it explicitly (`as unknown as Promise<EvaluationRunCompareResult>`). | No |
+
+**Running Phase 23 schema-gap total**: 7 (3 from Chunk 1, 3 from Chunk 2, 1
+from this chunk).
+
+**Deferred / N/A in this chunk**: no capability was deferred — start,
+cancel, replay, and compare are all implemented against their real,
+re-verified contract. The only remaining Phase 23 deferral is the
+workspace-scoped Observability/trace resource noted since Chunk 1 (still
+does not exist publicly — `GET /metrics/` remains Prometheus deployment
+infrastructure, not a tenant-facing API).
+
+### Phase 23 final acceptance gate (Chunk 4)
+
+Cross-cutting acceptance work deferred by Chunks 1-3: a full accessibility
+gate, full multi-viewport responsive validation, a final double full
+regression, a documentation completeness pass, defect-ledger finalization,
+and a security re-scan across the whole Evaluations feature (run list/
+detail, dataset list/detail, case create/edit, start/cancel/replay/compare,
+compare result view). No new product capability was added.
+
+**Three real defects found and fixed** (the first genuine axe/manual scan
+and keyboard-only journey against these surfaces — Chunks 1-3 only ran
+functional E2E, never axe or a full keyboard journey, against them):
+
+- **`evaluation-dataset-detail-page.tsx`'s `CaseRow` nested a `<details>`
+  disclosure (`StructuredPayload`, shared by every domain's redacted-payload
+  viewer) directly inside a `<dl>`** — a real `definition-list` axe
+  violation (impact: serious): a `<dl>` may only directly contain
+  `<dt>`/`<dd>` groups (optionally wrapped in one `<div>` per group), never
+  a `<span>`/`<details>`. Every case row's collapsed view hit this on any
+  dataset with at least one case, so it affected the base dataset-detail
+  view and every state layered on top of it (new/edit dataset, new/edit
+  case, start-run, and the content-safety fixture). Fixed by giving only
+  the one real name/value pair (Input message) its own `<dl>`, and moving
+  the two `StructuredPayload` blocks (Seeded context, Expectations) to a
+  plain sibling `<div>` — they were never real `<dt>`/`<dd>` content once
+  rendered as a disclosure.
+- **`evaluation-run-compare-panel.tsx`'s `RunLabel` link used `hover:underline`
+  only, inside a `text-text-secondary` prose sentence** ("Baseline Run #…
+  vs. candidate Run #…") — a real `link-in-text-block` axe violation
+  (impact: serious, measured contrast 1.31:1 against the surrounding text,
+  required 3:1): a link embedded in a block of text must be distinguishable
+  from its surroundings without relying on hover or color alone. Every
+  other in-page link in this codebase is either underlined unconditionally
+  already or is a standalone "← Back to X" link (not embedded in a
+  sentence, so the rule never applies) — this was the one new, genuinely
+  different pattern Chunk 3 introduced. Fixed by underlining unconditionally.
+
+- **The shared `ConfirmDialog` (`components/ui/confirm-dialog.tsx`, used by
+  webhook redrive, credential rotation, and this chunk's own Cancel Run) did
+  not actually return focus to its trigger on close** — its own doc comment
+  claimed Radix handled this "for free," which is true only when composed
+  with `Dialog.Trigger`; every real caller here renders its own external
+  trigger button and passes only `open`/`onOpenChange`, so Radix had no
+  reference to restore focus to and fell back to `<body>`. Not a keyboard
+  *trap* (nothing prevented tabbing again), but a real loss of keyboard
+  position on every dismiss, in every domain that uses this component —
+  caught by this chunk's full keyboard-only Evaluations journey test
+  (`expect(document.activeElement?.tagName).not.toBe("BODY")` after an
+  Escape-dismiss), which no earlier chunk's keyboard tests (webhook
+  redrive/credential rotation) had asserted. Fixed inside `ConfirmDialog`
+  alone — no caller changed — by capturing `document.activeElement` when
+  the dialog opens and restoring it via `onCloseAutoFocus`.
+
+All three were narrow, targeted fixes to existing Chunk 2/3 code (two
+Evaluations-specific, one in a pre-existing shared component now also
+benefiting webhook redrive and credential rotation) — no new feature, no
+redesign. Regression coverage: `e2e/accessibility.spec.ts`'s new
+Evaluations axe scans and keyboard journey (below) now pass and would have
+caught any of the three regressions; the two axe nodes were also
+re-verified clean with a direct axe run against the fixed build before the
+final regression pass.
+
+**Accessibility**: `@axe-core/playwright` (`e2e/accessibility.spec.ts`),
+the same tool and pattern every prior phase's Chunk 4 used — axe scans
+asserting zero serious/critical violations, plus a dedicated
+"Keyboard-only pass" describe block. Routes/states scanned: run list, run
+detail (succeeded and running/non-terminal, including the read-only
+support_agent view with Cancel/Replay absent), datasets tab, dataset detail
+(owner view), the New/Edit dataset forms, the New/Edit case forms, the
+Start Run form, the Cancel Run confirmation dialog, the Compare result view,
+a run-list network-error state, and the unsafe-content-case dataset detail
+(content-safety, re-scanned with axe rather than only the earlier
+script/XSS-inertness assertions). A full keyboard-only journey test
+(`"the full Evaluations journey is keyboard-operable end to end..."`)
+drives nav → runs list → run detail → Cancel run (open + Escape-dismiss,
+no trap, focus returns to the triggering button) → Replay → runs list →
+select two rows via `Space` → Compare → Datasets tab → dataset detail → New
+case (create via keyboard only) → Edit that case (save via keyboard only)
+→ back to the feature's own nav entry (the Runs/Datasets tab strip only
+renders on the list page itself, so the sidebar's "Evaluations" link —
+already used to enter the feature earlier in the same test — is the real
+keyboard path back from a detail page) — every step via `.focus()` +
+`expect(...).toBeFocused()` on the real interactive element (never a blind
+`Tab` count, which would depend on DOM-order implementation details),
+asserting visible focus and no keyboard trap at each step. Confirmed by
+direct source inspection (not just by these tests passing) that no
+Evaluations component uses a clickable `<div>`/`<span>` — every interactive
+element found is a real `<button>` or `<Link>` (`onClick` occurs only on
+`<Button>` in this domain).
+
+**Responsive**: `e2e/responsive.spec.ts`, all four required viewports
+(375×812, 768×1024, 1280×800, 1440×900) against run list, run detail
+(succeeded, and running with owner controls), datasets tab, and dataset
+detail (owner controls) — zero page-level horizontal overflow at any
+viewport/route. At 375px specifically: the run list's comparison table
+(`min-w-[760px]`) was verified to scroll inside its own `overflow-x-auto`
+wrapper, not the page (`el.scrollWidth > el.clientWidth` measured directly
+on that wrapper, not inferred), and the case create form (including its
+JSON textareas) remains fully usable with no overflow. Every structured/
+JSON payload in this domain (`StructuredPayload`, used for
+`scorer_output`/`seeded_context`/`expectations`) already renders inside its
+own fixed-max-height, independently `overflow-auto` `<pre>` — the same
+bounded-local-scroll pattern proven for Agent Runs' execution trace in
+Phase 20 Chunk 4, confirmed still true here by direct source inspection.
+
+**Documentation**: this pass re-read the Chunk 1-3 sections above in full
+and confirms: the public contract (dataset/case CRUD, run list/detail/
+start/cancel/replay, compare) is documented end to end; RBAC
+(`CanViewEvaluations`/`CanManageEvaluations`/`CanRunEvaluations`) and
+workspace isolation are documented per capability with their own real
+backend-selector evidence; snapshot immutability is documented with its own
+real-backend proof; metric semantics were re-audited across every
+Evaluations file this chunk (`grep` for "confidence"/"quality score"/
+"reliability score"/"% accurate" across `features/evaluations/`) — the only
+matches are two source comments *describing* the guarantee (no such
+language ever renders); content safety is documented per surface; the
+Observability-absence statement is consistent across Chunks 1 and 3
+(`GET /metrics/` only, no tenant-facing resource, no UI built or implied);
+and the schema-gap register below consolidates all 7 running gaps in one
+place, none blocking.
+
+**Consolidated Phase 23 schema-gap register (7 total, none blocking)**:
+
+| # | Chunk | Endpoint / field | Gap | Frontend narrowing |
+| --- | --- | --- | --- | --- |
+| 1 | 1 | `EvaluationRun.threshold_config`, `EvaluationResult.scorer_output` | Generated as `unknown` (plain `JSONField`s, no fixed shape). | Rendered via `StructuredPayload`, never destructured. |
+| 2 | 1 | `EvaluationResult.agent_run_id`, `.replay_of_id` | Generated as required `string`, but nullable in the model. | Re-typed as `string \| null`; every render site handles `null`. |
+| 3 | 1 | `evaluations_runs_list`, `evaluations_runs_results_list` | Generated query type omits the real `status`/`dataset_id`/`passed` filters. | Narrowed locally in `features/evaluations/api.ts`. |
+| 4 | 2 | `EvaluationCase.status` (write/patch variants) | Generated as `WebhookEndpointStatusEnum` (a drf-spectacular naming collision). | Re-typed as `EvaluationCaseStatusValue`. |
+| 5 | 2 | `evaluations_datasets_create`, `evaluations_datasets_cases_create` | Generated 201 response is the request shape, not the real full body returned. | Explicit real return types in `api.ts`. |
+| 6 | 2 | `EvaluationCaseWrite.key` (update) | Generated as writable, but the service never reads it on update. | Omitted from `UpdateEvaluationCaseInput`; edit form shows it read-only. |
+| 7 | 3 | `api_v1_workspaces_evaluations_compare_create` | Generated response has `content?: never` (no `response=` schema on the view). | Hand-typed `EvaluationRunCompareResult`, asserted explicitly in `api.ts`. |
+
+**Deferred capabilities, consolidated and still accurate**: dataset/case
+delete or archive has no backend endpoint (soft-removal via `status` is the
+real, only path); case reorder/bulk import/bulk update/copy has no backend
+endpoint; no dataset-scoped run browse/filter UI (`EvaluationRun.dataset_id`
+is a plain unlinked identifier on Run detail); no workspace-scoped
+Observability/trace/span resource exists publicly (`GET /metrics/` remains
+Prometheus deployment infrastructure only) — each of these is a real,
+verified backend absence, not an oversight, and none was built around with
+an invented UI.
+
+**Security re-scan** (whole Evaluations domain — `features/evaluations/`,
+its route files under `app/(protected)/app/evaluations/`, and
+`e2e/evaluations.spec.ts`): zero occurrences of `dangerouslySetInnerHTML`,
+`eval(`, or `new Function(` (`StructuredPayload`'s own doc comment states
+the same guarantee it's shared by every domain that predates Evaluations).
+Zero `localStorage`/`sessionStorage` reads or writes anywhere in the
+domain — every evaluation input/output/metric/filter is server-state
+(TanStack Query) or transient component state only, never persisted
+client-side, matching the original spec. No `console.log`/`console.error`/
+`console.warn` call anywhere in the domain, so no risk of a client-side
+secret/token landing in the browser console from this feature (the
+app-wide token-storage guarantees in "Security notes" above are unchanged
+and untouched by this feature).
+
+**Test-authoring bugs found and fixed while stabilizing this chunk's own
+new E2E coverage** (not product defects, listed separately from the three
+above): (1) the keyboard journey's final "back to Evaluations" step
+originally used `getByRole("link", { name: "Runs" })`, which matched the
+sidebar's own "Agent Runs" link first (substring match) — fixed with
+`exact: true`, which then surfaced (2) the tab strip it was trying to
+click doesn't render on the dataset detail page at all (only on the list
+page), so the real keyboard path back is the sidebar's "Evaluations" entry,
+not a tab link — fixed by using that instead. (3) A pre-existing Chunk 3
+test (`"owner replays a terminal result against the real backend"`)
+asserted exactly one `"workspace-a-only-case"` match, which was only ever
+true by accident of no prior replay having touched that run — this
+chunk's own keyboard journey legitimately replays it too (real, correct
+backend behavior: a second result sharing the same case_key), so the
+assertion was loosened to `.first()`, matching what "at least one, real"
+actually requires.
+
+**Final Phase 23 regression** (this chunk's own runs, against this
+worktree's real backend, with a dedicated single Celery worker confirmed
+serving the queue and no stray/ambiguous backend or frontend process bound
+to the Playwright `webServer` ports before each run): Vitest 581/581
+passed/0 failed/0 skipped (unchanged from Chunk 3's baseline — none of the
+three real fixes needed a unit-test behavior change: two were pure
+axe/contrast issues and one was a Radix focus-restoration fix with no
+existing unit coverage to update). Two full, consecutive, clean Playwright
+runs — grown from Chunk 3's 300 collected to 338 (this chunk's own new
+axe/responsive/keyboard tests) — both passed 337/338 with the same single
+accepted `PHASE22-3-04` fixme and zero other skips/failures. `npm run
+lint`, `npm run typecheck`, and `npm run build` all pass clean. `npm run
+check:api-types` reports the contract up to date (zero drift) — no backend
+route changed this chunk. Production dependency audit: 0 critical/0 high
+(unchanged). Full (dev-inclusive) audit: the same 2 pre-existing dev-only
+high-severity `js-yaml`/`@redocly/openapi-core` advisories noted since
+Phase 21 Chunk 4 — untouched, no fix available that doesn't break
+`openapi-typescript`'s toolchain, and irrelevant to any shipped runtime
+code.
+
+**Known, pre-existing, environment-only condition (not a defect, not
+fixed)**: `npm run format:check` reports every file in the repository
+(not just Evaluations files) as needing reformatting on this Windows
+checkout, because this machine's `core.autocrlf=true` converts the
+repository's real LF line endings to CRLF on checkout while Prettier
+expects LF. This is exactly the class of issue commit `fix(frontend):
+revert unintended repo-wide README reformatting` (Chunk 3) guards against —
+running `prettier --write .` here would rewrite every file's line endings
+as a side effect having nothing to do with actual formatting, which is
+worse than the warning itself. Not run; reported here instead so it isn't
+mistaken for newly-introduced drift.
 
 1. Start the backend (see `../README.md`) so `NEXT_PUBLIC_API_BASE_URL`
    has something to talk to. It must be an origin the backend's
@@ -2496,7 +3068,7 @@ empty/error/workspace-isolation/unknown-status coverage as every other
 domain, plus a conversation-scoped test proving only the real
 `conversation`-filtered rows render.
 
-## End-to-end tests (`e2e/`, Phase 18 Chunk 4; extended Phase 19 Chunks 1-3, Phase 20 Chunks 1-3, Phase 22 Chunks 1-2)
+## End-to-end tests (`e2e/`, Phase 18 Chunk 4; extended Phase 19 Chunks 1-3, Phase 20 Chunks 1-3, Phase 22 Chunks 1-2, Phase 23 Chunks 1-2)
 
 Playwright (`@playwright/test`), Chromium only — the mandatory acceptance
 browser for this phase; Firefox/WebKit weren't added (single-browser
@@ -2523,7 +3095,27 @@ ticket with a real `conversation_id` (for the Ticket → Conversation link),
 one resolved Workspace B ticket created directly with no conversation (for
 the status filter and the honest no-conversation case), and one Workspace A
 ticket (for isolation/cross-workspace tests) — no separate cleanup needed,
-since `Ticket.workspace` also cascade-deletes.
+since `Ticket.workspace` also cascade-deletes. Extended in Phase 23 Chunk 1
+with real `EvaluationDataset`/`EvaluationRun`/`EvaluationCaseSnapshot`/
+`EvaluationResult` rows, created directly via the ORM (never through the
+real `POST .../runs/` + Celery execution path, which would need the
+deterministic evaluation pipeline to actually run and would race this
+script's own synchronous setup): a succeeded Workspace B run with one
+passed result (cross-linked to the real `ws_b_agent_run_succeeded` fixture)
+and one failed result carrying genuine HTML/script/prompt-injection-looking
+content in its safe scorer fields, a non-terminal (running) Workspace B run
+for the detail-polling proof, and a distinct Workspace A run/result for
+isolation. `EvaluationRun.dataset`/`.agent_version` are both
+`on_delete=PROTECT` — cleaned up in the same dependency-ordered pattern as
+`AgentRun.agent_version` (see `global-teardown.ts`'s comments). Extended
+again in Phase 23 Chunk 2 with real, live `EvaluationCase` rows (created
+directly via the ORM, independent of the immutable `EvaluationCaseSnapshot`
+fixtures above): two in Workspace A's dataset (one normal, one carrying
+genuine HTML/script/prompt-injection-looking content for the dataset/case
+management content-safety proof) and one in Workspace B's dataset (for the
+read-only-role/isolation proofs) — no separate teardown needed, since
+`EvaluationCase.dataset` cascade-deletes and `EvaluationDataset.workspace`
+cascade-deletes with the workspace (no `PROTECT` relation of its own).
 `playwright.config.ts`'s `webServer` array starts both halves itself —
 Django (`manage.py runserver`) and the frontend built and started in
 **production mode** (`next build && next start`, not `next dev`) — so the

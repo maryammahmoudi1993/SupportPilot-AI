@@ -17,7 +17,12 @@
  * `/app/integrations` is real — one coherent entry per master prompt Part G
  * §27, not separate Webhooks/Notifications/Deliveries entries (those remain
  * deferred to a later Phase 22 chunk, and will live under this same route
- * family as tabs/subroutes rather than new top-level nav items).
+ * family as tabs/subroutes rather than new top-level nav items). Phase 23
+ * Chunk 1 adds "Evaluations" now that `/app/evaluations` is real — one
+ * coherent entry (master prompt Part D): Observability/Traces are deferred
+ * to a later Phase 23 chunk and, per the same "one route family" policy,
+ * will live under this same `/app/evaluations` route as tabs rather than a
+ * separate top-level nav item.
  */
 export interface NavItem {
   id: string;
@@ -36,4 +41,5 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { id: "handoffs", label: "Handoffs", path: "/app/handoffs" },
   { id: "knowledge", label: "Knowledge", path: "/app/knowledge" },
   { id: "integrations", label: "Integrations", path: "/app/integrations" },
+  { id: "evaluations", label: "Evaluations", path: "/app/evaluations" },
 ];

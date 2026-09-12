@@ -13,6 +13,7 @@ import { resetApprovalMockState } from "@/tests/msw/approval-handlers";
 import { resetAuthMockState } from "@/tests/msw/handlers";
 import { resetCustomerMockState } from "@/tests/msw/customer-handlers";
 import { resetConversationMockState } from "@/tests/msw/conversation-handlers";
+import { resetEvaluationMockState } from "@/tests/msw/evaluation-handlers";
 import { resetHandoffMockState } from "@/tests/msw/handoff-handlers";
 import { resetIntegrationMockState } from "@/tests/msw/integration-handlers";
 import { resetKnowledgeMockState } from "@/tests/msw/knowledge-handlers";
@@ -65,6 +66,7 @@ beforeEach(() => {
   resetAgentRunMockState();
   resetToolExecutionMockState();
   resetApprovalMockState();
+  resetEvaluationMockState();
   resetHandoffMockState();
   resetKnowledgeMockState();
   resetIntegrationMockState();

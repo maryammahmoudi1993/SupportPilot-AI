@@ -12,6 +12,7 @@ const CLEANUP_SCRIPT = `
 from accounts.models import User
 from agents.models import AgentRun
 from approvals.models import ApprovalRequest
+from evaluations.models import EvaluationResult, EvaluationRun
 from knowledge.models import KnowledgeDocument, KnowledgeSource, RetrievalEvent
 from notifications.models import Delivery
 from tickets.models import HumanHandoff
@@ -31,6 +32,13 @@ from workspaces.models import Workspace
 # workspace cascade can proceed. HumanHandoff has no PROTECT relations
 # (workspace CASCADE, agent_run/ticket SET_NULL) so it needs no special
 # ordering, but is deleted explicitly here for a clean, auditable log line.
+# Phase 23 Chunk 1: EvaluationRun.dataset/.agent_version are both
+# on_delete=PROTECT (evaluations/models.py) — the identical "PROTECT blocks
+# even a row about to be co-deleted" hazard as AgentRun.agent_version above,
+# so real E2E EvaluationRun rows (which CASCADE their own
+# EvaluationCaseSnapshot/EvaluationResult rows) must be deleted before
+# AgentRun/Workspace, in that order.
+#
 # ToolDefinition rows are global/code-owned (no workspace FK) and are never
 # deleted here — sync_tool_definitions() is safely re-run/no-op on the next
 # E2E setup. KnowledgeDocument.source is on_delete=PROTECT, but both
@@ -65,10 +73,28 @@ deleted_handoffs = HumanHandoff.objects.filter(workspace__name__startswith="E2E 
 deleted_knowledge_documents = KnowledgeDocument.objects.filter(workspace__name__startswith="E2E ").delete()
 deleted_knowledge_sources = KnowledgeSource.objects.filter(workspace__name__startswith="E2E ").delete()
 deleted_tool_executions = ToolExecution.objects.filter(workspace__name__startswith="E2E ").delete()
+# Phase 23 Chunk 3: EvaluationResult.replay_of is a self-referential
+# on_delete=SET_NULL FK guarded by a partial unique constraint
+# (eval_result_one_initial_per_snapshot: one replay_of__isnull=True row per
+# case_snapshot). A real E2E replay run (evaluations/services.py
+# replay_evaluation_case) leaves both the original result and its replay in
+# the same to-be-deleted EvaluationRun. Django's cascade collector nulls
+# SET_NULL FKs in a pass separate from (and before) the actual row deletes,
+# so nulling the replay's replay_of collides with the original result's own
+# already-NULL replay_of under that same partial unique index — a real
+# IntegrityError, reproduced directly running this teardown against a real
+# replay fixture (defect PHASE23-3-D01). Deleting every replay row outright
+# first (never SET_NULL, just gone) avoids the collector ever attempting
+# that intermediate update; the original (non-replay) row is untouched and
+# still satisfies the constraint alone.
+deleted_evaluation_replays = EvaluationResult.objects.filter(
+    run__workspace__name__startswith="E2E ", replay_of__isnull=False
+).delete()
+deleted_evaluation_runs = EvaluationRun.objects.filter(workspace__name__startswith="E2E ").delete()
 deleted_runs = AgentRun.objects.filter(workspace__name__startswith="E2E ").delete()
 deleted_users = User.objects.filter(email__startswith="e2e-").delete()
 deleted_workspaces = Workspace.objects.filter(name__startswith="E2E ").delete()
-print("E2E cleanup:", deleted_webhook_deliveries, deleted_retrieval_events, deleted_approvals, deleted_handoffs, deleted_knowledge_documents, deleted_knowledge_sources, deleted_tool_executions, deleted_runs, deleted_users, deleted_workspaces)
+print("E2E cleanup:", deleted_webhook_deliveries, deleted_retrieval_events, deleted_approvals, deleted_handoffs, deleted_knowledge_documents, deleted_knowledge_sources, deleted_tool_executions, deleted_evaluation_replays, deleted_evaluation_runs, deleted_runs, deleted_users, deleted_workspaces)
 `;
 
 export default async function globalTeardown(): Promise<void> {

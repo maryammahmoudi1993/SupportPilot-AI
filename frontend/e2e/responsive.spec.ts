@@ -162,6 +162,49 @@ for (const viewport of VIEWPORTS) {
         await assertNoHorizontalOverflow(page);
       });
     }
+
+    // Phase 23 Chunk 4 (final Evaluations/Observability acceptance gate):
+    // the Evaluations feature's list/tab/detail surfaces, at every required
+    // viewport. Workspace A (switched into) is used for the two pages that
+    // depend on an OWNER role (dataset detail with manage controls, run
+    // detail with a Cancel control) so the wider control surface is
+    // exercised, not just the read-only support_agent view.
+    const EVALUATIONS_PAGES: {
+      name: string;
+      path: (data: ReturnType<typeof e2eData>) => string;
+      switchToWorkspaceA?: boolean;
+    }[] = [
+      { name: "Evaluations: run list", path: () => "/app/evaluations" },
+      {
+        name: "Evaluations: run detail (succeeded)",
+        path: (data) => `/app/evaluations/${data.workspaceBEvaluationRunSucceededId}`,
+      },
+      {
+        name: "Evaluations: run detail (running, owner controls)",
+        path: (data) => `/app/evaluations/${data.workspaceAEvaluationRunRunningId}`,
+        switchToWorkspaceA: true,
+      },
+      { name: "Evaluations: datasets tab", path: () => "/app/evaluations?tab=datasets" },
+      {
+        name: "Evaluations: dataset detail (owner controls)",
+        path: (data) => `/app/evaluations/datasets/${data.workspaceAEvaluationDatasetId}`,
+        switchToWorkspaceA: true,
+      },
+    ];
+
+    for (const { name, path, switchToWorkspaceA } of EVALUATIONS_PAGES) {
+      test(`${name} has no horizontal overflow`, async ({ page }) => {
+        const data = e2eData();
+        await login(page, data.primaryEmail, data.primaryPassword);
+        if (switchToWorkspaceA) {
+          await page.getByRole("button", { name: data.defaultWorkspaceName }).click();
+          await page.getByRole("menuitem", { name: new RegExp(data.otherWorkspaceName) }).click();
+        }
+        await page.goto(path(data));
+        await expect(page.locator("table, h1, h2, h3, form").first()).toBeVisible();
+        await assertNoHorizontalOverflow(page);
+      });
+    }
   });
 }
 
@@ -435,6 +478,51 @@ test.describe("Mobile shell (375px)", () => {
     const firstResult = resultsRegion.getByRole("listitem").first();
     await expect(firstResult.getByText(/^Similarity \d\.\d\d$/)).toBeVisible();
     await expect(firstResult.getByRole("link", { name: "Support Handbook" })).toBeVisible();
+    await assertNoHorizontalOverflow(page);
+  });
+
+  // Phase 23 Chunk 4 (final Evaluations/Observability acceptance gate): at
+  // 375px, the run list's comparison table scrolls locally inside its own
+  // bordered container — never the page — while checkboxes, links, and the
+  // "Compare selected" control all stay reachable.
+  test("Evaluations run list's comparison table scrolls locally, not the page", async ({
+    page,
+  }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+    await page.getByRole("button", { name: data.defaultWorkspaceName }).click();
+    await page.getByRole("menuitem", { name: new RegExp(data.otherWorkspaceName) }).click();
+    await page.goto("/app/evaluations");
+
+    const baselineRow = page.getByRole("row", {
+      name: new RegExp(`Run #${data.workspaceAEvaluationRunId.slice(0, 8)}`),
+    });
+    await expect(baselineRow).toBeVisible();
+    await assertNoHorizontalOverflow(page);
+
+    const scrollContainer = page.locator(".overflow-x-auto").first();
+    const containerScrolls = await scrollContainer.evaluate(
+      (el) => el.scrollWidth > el.clientWidth,
+    );
+    // The table itself (min-w-[760px]) is wider than a 375px viewport, so its
+    // own overflow-x-auto wrapper — not documentElement — is what scrolls.
+    expect(containerScrolls).toBe(true);
+  });
+
+  // Phase 23 Chunk 4: at 375px, the evaluation case create form (including
+  // the JSON textareas for seeded_context/expectations) remains usable with
+  // no page-level overflow.
+  test("Evaluation case create form is usable at mobile width", async ({ page }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+    await page.getByRole("button", { name: data.defaultWorkspaceName }).click();
+    await page.getByRole("menuitem", { name: new RegExp(data.otherWorkspaceName) }).click();
+    await page.goto(`/app/evaluations/datasets/${data.workspaceAEvaluationDatasetId}`);
+    await page.getByRole("button", { name: "New case" }).click();
+
+    await expect(page.getByLabel("Key")).toBeVisible();
+    await expect(page.getByLabel("Name")).toBeVisible();
+    await expect(page.getByLabel("Input message")).toBeVisible();
     await assertNoHorizontalOverflow(page);
   });
 });
