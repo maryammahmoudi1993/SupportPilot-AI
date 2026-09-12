@@ -464,8 +464,13 @@ test.describe("Evaluations", () => {
       await page.getByRole("menuitem", { name: new RegExp(data.otherWorkspaceName) }).click();
 
       await page.goto(`/app/evaluations/${data.workspaceAEvaluationRunId}`);
-      await expect(page.getByText("workspace-a-only-case")).toBeVisible();
-      await page.getByRole("button", { name: "Replay" }).click();
+      // `.first()`: a prior real replay against this same run (e.g. the
+      // Phase 23 Chunk 4 keyboard-only journey, which also exercises Replay
+      // against this run) legitimately leaves a second result sharing this
+      // case_key — real, expected backend behavior, not a bug — so this
+      // assertion only needs at least one match, never exactly one.
+      await expect(page.getByText("workspace-a-only-case").first()).toBeVisible();
+      await page.getByRole("button", { name: "Replay" }).first().click();
 
       await expect(page.getByText("Replay queued as a new result.")).toBeVisible();
     });

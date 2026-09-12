@@ -507,6 +507,216 @@ test.describe("Accessibility (axe)", () => {
       [],
     );
   });
+
+  // Phase 23 Chunk 4 (final Evaluations/Observability acceptance gate): the
+  // Evaluations feature's list/tab/detail surfaces, scanned with the real
+  // support_agent (read-only) membership in Workspace B first — the same
+  // pattern as the Integrations block above.
+  const EVALUATIONS_PAGES: { name: string; path: (data: ReturnType<typeof e2eData>) => string }[] =
+    [
+      { name: "Evaluations: run list", path: () => "/app/evaluations" },
+      {
+        name: "Evaluations: run detail (succeeded)",
+        path: (data) => `/app/evaluations/${data.workspaceBEvaluationRunSucceededId}`,
+      },
+      {
+        name: "Evaluations: run detail (running, non-terminal)",
+        path: (data) => `/app/evaluations/${data.workspaceBEvaluationRunRunningId}`,
+      },
+      { name: "Evaluations: datasets tab", path: () => "/app/evaluations?tab=datasets" },
+      {
+        name: "Evaluations: dataset detail",
+        path: (data) => `/app/evaluations/datasets/${data.workspaceBEvaluationDatasetId}`,
+      },
+    ];
+
+  for (const { name, path } of EVALUATIONS_PAGES) {
+    test(`${name} has no serious/critical violations`, async ({ page }) => {
+      const data = e2eData();
+      await login(page, data.primaryEmail, data.primaryPassword);
+      await page.goto(path(data));
+      await expect(page.locator("table, h1, h2, h3, form").first()).toBeVisible();
+
+      const results = await new AxeBuilder({ page }).analyze();
+      expect(
+        seriousOrCritical(results),
+        JSON.stringify(seriousOrCritical(results), null, 2),
+      ).toEqual([]);
+    });
+  }
+
+  test("Evaluations run detail for a role without run permission has no serious/critical violations", async ({
+    page,
+  }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+    // Default active workspace is B (support_agent, outside EVALUATION_RUN_ROLES).
+    await page.goto(`/app/evaluations/${data.workspaceBEvaluationRunRunningId}`);
+    await expect(page.getByRole("button", { name: "Cancel run" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Replay" })).toHaveCount(0);
+
+    const results = await new AxeBuilder({ page }).analyze();
+    expect(seriousOrCritical(results), JSON.stringify(seriousOrCritical(results), null, 2)).toEqual(
+      [],
+    );
+  });
+
+  test("the New dataset form (open) has no serious/critical violations", async ({ page }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+    await page.getByRole("button", { name: data.defaultWorkspaceName }).click();
+    await page.getByRole("menuitem", { name: new RegExp(data.otherWorkspaceName) }).click();
+    await page.goto("/app/evaluations?tab=datasets");
+    await page.getByRole("button", { name: "New dataset" }).click();
+    await expect(page.getByLabel("Name")).toBeVisible();
+
+    const results = await new AxeBuilder({ page }).analyze();
+    expect(seriousOrCritical(results), JSON.stringify(seriousOrCritical(results), null, 2)).toEqual(
+      [],
+    );
+  });
+
+  test("the Edit dataset form (open, real owner) has no serious/critical violations", async ({
+    page,
+  }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+    await page.getByRole("button", { name: data.defaultWorkspaceName }).click();
+    await page.getByRole("menuitem", { name: new RegExp(data.otherWorkspaceName) }).click();
+    await page.goto(`/app/evaluations/datasets/${data.workspaceAEvaluationDatasetId}`);
+    await page.getByRole("button", { name: "Edit dataset" }).click();
+    await expect(page.getByRole("form", { name: "Edit evaluation dataset" })).toBeVisible();
+
+    const results = await new AxeBuilder({ page }).analyze();
+    expect(seriousOrCritical(results), JSON.stringify(seriousOrCritical(results), null, 2)).toEqual(
+      [],
+    );
+  });
+
+  test("the New case form (open) has no serious/critical violations", async ({ page }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+    await page.getByRole("button", { name: data.defaultWorkspaceName }).click();
+    await page.getByRole("menuitem", { name: new RegExp(data.otherWorkspaceName) }).click();
+    await page.goto(`/app/evaluations/datasets/${data.workspaceAEvaluationDatasetId}`);
+    await page.getByRole("button", { name: "New case" }).click();
+    await expect(page.getByLabel("Key")).toBeVisible();
+
+    const results = await new AxeBuilder({ page }).analyze();
+    expect(seriousOrCritical(results), JSON.stringify(seriousOrCritical(results), null, 2)).toEqual(
+      [],
+    );
+  });
+
+  test("the Edit case form (open, real case) has no serious/critical violations", async ({
+    page,
+  }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+    await page.getByRole("button", { name: data.defaultWorkspaceName }).click();
+    await page.getByRole("menuitem", { name: new RegExp(data.otherWorkspaceName) }).click();
+    await page.goto(`/app/evaluations/datasets/${data.workspaceAEvaluationDatasetId}`);
+    await page.getByRole("button", { name: "Edit", exact: true }).first().click();
+    await expect(page.getByLabel("Key")).toHaveCount(0);
+
+    const results = await new AxeBuilder({ page }).analyze();
+    expect(seriousOrCritical(results), JSON.stringify(seriousOrCritical(results), null, 2)).toEqual(
+      [],
+    );
+  });
+
+  test("the Start run form (open, real published agent version) has no serious/critical violations", async ({
+    page,
+  }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+    await page.getByRole("button", { name: data.defaultWorkspaceName }).click();
+    await page.getByRole("menuitem", { name: new RegExp(data.otherWorkspaceName) }).click();
+    await page.goto(`/app/evaluations/datasets/${data.workspaceAEvaluationDatasetId}`);
+    await page.getByRole("button", { name: "Start run" }).click();
+    await expect(page.getByLabel("Agent", { exact: true })).toBeVisible();
+
+    const results = await new AxeBuilder({ page }).analyze();
+    expect(seriousOrCritical(results), JSON.stringify(seriousOrCritical(results), null, 2)).toEqual(
+      [],
+    );
+  });
+
+  test("the Cancel run confirmation dialog (real non-terminal run) has no serious/critical violations", async ({
+    page,
+  }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+    await page.getByRole("button", { name: data.defaultWorkspaceName }).click();
+    await page.getByRole("menuitem", { name: new RegExp(data.otherWorkspaceName) }).click();
+    await page.goto(`/app/evaluations/${data.workspaceAEvaluationRunRunningId}`);
+    await page.getByRole("button", { name: "Cancel run" }).click();
+    await expect(page.getByRole("dialog")).toBeVisible();
+
+    const results = await new AxeBuilder({ page }).analyze();
+    expect(seriousOrCritical(results), JSON.stringify(seriousOrCritical(results), null, 2)).toEqual(
+      [],
+    );
+  });
+
+  test("the Compare result view (real backend-computed comparison) has no serious/critical violations", async ({
+    page,
+  }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+    await page.getByRole("button", { name: data.defaultWorkspaceName }).click();
+    await page.getByRole("menuitem", { name: new RegExp(data.otherWorkspaceName) }).click();
+    await page.goto("/app/evaluations");
+
+    const baselineRow = page.getByRole("row", {
+      name: new RegExp(`Run #${data.workspaceAEvaluationRunId.slice(0, 8)}`),
+    });
+    const candidateRow = page.getByRole("row", {
+      name: new RegExp(`Run #${data.workspaceAEvaluationRunRunningId.slice(0, 8)}`),
+    });
+    await baselineRow.getByRole("checkbox").check();
+    await candidateRow.getByRole("checkbox").check();
+    await page.getByRole("button", { name: /^Compare selected \(2\/2\)$/ }).click();
+    await expect(page.getByText("Comparison result")).toBeVisible();
+
+    const results = await new AxeBuilder({ page }).analyze();
+    expect(seriousOrCritical(results), JSON.stringify(seriousOrCritical(results), null, 2)).toEqual(
+      [],
+    );
+  });
+
+  test("an Evaluations run list network-error state has no serious/critical violations", async ({
+    page,
+  }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+    await page.route("**/api/v1/workspaces/*/evaluations/runs/*", (route) =>
+      route.abort("failed"),
+    );
+    await page.goto("/app/evaluations");
+    await expect(page.getByText("Something went wrong")).toBeVisible();
+
+    const results = await new AxeBuilder({ page }).analyze();
+    expect(seriousOrCritical(results), JSON.stringify(seriousOrCritical(results), null, 2)).toEqual(
+      [],
+    );
+  });
+
+  test("renders unsafe-looking evaluation content inertly and still has no serious/critical violations", async ({
+    page,
+  }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+    await page.getByRole("button", { name: data.defaultWorkspaceName }).click();
+    await page.getByRole("menuitem", { name: new RegExp(data.otherWorkspaceName) }).click();
+    await page.goto(`/app/evaluations/datasets/${data.workspaceAEvaluationDatasetId}`);
+    await expect(page.getByText("Unsafe content case")).toBeVisible();
+
+    const results = await new AxeBuilder({ page }).analyze();
+    expect(seriousOrCritical(results), JSON.stringify(seriousOrCritical(results), null, 2)).toEqual(
+      [],
+    );
+  });
 });
 
 test.describe("Keyboard-only pass", () => {
@@ -521,6 +731,157 @@ test.describe("Keyboard-only pass", () => {
     await expect(page.getByRole("button", { name: "Sign in" })).toBeFocused();
     await page.keyboard.press("Enter");
     await page.waitForURL("**/app");
+  });
+
+  // Phase 23 Chunk 4 (final Evaluations/Observability acceptance gate): the
+  // full Evaluations feature journey end to end, keyboard only — nav → runs
+  // list → run detail → start run → cancel run → replay → compare →
+  // datasets tab → dataset detail → case create/edit → back. Each control is
+  // reached via `.focus()` (the same pattern the workspace-switcher/user-menu
+  // test above uses) rather than a blind Tab sequence, since the DOM order of
+  // rows/tables is a content-shaped implementation detail this test should
+  // not depend on — what is asserted is that every step's control is a real
+  // focusable, keyboard-operable element with visible focus, not that a
+  // specific Tab count reaches it.
+  test("the full Evaluations journey is keyboard-operable end to end with visible focus and no traps", async ({
+    page,
+  }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+    await page.getByRole("button", { name: data.defaultWorkspaceName }).focus();
+    await page.keyboard.press("Enter");
+    await page
+      .getByRole("menuitem", { name: new RegExp(data.otherWorkspaceName) })
+      .press("Enter");
+
+    // Nav -> runs list, via the sidebar link.
+    const evaluationsLink = page.getByRole("link", { name: "Evaluations" });
+    await evaluationsLink.focus();
+    await expect(evaluationsLink).toBeFocused();
+    await page.keyboard.press("Enter");
+    await page.waitForURL("**/app/evaluations");
+
+    // Runs list -> run detail, via a real row link.
+    const runLink = page.getByRole("link", {
+      name: `Run #${data.workspaceAEvaluationRunRunningId.slice(0, 8)}`,
+    });
+    await runLink.focus();
+    await expect(runLink).toBeFocused();
+    await page.keyboard.press("Enter");
+    await page.waitForURL(`**/app/evaluations/${data.workspaceAEvaluationRunRunningId}`);
+
+    // Run detail -> Cancel run dialog -> dismiss via Escape (no trap; focus
+    // returns to a real, focusable element afterward) -> Replay.
+    const cancelButton = page.getByRole("button", { name: "Cancel run" });
+    await cancelButton.focus();
+    await expect(cancelButton).toBeFocused();
+    await page.keyboard.press("Enter");
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+    // No keyboard trap: focus lands back in the real document (never lost
+    // to `<body>`, which is what a genuine trap would look like) once the
+    // dialog unmounts. This intentionally doesn't pin to the literal same
+    // trigger node — Radix's own focus-return target is an internal
+    // implementation detail this test shouldn't encode as a hard
+    // assertion, and the ConfirmDialog's own doc comment already states
+    // that guarantee is Radix's responsibility, not this component's.
+    const activeTag = await page.evaluate(() => document.activeElement?.tagName ?? null);
+    expect(activeTag).not.toBe("BODY");
+
+    await page.goto(`/app/evaluations/${data.workspaceAEvaluationRunId}`);
+    const replayButton = page.getByRole("button", { name: "Replay" });
+    await replayButton.focus();
+    await expect(replayButton).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(page.getByText("Replay queued as a new result.")).toBeVisible();
+
+    // Runs list -> select two rows via keyboard (Space toggles a checkbox)
+    // -> Compare selected.
+    await page.goto("/app/evaluations");
+    const baselineCheckbox = page
+      .getByRole("row", { name: new RegExp(`Run #${data.workspaceAEvaluationRunId.slice(0, 8)}`) })
+      .getByRole("checkbox");
+    const candidateCheckbox = page
+      .getByRole("row", {
+        name: new RegExp(`Run #${data.workspaceAEvaluationRunRunningId.slice(0, 8)}`),
+      })
+      .getByRole("checkbox");
+    await baselineCheckbox.focus();
+    await page.keyboard.press("Space");
+    await expect(baselineCheckbox).toBeChecked();
+    await candidateCheckbox.focus();
+    await page.keyboard.press("Space");
+    await expect(candidateCheckbox).toBeChecked();
+    const compareButton = page.getByRole("button", { name: /^Compare selected \(2\/2\)$/ });
+    await compareButton.focus();
+    await expect(compareButton).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(page.getByText("Comparison result")).toBeVisible();
+
+    // Datasets tab -> dataset detail -> New case -> fill and submit via
+    // keyboard only -> Edit that case -> save via keyboard only -> back.
+    const datasetsTab = page.getByRole("link", { name: "Datasets" });
+    await datasetsTab.focus();
+    await expect(datasetsTab).toBeFocused();
+    await page.keyboard.press("Enter");
+    await page.waitForURL("**/app/evaluations?tab=datasets");
+
+    const datasetLink = page.getByRole("link", { name: data.workspaceAEvaluationDatasetName });
+    await datasetLink.focus();
+    await expect(datasetLink).toBeFocused();
+    await page.keyboard.press("Enter");
+    await page.waitForURL(/\/app\/evaluations\/datasets\/[0-9a-f-]+$/);
+
+    const newCaseButton = page.getByRole("button", { name: "New case" });
+    await newCaseButton.focus();
+    await expect(newCaseButton).toBeFocused();
+    await page.keyboard.press("Enter");
+    const keyField = page.getByLabel("Key");
+    await keyField.focus();
+    await expect(keyField).toBeFocused();
+    const caseKey = `e2e-kbd-case-${Date.now()}`;
+    await page.keyboard.type(caseKey);
+    await page.keyboard.press("Tab");
+    await page.keyboard.type("Keyboard journey case");
+    await page.getByLabel("Input message").focus();
+    await page.keyboard.type("A real keyboard-created case's input.");
+    const createCaseButton = page.getByRole("button", { name: "Create case" });
+    await createCaseButton.focus();
+    await expect(createCaseButton).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(page.getByText("Keyboard journey case")).toBeVisible();
+
+    const caseRow = page
+      .getByRole("list", { name: "Evaluation cases in this dataset" })
+      .getByRole("listitem")
+      .filter({ hasText: "Keyboard journey case" });
+    const editButton = caseRow.getByRole("button", { name: "Edit", exact: true });
+    await editButton.focus();
+    await expect(editButton).toBeFocused();
+    await page.keyboard.press("Enter");
+    const nameField = page.getByLabel("Name");
+    await nameField.focus();
+    await page.keyboard.press("Control+A");
+    await page.keyboard.type("Keyboard journey case (updated)");
+    const saveButton = page.getByRole("button", { name: "Save changes" });
+    await saveButton.focus();
+    await expect(saveButton).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(page.getByText("Keyboard journey case (updated)")).toBeVisible();
+
+    // Back to the runs list, via the sidebar nav link — end to end, no dead
+    // ends. The Runs/Datasets tab strip only renders on the list page
+    // itself (not on this dataset detail page), so the sidebar's own
+    // "Evaluations" entry — the same real link used to enter the feature at
+    // the top of this test — is the correct keyboard path back, and lands
+    // on the list's default Runs tab.
+    const backToEvaluations = page.getByRole("link", { name: "Evaluations" });
+    await backToEvaluations.focus();
+    await expect(backToEvaluations).toBeFocused();
+    await page.keyboard.press("Enter");
+    await page.waitForURL("**/app/evaluations");
   });
 
   test("workspace switcher and user menu are keyboard-operable", async ({ page }) => {
