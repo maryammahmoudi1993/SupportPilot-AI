@@ -44,6 +44,8 @@ export interface E2EData {
   workspaceBEvaluationResultPassId: string;
   workspaceBEvaluationResultFailId: string;
   workspaceAEvaluationRunId: string;
+  /** Real, non-terminal (never Celery-dispatched) run — Phase 23 Chunk 3's deterministic Cancel Run E2E. */
+  workspaceAEvaluationRunRunningId: string;
   workspaceAEvaluationDatasetId: string;
   workspaceAEvaluationDatasetName: string;
   workspaceAEvaluationCaseId: string;
@@ -51,6 +53,8 @@ export interface E2EData {
   workspaceBEvaluationDatasetId: string;
   workspaceBEvaluationDatasetName: string;
   workspaceBEvaluationCaseId: string;
+  /** Workspace A's real, published `AgentVersion` — used by Phase 23 Chunk 3's real Start Run E2E. */
+  workspaceAAgentDefinitionName: string;
   workspaceBToolExecutionSucceededId: string;
   workspaceBToolExecutionFailedId: string;
   workspaceBToolExecutionWaitingId: string;

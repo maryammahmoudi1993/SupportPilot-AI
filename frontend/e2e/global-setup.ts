@@ -66,6 +66,14 @@ User.objects.filter(email__startswith="e2e-").delete()
 # EvaluationRun must be cleared before AgentRun/Workspace, in that order.
 ApprovalRequest.objects.filter(workspace__name__startswith="E2E ").delete()
 ToolExecution.objects.filter(workspace__name__startswith="E2E ").delete()
+# See global-teardown.ts's identical comment (defect PHASE23-3-D01): a real
+# leftover replay result's self-referential replay_of (on_delete=SET_NULL)
+# collides with eval_result_one_initial_per_snapshot's partial unique index
+# during the cascade collector's SET_NULL pass unless replay rows are
+# deleted outright first.
+EvaluationResult.objects.filter(
+    run__workspace__name__startswith="E2E ", replay_of__isnull=False
+).delete()
 EvaluationRun.objects.filter(workspace__name__startswith="E2E ").delete()
 AgentRun.objects.filter(workspace__name__startswith="E2E ").delete()
 Workspace.objects.filter(name__startswith="E2E ").delete()
@@ -381,6 +389,26 @@ ws_a_eval_result = EvaluationResult.objects.create(
     status=EvaluationResultStatus.SUCCEEDED, agent_run=None,
     scorer_output={}, passed=True,
     started_at=timezone.now(), completed_at=timezone.now(),
+)
+# A distinct, real non-terminal (running) Workspace A run — created directly
+# via the ORM (never dispatched to Celery), so it deterministically stays
+# non-terminal for Phase 23 Chunk 3's real Cancel Run E2E regardless of
+# worker timing. A freshly-POSTed run (the real start_evaluation_run path,
+# exercised separately by the Start Run E2E below) races a real Celery
+# worker to completion — fine for proving start genuinely works, but not
+# deterministic enough to also be the one this suite clicks Cancel on.
+ws_a_eval_run_running = EvaluationRun.objects.create(
+    workspace=ws_a, dataset=ws_a_eval_dataset, agent_version=ws_a_agent_version,
+    status=EvaluationRunStatus.RUNNING, total_cases=1, completed_cases=0,
+    started_at=timezone.now(),
+)
+# Same real case_key as ws_a_eval_run's own snapshot above — the real
+# compare endpoint (compare_evaluation_runs) rejects two runs whose
+# snapshot case-key sets differ, so the real Compare E2E needs both runs to
+# share one, exactly as it would for two genuine runs over the same dataset.
+EvaluationCaseSnapshot.objects.create(
+    run=ws_a_eval_run_running, sequence=1, case_key="workspace-a-only-case",
+    name="Workspace A only case", input_message="Workspace A only input.",
 )
 
 # Phase 23 Chunk 2: real, live EvaluationCase rows via the ORM (created
@@ -952,6 +980,7 @@ print(json.dumps({
     "workspaceBEvaluationResultPassId": str(ws_b_eval_result_pass.id),
     "workspaceBEvaluationResultFailId": str(ws_b_eval_result_fail.id),
     "workspaceAEvaluationRunId": str(ws_a_eval_run.id),
+    "workspaceAEvaluationRunRunningId": str(ws_a_eval_run_running.id),
     "workspaceAEvaluationDatasetId": str(ws_a_eval_dataset.id),
     "workspaceAEvaluationDatasetName": ws_a_eval_dataset.name,
     "workspaceAEvaluationCaseId": str(ws_a_eval_case.id),
@@ -959,6 +988,7 @@ print(json.dumps({
     "workspaceBEvaluationDatasetId": str(ws_b_eval_dataset.id),
     "workspaceBEvaluationDatasetName": ws_b_eval_dataset.name,
     "workspaceBEvaluationCaseId": str(ws_b_eval_case.id),
+    "workspaceAAgentDefinitionName": ws_a_agent_def.name,
     "workspaceBToolExecutionSucceededId": str(ws_b_tool_execution_succeeded.id),
     "workspaceBToolExecutionFailedId": str(ws_b_tool_execution_failed.id),
     "workspaceBToolExecutionWaitingId": str(ws_b_tool_execution_waiting.id),
