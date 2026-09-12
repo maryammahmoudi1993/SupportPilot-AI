@@ -2585,7 +2585,211 @@ workspace-scoped Observability/trace resource noted since Chunk 1 (still
 does not exist publicly — `GET /metrics/` remains Prometheus deployment
 infrastructure, not a tenant-facing API).
 
-## Local development
+### Phase 23 final acceptance gate (Chunk 4)
+
+Cross-cutting acceptance work deferred by Chunks 1-3: a full accessibility
+gate, full multi-viewport responsive validation, a final double full
+regression, a documentation completeness pass, defect-ledger finalization,
+and a security re-scan across the whole Evaluations feature (run list/
+detail, dataset list/detail, case create/edit, start/cancel/replay/compare,
+compare result view). No new product capability was added.
+
+**Three real defects found and fixed** (the first genuine axe/manual scan
+and keyboard-only journey against these surfaces — Chunks 1-3 only ran
+functional E2E, never axe or a full keyboard journey, against them):
+
+- **`evaluation-dataset-detail-page.tsx`'s `CaseRow` nested a `<details>`
+  disclosure (`StructuredPayload`, shared by every domain's redacted-payload
+  viewer) directly inside a `<dl>`** — a real `definition-list` axe
+  violation (impact: serious): a `<dl>` may only directly contain
+  `<dt>`/`<dd>` groups (optionally wrapped in one `<div>` per group), never
+  a `<span>`/`<details>`. Every case row's collapsed view hit this on any
+  dataset with at least one case, so it affected the base dataset-detail
+  view and every state layered on top of it (new/edit dataset, new/edit
+  case, start-run, and the content-safety fixture). Fixed by giving only
+  the one real name/value pair (Input message) its own `<dl>`, and moving
+  the two `StructuredPayload` blocks (Seeded context, Expectations) to a
+  plain sibling `<div>` — they were never real `<dt>`/`<dd>` content once
+  rendered as a disclosure.
+- **`evaluation-run-compare-panel.tsx`'s `RunLabel` link used `hover:underline`
+  only, inside a `text-text-secondary` prose sentence** ("Baseline Run #…
+  vs. candidate Run #…") — a real `link-in-text-block` axe violation
+  (impact: serious, measured contrast 1.31:1 against the surrounding text,
+  required 3:1): a link embedded in a block of text must be distinguishable
+  from its surroundings without relying on hover or color alone. Every
+  other in-page link in this codebase is either underlined unconditionally
+  already or is a standalone "← Back to X" link (not embedded in a
+  sentence, so the rule never applies) — this was the one new, genuinely
+  different pattern Chunk 3 introduced. Fixed by underlining unconditionally.
+
+- **The shared `ConfirmDialog` (`components/ui/confirm-dialog.tsx`, used by
+  webhook redrive, credential rotation, and this chunk's own Cancel Run) did
+  not actually return focus to its trigger on close** — its own doc comment
+  claimed Radix handled this "for free," which is true only when composed
+  with `Dialog.Trigger`; every real caller here renders its own external
+  trigger button and passes only `open`/`onOpenChange`, so Radix had no
+  reference to restore focus to and fell back to `<body>`. Not a keyboard
+  *trap* (nothing prevented tabbing again), but a real loss of keyboard
+  position on every dismiss, in every domain that uses this component —
+  caught by this chunk's full keyboard-only Evaluations journey test
+  (`expect(document.activeElement?.tagName).not.toBe("BODY")` after an
+  Escape-dismiss), which no earlier chunk's keyboard tests (webhook
+  redrive/credential rotation) had asserted. Fixed inside `ConfirmDialog`
+  alone — no caller changed — by capturing `document.activeElement` when
+  the dialog opens and restoring it via `onCloseAutoFocus`.
+
+All three were narrow, targeted fixes to existing Chunk 2/3 code (two
+Evaluations-specific, one in a pre-existing shared component now also
+benefiting webhook redrive and credential rotation) — no new feature, no
+redesign. Regression coverage: `e2e/accessibility.spec.ts`'s new
+Evaluations axe scans and keyboard journey (below) now pass and would have
+caught any of the three regressions; the two axe nodes were also
+re-verified clean with a direct axe run against the fixed build before the
+final regression pass.
+
+**Accessibility**: `@axe-core/playwright` (`e2e/accessibility.spec.ts`),
+the same tool and pattern every prior phase's Chunk 4 used — axe scans
+asserting zero serious/critical violations, plus a dedicated
+"Keyboard-only pass" describe block. Routes/states scanned: run list, run
+detail (succeeded and running/non-terminal, including the read-only
+support_agent view with Cancel/Replay absent), datasets tab, dataset detail
+(owner view), the New/Edit dataset forms, the New/Edit case forms, the
+Start Run form, the Cancel Run confirmation dialog, the Compare result view,
+a run-list network-error state, and the unsafe-content-case dataset detail
+(content-safety, re-scanned with axe rather than only the earlier
+script/XSS-inertness assertions). A full keyboard-only journey test
+(`"the full Evaluations journey is keyboard-operable end to end..."`)
+drives nav → runs list → run detail → Cancel run (open + Escape-dismiss,
+no trap, focus returns to the triggering button) → Replay → runs list →
+select two rows via `Space` → Compare → Datasets tab → dataset detail → New
+case (create via keyboard only) → Edit that case (save via keyboard only)
+→ back to the feature's own nav entry (the Runs/Datasets tab strip only
+renders on the list page itself, so the sidebar's "Evaluations" link —
+already used to enter the feature earlier in the same test — is the real
+keyboard path back from a detail page) — every step via `.focus()` +
+`expect(...).toBeFocused()` on the real interactive element (never a blind
+`Tab` count, which would depend on DOM-order implementation details),
+asserting visible focus and no keyboard trap at each step. Confirmed by
+direct source inspection (not just by these tests passing) that no
+Evaluations component uses a clickable `<div>`/`<span>` — every interactive
+element found is a real `<button>` or `<Link>` (`onClick` occurs only on
+`<Button>` in this domain).
+
+**Responsive**: `e2e/responsive.spec.ts`, all four required viewports
+(375×812, 768×1024, 1280×800, 1440×900) against run list, run detail
+(succeeded, and running with owner controls), datasets tab, and dataset
+detail (owner controls) — zero page-level horizontal overflow at any
+viewport/route. At 375px specifically: the run list's comparison table
+(`min-w-[760px]`) was verified to scroll inside its own `overflow-x-auto`
+wrapper, not the page (`el.scrollWidth > el.clientWidth` measured directly
+on that wrapper, not inferred), and the case create form (including its
+JSON textareas) remains fully usable with no overflow. Every structured/
+JSON payload in this domain (`StructuredPayload`, used for
+`scorer_output`/`seeded_context`/`expectations`) already renders inside its
+own fixed-max-height, independently `overflow-auto` `<pre>` — the same
+bounded-local-scroll pattern proven for Agent Runs' execution trace in
+Phase 20 Chunk 4, confirmed still true here by direct source inspection.
+
+**Documentation**: this pass re-read the Chunk 1-3 sections above in full
+and confirms: the public contract (dataset/case CRUD, run list/detail/
+start/cancel/replay, compare) is documented end to end; RBAC
+(`CanViewEvaluations`/`CanManageEvaluations`/`CanRunEvaluations`) and
+workspace isolation are documented per capability with their own real
+backend-selector evidence; snapshot immutability is documented with its own
+real-backend proof; metric semantics were re-audited across every
+Evaluations file this chunk (`grep` for "confidence"/"quality score"/
+"reliability score"/"% accurate" across `features/evaluations/`) — the only
+matches are two source comments *describing* the guarantee (no such
+language ever renders); content safety is documented per surface; the
+Observability-absence statement is consistent across Chunks 1 and 3
+(`GET /metrics/` only, no tenant-facing resource, no UI built or implied);
+and the schema-gap register below consolidates all 7 running gaps in one
+place, none blocking.
+
+**Consolidated Phase 23 schema-gap register (7 total, none blocking)**:
+
+| # | Chunk | Endpoint / field | Gap | Frontend narrowing |
+| --- | --- | --- | --- | --- |
+| 1 | 1 | `EvaluationRun.threshold_config`, `EvaluationResult.scorer_output` | Generated as `unknown` (plain `JSONField`s, no fixed shape). | Rendered via `StructuredPayload`, never destructured. |
+| 2 | 1 | `EvaluationResult.agent_run_id`, `.replay_of_id` | Generated as required `string`, but nullable in the model. | Re-typed as `string \| null`; every render site handles `null`. |
+| 3 | 1 | `evaluations_runs_list`, `evaluations_runs_results_list` | Generated query type omits the real `status`/`dataset_id`/`passed` filters. | Narrowed locally in `features/evaluations/api.ts`. |
+| 4 | 2 | `EvaluationCase.status` (write/patch variants) | Generated as `WebhookEndpointStatusEnum` (a drf-spectacular naming collision). | Re-typed as `EvaluationCaseStatusValue`. |
+| 5 | 2 | `evaluations_datasets_create`, `evaluations_datasets_cases_create` | Generated 201 response is the request shape, not the real full body returned. | Explicit real return types in `api.ts`. |
+| 6 | 2 | `EvaluationCaseWrite.key` (update) | Generated as writable, but the service never reads it on update. | Omitted from `UpdateEvaluationCaseInput`; edit form shows it read-only. |
+| 7 | 3 | `api_v1_workspaces_evaluations_compare_create` | Generated response has `content?: never` (no `response=` schema on the view). | Hand-typed `EvaluationRunCompareResult`, asserted explicitly in `api.ts`. |
+
+**Deferred capabilities, consolidated and still accurate**: dataset/case
+delete or archive has no backend endpoint (soft-removal via `status` is the
+real, only path); case reorder/bulk import/bulk update/copy has no backend
+endpoint; no dataset-scoped run browse/filter UI (`EvaluationRun.dataset_id`
+is a plain unlinked identifier on Run detail); no workspace-scoped
+Observability/trace/span resource exists publicly (`GET /metrics/` remains
+Prometheus deployment infrastructure only) — each of these is a real,
+verified backend absence, not an oversight, and none was built around with
+an invented UI.
+
+**Security re-scan** (whole Evaluations domain — `features/evaluations/`,
+its route files under `app/(protected)/app/evaluations/`, and
+`e2e/evaluations.spec.ts`): zero occurrences of `dangerouslySetInnerHTML`,
+`eval(`, or `new Function(` (`StructuredPayload`'s own doc comment states
+the same guarantee it's shared by every domain that predates Evaluations).
+Zero `localStorage`/`sessionStorage` reads or writes anywhere in the
+domain — every evaluation input/output/metric/filter is server-state
+(TanStack Query) or transient component state only, never persisted
+client-side, matching the original spec. No `console.log`/`console.error`/
+`console.warn` call anywhere in the domain, so no risk of a client-side
+secret/token landing in the browser console from this feature (the
+app-wide token-storage guarantees in "Security notes" above are unchanged
+and untouched by this feature).
+
+**Test-authoring bugs found and fixed while stabilizing this chunk's own
+new E2E coverage** (not product defects, listed separately from the three
+above): (1) the keyboard journey's final "back to Evaluations" step
+originally used `getByRole("link", { name: "Runs" })`, which matched the
+sidebar's own "Agent Runs" link first (substring match) — fixed with
+`exact: true`, which then surfaced (2) the tab strip it was trying to
+click doesn't render on the dataset detail page at all (only on the list
+page), so the real keyboard path back is the sidebar's "Evaluations" entry,
+not a tab link — fixed by using that instead. (3) A pre-existing Chunk 3
+test (`"owner replays a terminal result against the real backend"`)
+asserted exactly one `"workspace-a-only-case"` match, which was only ever
+true by accident of no prior replay having touched that run — this
+chunk's own keyboard journey legitimately replays it too (real, correct
+backend behavior: a second result sharing the same case_key), so the
+assertion was loosened to `.first()`, matching what "at least one, real"
+actually requires.
+
+**Final Phase 23 regression** (this chunk's own runs, against this
+worktree's real backend, with a dedicated single Celery worker confirmed
+serving the queue and no stray/ambiguous backend or frontend process bound
+to the Playwright `webServer` ports before each run): Vitest 581/581
+passed/0 failed/0 skipped (unchanged from Chunk 3's baseline — none of the
+three real fixes needed a unit-test behavior change: two were pure
+axe/contrast issues and one was a Radix focus-restoration fix with no
+existing unit coverage to update). Two full, consecutive, clean Playwright
+runs — grown from Chunk 3's 300 collected to 338 (this chunk's own new
+axe/responsive/keyboard tests) — both passed 337/338 with the same single
+accepted `PHASE22-3-04` fixme and zero other skips/failures. `npm run
+lint`, `npm run typecheck`, and `npm run build` all pass clean. `npm run
+check:api-types` reports the contract up to date (zero drift) — no backend
+route changed this chunk. Production dependency audit: 0 critical/0 high
+(unchanged). Full (dev-inclusive) audit: the same 2 pre-existing dev-only
+high-severity `js-yaml`/`@redocly/openapi-core` advisories noted since
+Phase 21 Chunk 4 — untouched, no fix available that doesn't break
+`openapi-typescript`'s toolchain, and irrelevant to any shipped runtime
+code.
+
+**Known, pre-existing, environment-only condition (not a defect, not
+fixed)**: `npm run format:check` reports every file in the repository
+(not just Evaluations files) as needing reformatting on this Windows
+checkout, because this machine's `core.autocrlf=true` converts the
+repository's real LF line endings to CRLF on checkout while Prettier
+expects LF. This is exactly the class of issue commit `fix(frontend):
+revert unintended repo-wide README reformatting` (Chunk 3) guards against —
+running `prettier --write .` here would rewrite every file's line endings
+as a side effect having nothing to do with actual formatting, which is
+worse than the warning itself. Not run; reported here instead so it isn't
+mistaken for newly-introduced drift.
 
 1. Start the backend (see `../README.md`) so `NEXT_PUBLIC_API_BASE_URL`
    has something to talk to. It must be an origin the backend's
