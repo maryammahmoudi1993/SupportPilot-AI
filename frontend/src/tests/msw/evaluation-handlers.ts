@@ -163,6 +163,18 @@ function createGate(): Gate {
   return { promise, release };
 }
 
+export interface AgentDefinitionFixture {
+  id: string;
+  name: string;
+  status: string;
+}
+
+export interface AgentVersionFixture {
+  id: string;
+  version: number;
+  status: string;
+}
+
 export const evaluationMockState = {
   runsByWorkspace: {} as Record<string, EvaluationRunFixture[]>,
   /** Which workspace owns a given run ID — for the cross-workspace 404 check. */
@@ -174,6 +186,26 @@ export const evaluationMockState = {
   listCallCount: 0,
   detailCallCount: 0,
   resultsCallCount: 0,
+
+  /** Phase 23 Chunk 3: start/cancel/replay/compare + agent-picker support. */
+  agentsByWorkspace: {} as Record<string, AgentDefinitionFixture[]>,
+  versionsByAgent: {} as Record<string, AgentVersionFixture[]>,
+  runCreateCallCount: 0,
+  runCancelCallCount: 0,
+  replayCallCount: 0,
+  compareCallCount: 0,
+  /** Holds the corresponding handler open for this many ms — proves duplicate-submit blocking. */
+  runCreateDelayMs: 0,
+  cancelDelayMs: 0,
+  replayDelayMs: 0,
+  /** Returns this error on the next run-create call, then clears itself. */
+  nextRunCreateError: null as { status: number; code: string; message: string } | null,
+  /** Returns this error on the next cancel call, then clears itself. */
+  nextCancelError: null as { status: number; code: string; message: string } | null,
+  /** Returns this error on the next replay call, then clears itself. */
+  nextReplayError: null as { status: number; code: string; message: string } | null,
+  /** Returns this error on the next compare call, then clears itself. */
+  nextCompareError: null as { status: number; code: string; message: string } | null,
 
   datasetsByWorkspace: {} as Record<string, EvaluationDatasetFixture[]>,
   /** Which workspace owns a given dataset ID — for the cross-workspace 404 check. */
@@ -237,6 +269,14 @@ export function seedEvaluationCases(datasetId: string, cases: EvaluationCaseFixt
   evaluationMockState.casesByDataset[datasetId] = cases;
 }
 
+export function seedAgentDefinitions(workspaceId: string, agents: AgentDefinitionFixture[]): void {
+  evaluationMockState.agentsByWorkspace[workspaceId] = agents;
+}
+
+export function seedAgentVersions(agentId: string, versions: AgentVersionFixture[]): void {
+  evaluationMockState.versionsByAgent[agentId] = versions;
+}
+
 export function resetEvaluationMockState(): void {
   evaluationMockState.runsByWorkspace = {};
   evaluationMockState.runWorkspace = {};
@@ -265,6 +305,20 @@ export function resetEvaluationMockState(): void {
   evaluationMockState.caseUpdateCallCount = 0;
   evaluationMockState.datasetCreateGate = null;
   evaluationMockState.caseUpdateGate = null;
+
+  evaluationMockState.agentsByWorkspace = {};
+  evaluationMockState.versionsByAgent = {};
+  evaluationMockState.runCreateCallCount = 0;
+  evaluationMockState.runCancelCallCount = 0;
+  evaluationMockState.replayCallCount = 0;
+  evaluationMockState.compareCallCount = 0;
+  evaluationMockState.runCreateDelayMs = 0;
+  evaluationMockState.cancelDelayMs = 0;
+  evaluationMockState.replayDelayMs = 0;
+  evaluationMockState.nextRunCreateError = null;
+  evaluationMockState.nextCancelError = null;
+  evaluationMockState.nextReplayError = null;
+  evaluationMockState.nextCompareError = null;
 }
 
 function notFoundRun() {
@@ -409,7 +463,11 @@ export const evaluationHandlers = [
       }
 
       const workspaceId = params.workspaceId as string;
-      const body = (await request.json()) as { name: string; description?: string; status?: string };
+      const body = (await request.json()) as {
+        name: string;
+        description?: string;
+        status?: string;
+      };
       const existing = evaluationMockState.datasetsByWorkspace[workspaceId] ?? [];
       if (existing.some((dataset) => dataset.name === body.name)) {
         return HttpResponse.json(
@@ -531,7 +589,12 @@ export const evaluationHandlers = [
       const existing = evaluationMockState.casesByDataset[datasetId] ?? [];
       if (existing.some((evaluationCase) => evaluationCase.key === body.key)) {
         return HttpResponse.json(
-          { error: { code: "invalid", message: "A case with this key already exists in this dataset." } },
+          {
+            error: {
+              code: "invalid",
+              message: "A case with this key already exists in this dataset.",
+            },
+          },
           { status: 400 },
         );
       }
@@ -575,6 +638,216 @@ export const evaluationHandlers = [
       const body = (await request.json()) as Partial<EvaluationCaseFixture>;
       Object.assign(evaluationCase, body);
       return HttpResponse.json(evaluationCase);
+    },
+  ),
+
+  /**
+   * Start/cancel/replay/compare (Phase 23 Chunk 3) + the minimal agent-picker
+   * reads they depend on. Mirrors the real backend's transitions (see
+   * evaluations/services.py): cancelling an already-terminal run and
+   * replaying a non-terminal result are both real 409s, never silent 200s.
+   */
+  http.post(
+    `${BASE}/api/v1/workspaces/:workspaceId/evaluations/runs/`,
+    async ({ request, params }) => {
+      evaluationMockState.runCreateCallCount += 1;
+
+      if (evaluationMockState.runCreateDelayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, evaluationMockState.runCreateDelayMs));
+      }
+
+      if (evaluationMockState.nextRunCreateError) {
+        const { status, code, message } = evaluationMockState.nextRunCreateError;
+        evaluationMockState.nextRunCreateError = null;
+        return HttpResponse.json({ error: { code, message } }, { status });
+      }
+
+      const workspaceId = params.workspaceId as string;
+      const body = (await request.json()) as {
+        dataset_id: string;
+        agent_version_id: string;
+        threshold_config?: unknown;
+      };
+      const existing = evaluationMockState.runsByWorkspace[workspaceId] ?? [];
+      const run = makeEvaluationRunFixture({
+        id: `run-${existing.length + 1}-${Date.now()}`,
+        dataset_id: body.dataset_id,
+        agent_version_id: body.agent_version_id,
+        status: "pending",
+        threshold_config: body.threshold_config ?? {},
+        total_cases: 1,
+        completed_cases: 0,
+        passed_cases: 0,
+        failed_cases: 0,
+        started_at: null,
+        completed_at: null,
+      });
+      evaluationMockState.runsByWorkspace[workspaceId] = [...existing, run];
+      evaluationMockState.runWorkspace[run.id] = workspaceId;
+      evaluationMockState.resultsByRun[run.id] = [];
+
+      return HttpResponse.json(run, { status: 201 });
+    },
+  ),
+
+  http.post(
+    `${BASE}/api/v1/workspaces/:workspaceId/evaluations/runs/:runId/cancel/`,
+    async ({ params }) => {
+      evaluationMockState.runCancelCallCount += 1;
+
+      const workspaceId = params.workspaceId as string;
+      const runId = params.runId as string;
+      const run = (evaluationMockState.runsByWorkspace[workspaceId] ?? []).find(
+        (candidate) => candidate.id === runId,
+      );
+      if (!run) {
+        return notFoundRun();
+      }
+
+      if (evaluationMockState.cancelDelayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, evaluationMockState.cancelDelayMs));
+      }
+
+      if (evaluationMockState.nextCancelError) {
+        const { status, code, message } = evaluationMockState.nextCancelError;
+        evaluationMockState.nextCancelError = null;
+        return HttpResponse.json({ error: { code, message } }, { status });
+      }
+
+      const terminal = new Set(["succeeded", "partial", "failed", "cancelled"]);
+      if (terminal.has(run.status)) {
+        return HttpResponse.json(
+          {
+            error: {
+              code: "evaluation_run_not_cancellable",
+              message: "This evaluation run can no longer be cancelled.",
+            },
+          },
+          { status: 409 },
+        );
+      }
+
+      run.status = "cancelled";
+      run.cancelled_at = "2026-01-01T00:00:10Z";
+      return HttpResponse.json(run);
+    },
+  ),
+
+  http.post(
+    `${BASE}/api/v1/workspaces/:workspaceId/evaluations/runs/:runId/results/:resultId/replay/`,
+    async ({ params }) => {
+      evaluationMockState.replayCallCount += 1;
+
+      const workspaceId = params.workspaceId as string;
+      const runId = params.runId as string;
+      const resultId = params.resultId as string;
+      const run = (evaluationMockState.runsByWorkspace[workspaceId] ?? []).find(
+        (candidate) => candidate.id === runId,
+      );
+      if (!run) {
+        return notFoundRun();
+      }
+      const results = evaluationMockState.resultsByRun[runId] ?? [];
+      const result = results.find((candidate) => candidate.id === resultId);
+      if (!result) {
+        return HttpResponse.json(
+          { error: { code: "not_found", message: "Evaluation result not found." } },
+          { status: 404 },
+        );
+      }
+
+      if (evaluationMockState.replayDelayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, evaluationMockState.replayDelayMs));
+      }
+
+      if (evaluationMockState.nextReplayError) {
+        const { status, code, message } = evaluationMockState.nextReplayError;
+        evaluationMockState.nextReplayError = null;
+        return HttpResponse.json({ error: { code, message } }, { status });
+      }
+
+      const terminal = new Set(["succeeded", "failed", "cancelled"]);
+      if (!terminal.has(result.status)) {
+        return HttpResponse.json(
+          {
+            error: {
+              code: "evaluation_result_not_replayable",
+              message: "This result is not in a state that supports replay.",
+            },
+          },
+          { status: 409 },
+        );
+      }
+
+      const replay = makeEvaluationResultFixture({
+        id: `${result.id}-replay-${results.length + 1}`,
+        case_key: result.case_key,
+        status: "pending",
+        passed: null,
+        replay_of_id: result.id,
+      });
+      evaluationMockState.resultsByRun[runId] = [...results, replay];
+
+      return HttpResponse.json(replay, { status: 201 });
+    },
+  ),
+
+  http.post(`${BASE}/api/v1/workspaces/:workspaceId/evaluations/compare/`, async ({ request }) => {
+    evaluationMockState.compareCallCount += 1;
+
+    if (evaluationMockState.nextCompareError) {
+      const { status, code, message } = evaluationMockState.nextCompareError;
+      evaluationMockState.nextCompareError = null;
+      return HttpResponse.json({ error: { code, message } }, { status });
+    }
+
+    const body = (await request.json()) as {
+      baseline_run_id: string;
+      candidate_run_id: string;
+    };
+
+    return HttpResponse.json({
+      baseline_run_id: body.baseline_run_id,
+      candidate_run_id: body.candidate_run_id,
+      case_count: 2,
+      baseline_metrics: {
+        pass_rate: 0.5,
+        forbidden_tool_violations: 0,
+        approval_violations: 0,
+        handoff_rate: 0,
+      },
+      candidate_metrics: {
+        pass_rate: 1,
+        forbidden_tool_violations: 0,
+        approval_violations: 0,
+        handoff_rate: 0,
+      },
+      deltas: {
+        pass_rate: 0.5,
+        forbidden_tool_violations: 0,
+        approval_violations: 0,
+        handoff_rate: 0,
+      },
+      thresholds: {},
+      regressions: [],
+      passed: true,
+    });
+  }),
+
+  http.get(`${BASE}/api/v1/workspaces/:workspaceId/agents/`, async ({ params, request }) => {
+    const workspaceId = params.workspaceId as string;
+    const url = new URL(request.url);
+    const agents = evaluationMockState.agentsByWorkspace[workspaceId] ?? [];
+    return HttpResponse.json(paginate(agents, url));
+  }),
+
+  http.get(
+    `${BASE}/api/v1/workspaces/:workspaceId/agents/:agentId/versions/`,
+    async ({ params, request }) => {
+      const agentId = params.agentId as string;
+      const url = new URL(request.url);
+      const versions = evaluationMockState.versionsByAgent[agentId] ?? [];
+      return HttpResponse.json(paginate(versions, url));
     },
   ),
 ];
