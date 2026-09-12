@@ -48,7 +48,12 @@ function RunLabel({ run, fallbackId }: { run: EvaluationRun | undefined; fallbac
     return <span className="font-mono text-xs">{fallbackId.slice(0, 8)}</span>;
   }
   return (
-    <Link href={`/app/evaluations/${run.id}`} className="text-primary-700 hover:underline">
+    // Underlined unconditionally, not just on hover: this link sits inline
+    // inside a `text-text-secondary` prose sentence (below), so a
+    // hover-only underline plus color alone doesn't meet the real axe
+    // `link-in-text-block` contrast/distinguishability rule (Phase 23
+    // Chunk 4 fix — see "Known defects" below).
+    <Link href={`/app/evaluations/${run.id}`} className="text-primary-700 underline">
       Run #{run.id.slice(0, 8)}
     </Link>
   );

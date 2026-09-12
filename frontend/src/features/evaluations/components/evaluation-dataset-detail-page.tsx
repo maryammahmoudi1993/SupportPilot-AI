@@ -135,20 +135,26 @@ function CaseRow({
           />
         </div>
       ) : (
-        <dl className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
-          <div className="sm:col-span-2">
+        <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
+          {/* Only the Input message is a real name/value pair, so only it
+              gets a `<dl>` — `StructuredPayload` renders a `<details>` (or a
+              bare `<span>` for an empty value), and a `<dl>` may only
+              directly contain `<dt>`/`<dd>` groups (a real axe
+              `definition-list` violation found and fixed in Phase 23
+              Chunk 4: see "Known defects" below). */}
+          <dl className="sm:col-span-2">
             <dt className="text-text-muted text-xs font-medium uppercase">Input message</dt>
             <dd className="text-text-primary text-sm break-words whitespace-pre-wrap">
               {evaluationCase.input_message}
             </dd>
-          </div>
+          </dl>
           <div className="sm:col-span-2">
             <StructuredPayload value={evaluationCase.seeded_context} label="Seeded context" />
           </div>
           <div className="sm:col-span-2">
             <StructuredPayload value={evaluationCase.expectations} label="Expectations" />
           </div>
-        </dl>
+        </div>
       )}
     </li>
   );
