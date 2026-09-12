@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { Suspense } from "react";
+import { Suspense, useState } from "react";
 import type { ChangeEvent, ReactNode } from "react";
 
 import {
@@ -10,6 +10,10 @@ import {
   EvaluationResultStatusBadge,
   EvaluationRunStatusBadge,
 } from "@/features/evaluations/components/evaluation-badges";
+import {
+  useCancelEvaluationRunMutation,
+  useReplayEvaluationResultMutation,
+} from "@/features/evaluations/mutations";
 import {
   useEvaluationResultListQuery,
   useEvaluationRunDetailQuery,
@@ -21,6 +25,11 @@ import type {
   EvaluationRunStatusValue,
 } from "@/features/evaluations/types";
 import {
+  canRunEvaluations,
+  isTerminalEvaluationResultStatus,
+  isTerminalEvaluationRunStatus,
+} from "@/features/evaluations/types";
+import {
   buildEvaluationResultListQueryString,
   parseEvaluationResultListParams,
 } from "@/features/evaluations/url-params";
@@ -30,7 +39,10 @@ import { ListError } from "@/components/support/list-error";
 import { Pagination } from "@/components/support/pagination";
 import { StructuredPayload } from "@/components/support/structured-payload";
 import { Timestamp } from "@/components/support/timestamp";
+import { Alert } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
@@ -68,7 +80,72 @@ const RESULT_PASSED_OPTIONS: { value: EvaluationResultPassedFilter; label: strin
   { value: "failed", label: "Failed" },
 ];
 
-function ResultRow({ result }: { result: EvaluationResult }) {
+/**
+ * Replay control (Phase 23 Chunk 3, evaluations/views.py
+ * `EvaluationResultReplayView` / services.py `replay_evaluation_case`): only
+ * offered for a result already in a terminal status — the backend rejects
+ * (409) replaying a still-`pending`/`running` result outright
+ * (`EvaluationResultNotReplayableError`), so the control mirrors that rather
+ * than letting an operator hit a guaranteed conflict. A replay never mutates
+ * this result; it creates a brand-new sibling result referencing the same
+ * case snapshot (`replay_of_id`), which the results list picks up on its own
+ * next poll/refetch (invalidated on success) — never spliced in locally.
+ */
+function ReplayResultControl({
+  workspaceId,
+  runId,
+  result,
+}: {
+  workspaceId: string;
+  runId: string;
+  result: EvaluationResult;
+}) {
+  const mutation = useReplayEvaluationResultMutation(workspaceId, runId);
+
+  if (!isTerminalEvaluationResultStatus(result.status)) {
+    return null;
+  }
+
+  return (
+    <div className="mt-2 flex flex-col gap-2">
+      <div>
+        <Button
+          type="button"
+          variant="secondary"
+          size="sm"
+          onClick={() => {
+            if (mutation.isPending) {
+              return;
+            }
+            mutation.mutate(result.id);
+          }}
+          disabled={mutation.isPending}
+          isLoading={mutation.isPending}
+        >
+          Replay
+        </Button>
+      </div>
+      {mutation.isError && (
+        <Alert variant="danger" title="This result could not be replayed">
+          {mutation.error.message}
+        </Alert>
+      )}
+      {mutation.isSuccess && <Alert variant="success">Replay queued as a new result.</Alert>}
+    </div>
+  );
+}
+
+function ResultRow({
+  result,
+  workspaceId,
+  runId,
+  canRun,
+}: {
+  result: EvaluationResult;
+  workspaceId: string;
+  runId: string;
+  canRun: boolean;
+}) {
   return (
     <li className="border-border-subtle border-b py-3 last:border-b-0">
       <div className="flex flex-wrap items-center gap-2">
@@ -95,9 +172,7 @@ function ResultRow({ result }: { result: EvaluationResult }) {
             )
           }
         />
-        {result.latency_ms !== null && (
-          <Field label="Latency" value={`${result.latency_ms}ms`} />
-        )}
+        {result.latency_ms !== null && <Field label="Latency" value={`${result.latency_ms}ms`} />}
         <Field label="Total tokens" value={result.total_tokens} />
         <Field
           label="Estimated cost"
@@ -107,7 +182,9 @@ function ResultRow({ result }: { result: EvaluationResult }) {
         {result.failure_message_safe && (
           <Field label="Failure message" value={result.failure_message_safe} />
         )}
-        {result.started_at && <Field label="Started" value={<Timestamp value={result.started_at} />} />}
+        {result.started_at && (
+          <Field label="Started" value={<Timestamp value={result.started_at} />} />
+        )}
         {result.completed_at && (
           <Field label="Completed" value={<Timestamp value={result.completed_at} />} />
         )}
@@ -115,6 +192,7 @@ function ResultRow({ result }: { result: EvaluationResult }) {
       <div className="mt-2">
         <StructuredPayload value={result.scorer_output} label="Scorer output" />
       </div>
+      {canRun && <ReplayResultControl workspaceId={workspaceId} runId={runId} result={result} />}
     </li>
   );
 }
@@ -123,10 +201,12 @@ function ResultsPanel({
   workspaceId,
   runId,
   runStatus,
+  canRun,
 }: {
   workspaceId: string;
   runId: string;
   runStatus: EvaluationRunStatusValue;
+  canRun: boolean;
 }) {
   const router = useRouter();
   const pathname = usePathname();
@@ -187,7 +267,13 @@ function ResultsPanel({
             className={cn("flex flex-col", query.isFetching && "opacity-60")}
           >
             {query.data.results.map((result) => (
-              <ResultRow key={result.id} result={result} />
+              <ResultRow
+                key={result.id}
+                result={result}
+                workspaceId={workspaceId}
+                runId={runId}
+                canRun={canRun}
+              />
             ))}
           </ol>
           <Pagination
@@ -204,12 +290,78 @@ function ResultsPanel({
   );
 }
 
-function EvaluationRunDetailContent({
+/**
+ * Cancel control (Phase 23 Chunk 3, evaluations/views.py
+ * `EvaluationRunCancelView` / services.py `cancel_evaluation_run`): only
+ * rendered for a non-terminal run — the backend independently re-validates
+ * this and returns 409 for an already-terminal run
+ * (`EvaluationRunNotCancellableError`), confirmed by
+ * `test_trigger_run_then_read_results_and_cancel`'s "cancel again is 409"
+ * assertion. A confirmation dialog gates the action (master prompt Part J
+ * §38-39: no destructive/state-changing action fires on a single click) —
+ * unlike webhook redrive, cancelling is NOT an at-least-once/duplicable
+ * external side effect, so the copy is a plain, accurate description of
+ * what happens, not a duplicate-effect warning.
+ */
+function CancelRunControl({
   workspaceId,
   runId,
+  status,
 }: {
   workspaceId: string;
   runId: string;
+  status: EvaluationRunStatusValue;
+}) {
+  const mutation = useCancelEvaluationRunMutation(workspaceId, runId);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const isCancellable = !isTerminalEvaluationRunStatus(status);
+
+  if (!isCancellable && !mutation.isSuccess) {
+    return null;
+  }
+
+  return (
+    <div className="flex flex-col gap-2">
+      {isCancellable && (
+        <Button
+          type="button"
+          variant="secondary"
+          size="sm"
+          onClick={() => setConfirmOpen(true)}
+          disabled={mutation.isPending}
+          isLoading={mutation.isPending}
+        >
+          Cancel run
+        </Button>
+      )}
+      {mutation.isError && (
+        <Alert variant="danger" title="This run could not be cancelled">
+          {mutation.error.message}
+        </Alert>
+      )}
+      {mutation.isSuccess && <Alert variant="success">Evaluation run cancelled.</Alert>}
+      <ConfirmDialog
+        open={confirmOpen}
+        onOpenChange={setConfirmOpen}
+        title="Cancel this evaluation run?"
+        description="Any still-pending case in this run is cancelled outright. A case already running is left to finish, but the run itself moves to Cancelled and will not start any further cases."
+        confirmLabel="Cancel run"
+        confirmVariant="danger"
+        onConfirm={() => mutation.mutate(undefined, { onSettled: () => setConfirmOpen(false) })}
+        isConfirming={mutation.isPending}
+      />
+    </div>
+  );
+}
+
+function EvaluationRunDetailContent({
+  workspaceId,
+  runId,
+  canRun,
+}: {
+  workspaceId: string;
+  runId: string;
+  canRun: boolean;
 }) {
   const runQuery = useEvaluationRunDetailQuery(workspaceId, runId);
 
@@ -248,9 +400,14 @@ function EvaluationRunDetailContent({
 
       <Card>
         <CardHeader>
-          <div className="flex flex-wrap items-center gap-2">
-            <CardTitle>Run #{run.id.slice(0, 8)}</CardTitle>
-            <EvaluationRunStatusBadge status={run.status} />
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <CardTitle>Run #{run.id.slice(0, 8)}</CardTitle>
+              <EvaluationRunStatusBadge status={run.status} />
+            </div>
+            {canRun && (
+              <CancelRunControl workspaceId={workspaceId} runId={runId} status={run.status} />
+            )}
           </div>
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
@@ -296,7 +453,12 @@ function EvaluationRunDetailContent({
               </div>
             }
           >
-            <ResultsPanel workspaceId={workspaceId} runId={runId} runStatus={run.status} />
+            <ResultsPanel
+              workspaceId={workspaceId}
+              runId={runId}
+              runStatus={run.status}
+              canRun={canRun}
+            />
           </Suspense>
         </CardContent>
       </Card>
@@ -320,6 +482,10 @@ export function EvaluationRunDetailPage({ runId }: { runId: string }) {
   }
 
   return (
-    <EvaluationRunDetailContent workspaceId={workspace.activeWorkspace.id} runId={runId} />
+    <EvaluationRunDetailContent
+      workspaceId={workspace.activeWorkspace.id}
+      runId={runId}
+      canRun={canRunEvaluations(workspace.activeWorkspace.role)}
+    />
   );
 }

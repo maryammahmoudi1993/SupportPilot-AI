@@ -2,15 +2,24 @@
 
 import Link from "next/link";
 import { useRouter, usePathname } from "next/navigation";
+import { useState } from "react";
 import type { ChangeEvent } from "react";
 
 import { EvaluationRunStatusBadge } from "@/features/evaluations/components/evaluation-badges";
+import { EvaluationRunCompareResultPanel } from "@/features/evaluations/components/evaluation-run-compare-panel";
+import { useCompareEvaluationRunsMutation } from "@/features/evaluations/mutations";
 import { useEvaluationRunListQuery } from "@/features/evaluations/queries";
-import type { EvaluationRunListParams, EvaluationRunStatusFilter } from "@/features/evaluations/types";
+import type {
+  EvaluationRun,
+  EvaluationRunListParams,
+  EvaluationRunStatusFilter,
+} from "@/features/evaluations/types";
 import { buildEvaluationRunListQueryString } from "@/features/evaluations/url-params";
 import { ListError } from "@/components/support/list-error";
 import { Pagination } from "@/components/support/pagination";
 import { Timestamp } from "@/components/support/timestamp";
+import { Alert } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
@@ -25,18 +34,63 @@ const STATUS_OPTIONS: { value: EvaluationRunStatusFilter; label: string }[] = [
   { value: "cancelled", label: "Cancelled" },
 ];
 
+/**
+ * Compare selection + trigger (Phase 23 Chunk 3, evaluations/views.py
+ * `EvaluationRunCompareView` / services.py `compare_evaluation_runs`): a
+ * real, server-computed, per-case comparison of two runs over the same
+ * dataset — client-side selection of exactly two runs from THIS page's
+ * already-fetched list, never a fabricated client-only diff (the backend
+ * itself rejects incompatible runs with 400 `evaluation_runs_not_comparable`,
+ * verified in `test_compare_rejects_incompatible_runs`). Selection is kept
+ * in local component state, not the URL — it is a transient action, not
+ * shareable list state like the status filter is.
+ */
+function useRunSelection() {
+  const [selected, setSelected] = useState<string[]>([]);
+
+  function toggle(runId: string) {
+    setSelected((current) => {
+      if (current.includes(runId)) {
+        return current.filter((id) => id !== runId);
+      }
+      if (current.length >= 2) {
+        // Bounded to exactly two — selecting a third replaces the first
+        // selected rather than silently refusing the click.
+        return [current[1], runId];
+      }
+      return [...current, runId];
+    });
+  }
+
+  function clear() {
+    setSelected([]);
+  }
+
+  return { selected, toggle, clear };
+}
+
 /** Runs tab content (Phase 23 Chunk 1, extracted into a tab in Chunk 2 —
- * see evaluations-list-page.tsx). */
+ * see evaluations-list-page.tsx). `canRun` (Chunk 3) gates both the compare
+ * checkboxes and the Start Run entry point (the dataset detail page is
+ * where a run is actually started — see evaluation-dataset-detail-page.tsx
+ * — this tab only links there). */
 export function EvaluationRunsTab({
   workspaceId,
   params,
+  canRun,
 }: {
   workspaceId: string;
   params: EvaluationRunListParams;
+  canRun: boolean;
 }) {
   const router = useRouter();
   const pathname = usePathname();
   const query = useEvaluationRunListQuery(workspaceId, params);
+  const selection = useRunSelection();
+  const compareMutation = useCompareEvaluationRunsMutation(workspaceId);
+  const runsById = new Map<string, EvaluationRun>(
+    (query.data?.results ?? []).map((run) => [run.id, run]),
+  );
 
   function pushParams(next: EvaluationRunListParams) {
     router.replace(`${pathname}${buildEvaluationRunListQueryString(next)}`, { scroll: false });
@@ -93,11 +147,72 @@ export function EvaluationRunsTab({
 
       {query.isSuccess && query.data.results.length > 0 && (
         <>
+          {canRun && (
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                disabled={selection.selected.length !== 2 || compareMutation.isPending}
+                isLoading={compareMutation.isPending}
+                onClick={() => {
+                  if (compareMutation.isPending || selection.selected.length !== 2) {
+                    return;
+                  }
+                  const [baselineRunId, candidateRunId] = selection.selected;
+                  compareMutation.mutate({
+                    baseline_run_id: baselineRunId,
+                    candidate_run_id: candidateRunId,
+                  });
+                }}
+              >
+                Compare selected ({selection.selected.length}/2)
+              </Button>
+              {selection.selected.length > 0 && (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => {
+                    selection.clear();
+                    compareMutation.reset();
+                  }}
+                  disabled={compareMutation.isPending}
+                >
+                  Clear selection
+                </Button>
+              )}
+              <p className="text-text-secondary text-xs">
+                Select exactly two runs over the same dataset to compare their real, server-computed
+                metrics.
+              </p>
+            </div>
+          )}
+
+          {compareMutation.isError && (
+            <Alert variant="danger" title="These runs could not be compared">
+              {compareMutation.error.message}
+            </Alert>
+          )}
+
+          {compareMutation.isSuccess && (
+            <EvaluationRunCompareResultPanel
+              result={compareMutation.data}
+              baselineRun={runsById.get(compareMutation.data.baseline_run_id)}
+              candidateRun={runsById.get(compareMutation.data.candidate_run_id)}
+            />
+          )}
+
           <div className="border-border-subtle overflow-x-auto rounded-lg border">
             <table className="w-full min-w-[760px] text-left text-sm">
               <caption className="sr-only">Evaluation runs in this workspace</caption>
               <thead className="bg-surface-2 text-text-secondary text-xs font-medium uppercase">
                 <tr>
+                  {canRun && (
+                    <th scope="col" className="px-4 py-2.5">
+                      <span className="sr-only">Select for comparison</span>
+                    </th>
+                  )}
                   <th scope="col" className="px-4 py-2.5">
                     Run
                   </th>
@@ -123,6 +238,17 @@ export function EvaluationRunsTab({
               >
                 {query.data.results.map((run) => (
                   <tr key={run.id} className="hover:bg-surface-2">
+                    {canRun && (
+                      <td className="px-4 py-2.5">
+                        <input
+                          type="checkbox"
+                          aria-label={`Select run ${run.id.slice(0, 8)} for comparison`}
+                          checked={selection.selected.includes(run.id)}
+                          onChange={() => selection.toggle(run.id)}
+                          className="h-4 w-4"
+                        />
+                      </td>
+                    )}
                     <td className="px-4 py-2.5 font-medium">
                       <Link
                         href={`/app/evaluations/${run.id}`}

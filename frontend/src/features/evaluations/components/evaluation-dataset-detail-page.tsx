@@ -11,8 +11,10 @@ import {
 } from "@/features/evaluations/components/evaluation-badges";
 import { EvaluationCaseForm } from "@/features/evaluations/components/evaluation-case-form";
 import { EvaluationDatasetForm } from "@/features/evaluations/components/evaluation-dataset-form";
+import { StartEvaluationRunForm } from "@/features/evaluations/components/start-evaluation-run-form";
 import {
   useCreateEvaluationCaseMutation,
+  useStartEvaluationRunMutation,
   useUpdateEvaluationCaseMutation,
   useUpdateEvaluationDatasetMutation,
 } from "@/features/evaluations/mutations";
@@ -25,7 +27,7 @@ import type {
   EvaluationCaseListParams,
   EvaluationCaseStatusFilter,
 } from "@/features/evaluations/types";
-import { canManageEvaluations } from "@/features/evaluations/types";
+import { canManageEvaluations, canRunEvaluations } from "@/features/evaluations/types";
 import {
   buildEvaluationCaseListQueryString,
   parseEvaluationCaseListParams,
@@ -36,6 +38,7 @@ import { ListError } from "@/components/support/list-error";
 import { Pagination } from "@/components/support/pagination";
 import { StructuredPayload } from "@/components/support/structured-payload";
 import { Timestamp } from "@/components/support/timestamp";
+import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
@@ -271,14 +274,68 @@ function CasesPanel({
   );
 }
 
+/**
+ * "Start Run" action (Phase 23 Chunk 3), scoped to this dataset. Gated
+ * `canRun`-only — hidden, not disabled, for a lower-privilege viewer (master
+ * prompt Part D §15 RBAC-UI pattern) — but the backend's own
+ * `CanRunEvaluations` permission (evaluations/permissions.py) is what
+ * actually blocks a direct unauthorized API call regardless of what renders
+ * here. A successful start navigates straight to the new run's detail page,
+ * where its status is polled exactly like any other run (queries.ts
+ * `pollWhileNonTerminalRun`) — no separate "started" toast to leak.
+ */
+function StartRunPanel({ workspaceId, datasetId }: { workspaceId: string; datasetId: string }) {
+  const router = useRouter();
+  const [isOpen, setIsOpen] = useState(false);
+  const mutation = useStartEvaluationRunMutation(workspaceId);
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div>
+        <Button size="sm" onClick={() => setIsOpen((open) => !open)} disabled={mutation.isPending}>
+          {isOpen ? "Cancel" : "Start run"}
+        </Button>
+      </div>
+      {isOpen && (
+        <StartEvaluationRunForm
+          workspaceId={workspaceId}
+          isPending={mutation.isPending}
+          error={mutation.isError ? mutation.error.message : null}
+          onSubmit={(agentVersionId) => {
+            if (mutation.isPending) {
+              return;
+            }
+            mutation.mutate(
+              { dataset_id: datasetId, agent_version_id: agentVersionId },
+              {
+                onSuccess: (run) => {
+                  router.push(`/app/evaluations/${run.id}`);
+                },
+              },
+            );
+          }}
+          onCancel={() => setIsOpen(false)}
+        />
+      )}
+      {mutation.isError && !isOpen && (
+        <Alert variant="danger" title="This evaluation run could not be started">
+          {mutation.error.message}
+        </Alert>
+      )}
+    </div>
+  );
+}
+
 function EvaluationDatasetDetailContent({
   workspaceId,
   datasetId,
   canManage,
+  canRun,
 }: {
   workspaceId: string;
   datasetId: string;
   canManage: boolean;
+  canRun: boolean;
 }) {
   const datasetQuery = useEvaluationDatasetDetailQuery(workspaceId, datasetId);
   const [isEditOpen, setIsEditOpen] = useState(false);
@@ -312,7 +369,10 @@ function EvaluationDatasetDetailContent({
   return (
     <div className="flex flex-col gap-4">
       <div>
-        <Link href="/app/evaluations?tab=datasets" className="text-primary-700 text-sm hover:underline">
+        <Link
+          href="/app/evaluations?tab=datasets"
+          className="text-primary-700 text-sm hover:underline"
+        >
           ← Back to Datasets
         </Link>
       </div>
@@ -325,7 +385,12 @@ function EvaluationDatasetDetailContent({
               <EvaluationDatasetStatusBadge status={dataset.status} />
             </div>
             {canManage && !isEditOpen && (
-              <Button type="button" variant="secondary" size="sm" onClick={() => setIsEditOpen(true)}>
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                onClick={() => setIsEditOpen(true)}
+              >
                 Edit dataset
               </Button>
             )}
@@ -355,11 +420,22 @@ function EvaluationDatasetDetailContent({
           )}
           <p className="text-text-secondary text-xs">
             Editing this dataset or its cases only affects future evaluation runs. Every past
-            evaluation run keeps executing against its own immutable case snapshot recorded at
-            the time it was created — past results never change.
+            evaluation run keeps executing against its own immutable case snapshot recorded at the
+            time it was created — past results never change.
           </p>
         </CardContent>
       </Card>
+
+      {canRun && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Run this dataset</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <StartRunPanel workspaceId={workspaceId} datasetId={datasetId} />
+          </CardContent>
+        </Card>
+      )}
 
       <Card>
         <CardHeader>
@@ -398,12 +474,14 @@ export function EvaluationDatasetDetailPage({ datasetId }: { datasetId: string }
   }
 
   const canManage = canManageEvaluations(workspace.activeWorkspace.role);
+  const canRun = canRunEvaluations(workspace.activeWorkspace.role);
 
   return (
     <EvaluationDatasetDetailContent
       workspaceId={workspace.activeWorkspace.id}
       datasetId={datasetId}
       canManage={canManage}
+      canRun={canRun}
     />
   );
 }

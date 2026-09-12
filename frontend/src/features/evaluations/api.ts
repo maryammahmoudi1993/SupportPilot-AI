@@ -34,6 +34,8 @@
 import { apiClient } from "@/lib/api/client";
 import { unwrap, withRequestTimeout } from "@/lib/api/request";
 import type {
+  AgentDefinitionOption,
+  AgentVersionOption,
   CreateEvaluationCaseInput,
   CreateEvaluationDatasetInput,
   EvaluationCase,
@@ -43,11 +45,14 @@ import type {
   EvaluationResult,
   EvaluationResultListParams,
   EvaluationRun,
+  EvaluationRunCompareInput,
+  EvaluationRunCompareResult,
   EvaluationRunListParams,
   PaginatedEvaluationCaseList,
   PaginatedEvaluationDatasetList,
   PaginatedEvaluationResultList,
   PaginatedEvaluationRunList,
+  StartEvaluationRunInput,
   UpdateEvaluationCaseInput,
   UpdateEvaluationDatasetInput,
 } from "@/features/evaluations/types";
@@ -64,10 +69,7 @@ type EvaluationRunListQuery = Omit<GeneratedEvaluationRunListQuery, "ordering" |
 type GeneratedEvaluationResultListQuery = NonNullable<
   paths["/api/v1/workspaces/{workspace_id}/evaluations/runs/{run_id}/results/"]["get"]["parameters"]["query"]
 >;
-type EvaluationResultListQuery = Omit<
-  GeneratedEvaluationResultListQuery,
-  "ordering" | "search"
-> & {
+type EvaluationResultListQuery = Omit<GeneratedEvaluationResultListQuery, "ordering" | "search"> & {
   status?: string;
   passed?: boolean;
 };
@@ -330,16 +332,149 @@ export function createEvaluationCase(
 ): Promise<EvaluationCase> {
   return unwrap(
     withRequestTimeout((requestSignal) =>
+      apiClient.POST("/api/v1/workspaces/{workspace_id}/evaluations/datasets/{dataset_id}/cases/", {
+        params: { path: { workspace_id: workspaceId, dataset_id: datasetId } },
+        body: input,
+        signal: requestSignal,
+      }),
+    ),
+  ) as Promise<EvaluationCase>;
+}
+
+/**
+ * Run execution/cancel/replay/compare API (Phase 23 Chunk 3).
+ *
+ * Contract re-discovery (backend/evaluations/views.py, permissions.py,
+ * services.py — read directly, not assumed from Chunk 1's notes): all four
+ * capabilities are real, public, workspace-scoped endpoints gated to
+ * `CanRunEvaluations` (owner/admin/support_manager — the same role set as
+ * `CanManageEvaluations` today, but a distinct permission class the backend
+ * could diverge independently in future). Chunk 1's notes said no compare
+ * endpoint was documented — re-discovery found a real one
+ * (`POST .../evaluations/compare/`, `EvaluationRunCompareView`) that computes
+ * real per-run metrics, deltas, and threshold pass/fail server-side
+ * (`services.compare_evaluation_runs`) — this is used directly rather than
+ * fabricating a client-side-only comparison.
+ *
+ * Schema gap 7 (Category A): `api_v1_workspaces_evaluations_compare_create`'s
+ * 200 response is generated with `content?: never` — drf-spectacular could
+ * not infer a body shape from the view's `OpenApiResponse(description=...)`
+ * with no explicit `response=` schema (`EvaluationRunCompareView.post`
+ * returns a plain dict, not a serializer instance). `EvaluationRunCompareResult`
+ * in types.ts is hand-typed directly from `services.compare_evaluation_runs`'s
+ * real return shape (verified against evaluations/services.py `_run_metrics`/
+ * `_evaluate_thresholds`) and asserted here, same pattern as
+ * `createEvaluationDataset`/`createEvaluationCase` (schema gap 5 above).
+ */
+export function startEvaluationRun(
+  workspaceId: string,
+  input: StartEvaluationRunInput,
+): Promise<EvaluationRun> {
+  return unwrap(
+    withRequestTimeout((requestSignal) =>
+      apiClient.POST("/api/v1/workspaces/{workspace_id}/evaluations/runs/", {
+        params: { path: { workspace_id: workspaceId } },
+        body: input,
+        signal: requestSignal,
+      }),
+    ),
+  );
+}
+
+export function cancelEvaluationRun(workspaceId: string, runId: string): Promise<EvaluationRun> {
+  return unwrap(
+    withRequestTimeout((requestSignal) =>
+      apiClient.POST("/api/v1/workspaces/{workspace_id}/evaluations/runs/{run_id}/cancel/", {
+        params: { path: { workspace_id: workspaceId, run_id: runId } },
+        signal: requestSignal,
+      }),
+    ),
+  );
+}
+
+export function replayEvaluationResult(
+  workspaceId: string,
+  runId: string,
+  resultId: string,
+): Promise<EvaluationResult> {
+  return unwrap(
+    withRequestTimeout((requestSignal) =>
       apiClient.POST(
-        "/api/v1/workspaces/{workspace_id}/evaluations/datasets/{dataset_id}/cases/",
+        "/api/v1/workspaces/{workspace_id}/evaluations/runs/{run_id}/results/{result_id}/replay/",
         {
-          params: { path: { workspace_id: workspaceId, dataset_id: datasetId } },
-          body: input,
+          params: { path: { workspace_id: workspaceId, run_id: runId, result_id: resultId } },
           signal: requestSignal,
         },
       ),
     ),
-  ) as Promise<EvaluationCase>;
+  );
+}
+
+export function compareEvaluationRuns(
+  workspaceId: string,
+  input: EvaluationRunCompareInput,
+): Promise<EvaluationRunCompareResult> {
+  return unwrap(
+    withRequestTimeout((requestSignal) =>
+      apiClient.POST("/api/v1/workspaces/{workspace_id}/evaluations/compare/", {
+        params: { path: { workspace_id: workspaceId } },
+        body: input,
+        signal: requestSignal,
+      }),
+    ),
+  ) as unknown as Promise<EvaluationRunCompareResult>;
+}
+
+/**
+ * Minimal read-only support for the "Start Run" agent-version picker
+ * (Phase 23 Chunk 3). No `features/agents` domain exists yet in this
+ * frontend — agent runs are always triggered indirectly (via a
+ * conversation/ticket), never through a direct "create agent run" UI — so
+ * this is deliberately the smallest possible read slice (id/name/status only,
+ * a single bounded page each) rather than a new full agents feature.
+ * Real backend filters: none for `agent-list` beyond `status`
+ * (`agents/selectors.py agent_definition_list_for_workspace`); the version
+ * list has no filter and is filtered to `published` client-side, since
+ * `start_evaluation_run` independently re-validates the version's real
+ * status regardless (evaluations/services.py) — this is a UX narrowing, not
+ * a security boundary.
+ */
+export function fetchAgentDefinitionOptions(
+  workspaceId: string,
+  signal?: AbortSignal,
+): Promise<AgentDefinitionOption[]> {
+  return unwrap(
+    withRequestTimeout(
+      (requestSignal) =>
+        apiClient.GET("/api/v1/workspaces/{workspace_id}/agents/", {
+          params: { path: { workspace_id: workspaceId }, query: { page_size: 100 } },
+          signal: requestSignal,
+        }),
+      undefined,
+      signal,
+    ),
+  ).then((page) => page.results);
+}
+
+export function fetchAgentVersionOptions(
+  workspaceId: string,
+  agentId: string,
+  signal?: AbortSignal,
+): Promise<AgentVersionOption[]> {
+  return unwrap(
+    withRequestTimeout(
+      (requestSignal) =>
+        apiClient.GET("/api/v1/workspaces/{workspace_id}/agents/{agent_id}/versions/", {
+          params: {
+            path: { workspace_id: workspaceId, agent_id: agentId },
+            query: { page_size: 100 },
+          },
+          signal: requestSignal,
+        }),
+      undefined,
+      signal,
+    ),
+  ).then((page) => page.results.filter((version) => version.status === "published"));
 }
 
 export function updateEvaluationCase(

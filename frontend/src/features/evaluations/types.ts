@@ -226,3 +226,91 @@ const EVALUATION_MANAGE_ROLES = new Set(["owner", "admin", "support_manager"]);
 export function canManageEvaluations(role: string | undefined): boolean {
   return role !== undefined && EVALUATION_MANAGE_ROLES.has(role);
 }
+
+/**
+ * Run execution/cancel/replay/compare roles (Phase 23 Chunk 3 —
+ * evaluations/permissions.py `EVALUATION_RUN_ROLES`). Today this is the
+ * exact same role set as `EVALUATION_MANAGE_ROLES` (the backend defines it
+ * as `EVALUATION_MANAGE_ROLES` verbatim, not merely an identical literal),
+ * but kept as its own function/permission concept since manage (dataset/case
+ * writes) and run (execute/cancel/replay/compare) are documented as
+ * logically distinct capabilities that could diverge independently — mirrors
+ * the backend's own separate `CanManageEvaluations`/`CanRunEvaluations`
+ * permission classes.
+ */
+const EVALUATION_RUN_ROLES = new Set(["owner", "admin", "support_manager"]);
+
+export function canRunEvaluations(role: string | undefined): boolean {
+  return role !== undefined && EVALUATION_RUN_ROLES.has(role);
+}
+
+/**
+ * Start Run / Compare inputs (Phase 23 Chunk 3). `EvaluationRunCreate` and
+ * `EvaluationRunCompare` are both already correctly generated (the request
+ * write shape matches the request body exactly), so these are simple aliases
+ * rather than re-typed — unlike the dataset/case create inputs above, there
+ * is no schema gap on the request side here.
+ */
+export interface StartEvaluationRunInput {
+  dataset_id: string;
+  agent_version_id: string;
+  threshold_config?: unknown;
+}
+
+export interface EvaluationRunCompareInput {
+  baseline_run_id: string;
+  candidate_run_id: string;
+}
+
+/**
+ * Hand-typed from the real backend return shape (evaluations/services.py
+ * `compare_evaluation_runs`/`_run_metrics`/`_evaluate_thresholds`) — see
+ * api.ts schema gap 7: the generated 200 response has no body type at all.
+ * Every field here is a value the backend actually computes and returns;
+ * nothing here is invented — no comparison "score" or "improvement"
+ * percentage beyond the real `deltas` (candidate metric minus baseline
+ * metric, rounded server-side) and `regressions`/`passed` the backend itself
+ * derives from the run's own `threshold_config`.
+ */
+export interface EvaluationRunMetrics {
+  pass_rate: number;
+  forbidden_tool_violations: number;
+  approval_violations: number;
+  handoff_rate: number;
+  [key: string]: number;
+}
+
+export interface EvaluationRunCompareThresholdResult {
+  threshold: unknown;
+  passed: boolean;
+}
+
+export interface EvaluationRunCompareResult {
+  baseline_run_id: string;
+  candidate_run_id: string;
+  case_count: number;
+  baseline_metrics: EvaluationRunMetrics;
+  candidate_metrics: EvaluationRunMetrics;
+  deltas: Record<string, number>;
+  thresholds: Record<string, EvaluationRunCompareThresholdResult>;
+  regressions: string[];
+  passed: boolean;
+}
+
+/**
+ * Minimal agent-version-picker option types (Phase 23 Chunk 3 — see api.ts
+ * `fetchAgentDefinitionOptions`/`fetchAgentVersionOptions`). Deliberately not
+ * the full generated `AgentDefinition`/`AgentVersion` shapes — only the
+ * fields the "Start Run" picker actually renders.
+ */
+export interface AgentDefinitionOption {
+  id: string;
+  name: string;
+  status?: string;
+}
+
+export interface AgentVersionOption {
+  id: string;
+  version: number;
+  status: string;
+}

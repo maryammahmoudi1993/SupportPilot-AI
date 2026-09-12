@@ -6,8 +6,11 @@ import { Suspense } from "react";
 import type { ReactNode } from "react";
 
 import { EvaluationDatasetsTab } from "@/features/evaluations/components/evaluation-datasets-tab";
-import { EvaluationRunsListSkeleton, EvaluationRunsTab } from "@/features/evaluations/components/evaluation-runs-tab";
-import { canManageEvaluations } from "@/features/evaluations/types";
+import {
+  EvaluationRunsListSkeleton,
+  EvaluationRunsTab,
+} from "@/features/evaluations/components/evaluation-runs-tab";
+import { canManageEvaluations, canRunEvaluations } from "@/features/evaluations/types";
 import {
   parseEvaluationDatasetListParams,
   parseEvaluationRunListParams,
@@ -17,7 +20,15 @@ import { useWorkspace } from "@/features/workspace/workspace-provider";
 import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
 
-function TabLink({ href, isActive, children }: { href: string; isActive: boolean; children: ReactNode }) {
+function TabLink({
+  href,
+  isActive,
+  children,
+}: {
+  href: string;
+  isActive: boolean;
+  children: ReactNode;
+}) {
   return (
     <Link
       href={href}
@@ -49,6 +60,7 @@ function EvaluationsListContent() {
 
   const workspaceId = workspace.activeWorkspace?.id ?? null;
   const canManage = canManageEvaluations(workspace.activeWorkspace?.role);
+  const canRun = canRunEvaluations(workspace.activeWorkspace?.role);
   const tab = parseEvaluationTab(searchParams);
   const runParams = parseEvaluationRunListParams(searchParams);
   const datasetParams = parseEvaluationDatasetListParams(searchParams);
@@ -58,8 +70,8 @@ function EvaluationsListContent() {
       <div>
         <h1 className="text-text-primary text-xl font-semibold">Evaluations</h1>
         <p className="text-text-secondary text-sm">
-          Real evaluation runs, results, and datasets for this workspace&apos;s agent
-          versions — deterministic, offline scoring against recorded execution evidence.
+          Real evaluation runs, results, and datasets for this workspace&apos;s agent versions —
+          deterministic, offline scoring against recorded execution evidence.
         </p>
       </div>
 
@@ -75,9 +87,13 @@ function EvaluationsListContent() {
       {workspaceId === null ? (
         <EvaluationRunsListSkeleton />
       ) : tab === "datasets" ? (
-        <EvaluationDatasetsTab workspaceId={workspaceId} params={datasetParams} canManage={canManage} />
+        <EvaluationDatasetsTab
+          workspaceId={workspaceId}
+          params={datasetParams}
+          canManage={canManage}
+        />
       ) : (
-        <EvaluationRunsTab workspaceId={workspaceId} params={runParams} />
+        <EvaluationRunsTab workspaceId={workspaceId} params={runParams} canRun={canRun} />
       )}
     </div>
   );

@@ -43,4 +43,10 @@ export const evaluationKeys = {
     [...evaluationKeys.datasetDetail(workspaceId, datasetId), "cases"] as const,
   caseList: (workspaceId: string, datasetId: string, params: EvaluationCaseListParams) =>
     [...evaluationKeys.cases(workspaceId, datasetId), "list", params] as const,
+
+  /** Agent-version picker support for "Start Run" (Phase 23 Chunk 3). */
+  agentDefinitionOptions: (workspaceId: string) =>
+    ["workspaces", workspaceId, "agents", "options"] as const,
+  agentVersionOptions: (workspaceId: string, agentId: string) =>
+    ["workspaces", workspaceId, "agents", agentId, "version-options"] as const,
 };

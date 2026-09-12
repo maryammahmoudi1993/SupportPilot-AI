@@ -22,6 +22,8 @@
 import { useQuery } from "@tanstack/react-query";
 
 import {
+  fetchAgentDefinitionOptions,
+  fetchAgentVersionOptions,
   fetchEvaluationCaseList,
   fetchEvaluationDatasetDetail,
   fetchEvaluationDatasetList,
@@ -31,6 +33,8 @@ import {
 } from "@/features/evaluations/api";
 import { evaluationKeys } from "@/features/evaluations/query-keys";
 import type {
+  AgentDefinitionOption,
+  AgentVersionOption,
   EvaluationCaseListParams,
   EvaluationDataset,
   EvaluationDatasetListParams,
@@ -78,9 +82,9 @@ export function useEvaluationRunListQuery(
  * run's query is simply no longer the active one being rendered (disjoint,
  * workspace-scoped keys — see query-keys.ts).
  */
-export function pollWhileNonTerminalRun(query: { state: { data?: EvaluationRun } }):
-  | number
-  | false {
+export function pollWhileNonTerminalRun(query: {
+  state: { data?: EvaluationRun };
+}): number | false {
   const status = query.state.data?.status;
   if (!status || isTerminalEvaluationRunStatus(status)) {
     return false;
@@ -111,7 +115,9 @@ export function useEvaluationResultListQuery(
   params: EvaluationResultListParams,
 ) {
   const refetchInterval =
-    runStatus && !isTerminalEvaluationRunStatus(runStatus) ? EVALUATION_RUN_POLL_INTERVAL_MS : false;
+    runStatus && !isTerminalEvaluationRunStatus(runStatus)
+      ? EVALUATION_RUN_POLL_INTERVAL_MS
+      : false;
   return useQuery<PaginatedEvaluationResultList, ApiError>({
     queryKey: evaluationKeys.resultList(workspaceId ?? NO_WORKSPACE, runId ?? "", params),
     queryFn: ({ signal }) =>
@@ -156,6 +162,32 @@ export function useEvaluationDatasetDetailQuery(
     queryFn: ({ signal }) =>
       fetchEvaluationDatasetDetail(workspaceId as string, datasetId as string, signal),
     enabled: workspaceId !== null && datasetId !== null,
+  });
+}
+
+/**
+ * Agent-version picker support for "Start Run" (Phase 23 Chunk 3). Neither
+ * query polls — the picker is opened on demand and its options only change
+ * on an explicit admin write elsewhere, never asynchronously mid-form.
+ */
+export function useAgentDefinitionOptionsQuery(workspaceId: string | null, enabled: boolean) {
+  return useQuery<AgentDefinitionOption[], ApiError>({
+    queryKey: evaluationKeys.agentDefinitionOptions(workspaceId ?? NO_WORKSPACE),
+    queryFn: ({ signal }) => fetchAgentDefinitionOptions(workspaceId as string, signal),
+    enabled: workspaceId !== null && enabled,
+  });
+}
+
+export function useAgentVersionOptionsQuery(
+  workspaceId: string | null,
+  agentId: string | null,
+  enabled: boolean,
+) {
+  return useQuery<AgentVersionOption[], ApiError>({
+    queryKey: evaluationKeys.agentVersionOptions(workspaceId ?? NO_WORKSPACE, agentId ?? ""),
+    queryFn: ({ signal }) =>
+      fetchAgentVersionOptions(workspaceId as string, agentId as string, signal),
+    enabled: workspaceId !== null && agentId !== null && enabled,
   });
 }
 
