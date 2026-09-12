@@ -784,7 +784,7 @@ default:
 - `authentication_failed` is explicitly excluded: a 401 that reaches a
   query already survived `lib/api/session.ts`'s own coordinated
   refresh-and-retry-once. Retrying it again here would just race that
-  mechanism; a _definitive_ 401 is handled by `AuthProvider`'s
+  mechanism; a *definitive* 401 is handled by `AuthProvider`'s
   session-expired handler (clearing the session, redirecting to `/login`),
   not by a query retry.
 - Mutations never retry (`retry: false`) — an ambiguous automatic retry of
@@ -798,7 +798,7 @@ default:
   tests for no real product benefit here.
 
 `src/lib/query/query-provider.tsx` (`QueryProvider`) owns exactly one
-`QueryClient` instance, mounted inside `ProtectedLayout` — _inside_ the
+`QueryClient` instance, mounted inside `ProtectedLayout` — *inside* the
 `auth.status === "authenticated"` branch, alongside `WorkspaceProvider`
 (see `app/(protected)/layout.tsx`). This is what gives session-scoped cache
 isolation for free: `ProtectedLayout` renders entirely different JSX for
@@ -807,7 +807,7 @@ query) unmounts completely on logout or a confirmed mid-session expiry, and
 remounts fresh — with an empty cache — on the next login. There is no
 cache to leak between sessions because the `QueryClient` itself is gone,
 not merely invalidated. A **workspace switch**, by contrast, happens
-_within_ one authenticated session and must not tear this down — isolation
+*within* one authenticated session and must not tear this down — isolation
 there is the query-key factories' job (below), not this provider's.
 
 ### Workspace-scoped query keys
@@ -823,15 +823,15 @@ all embed the active workspace ID as their second segment:
 
 This is the actual mechanism behind "Workspace A's cached data never
 renders under Workspace B": a workspace switch changes every hook's
-`queryKey`, so React Query treats it as a _disjoint_ cache entry, not the
+`queryKey`, so React Query treats it as a *disjoint* cache entry, not the
 same entry gone stale — there's no shared bucket a stale value could leak
 out of. The one place this needs extra care is `placeholderData`
 (`src/features/customers/queries.ts`, `useCustomerListQuery`): React
-Query's `keepPreviousData` helper reuses the _previous successful query's_
+Query's `keepPreviousData` helper reuses the *previous successful query's*
 data across ANY key change, including a workspace switch — which would
 flash Workspace A's rows for a moment while Workspace B's request is in
 flight. Instead, `useCustomerListQuery` reuses `placeholderData` only when
-the _previous_ query's key carries the _same_ workspace ID as the current
+the *previous* query's key carries the *same* workspace ID as the current
 one (still giving smooth in-workspace pagination/filtering, never a
 cross-tenant flash) — covered by
 `customers-list-page.test.tsx`'s workspace-switch test, which asserts the
@@ -840,15 +840,15 @@ not merely eventually.
 
 ### Customer API contract
 
-| Question      | Answer                                                                                                                                                                                                                                                                                                                                                                                        |
-| ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| List          | `GET /api/v1/workspaces/{workspace_id}/customers/` — `customers/views.py` `CustomerListCreateView`, any active member.                                                                                                                                                                                                                                                                        |
-| Detail        | `GET /api/v1/workspaces/{workspace_id}/customers/{customer_id}/` — `CustomerDetailView`. A customer belonging to a different workspace 404s exactly like one that never existed (`customers/selectors.py customer_get_for_workspace_or_404`) — never a 403, no existence leakage.                                                                                                             |
-| Pagination    | Backend-standard `PageNumberPagination` (`common/pagination.py`) — `{count, next, previous, results}`, `page`/`page_size` query params, default page size 50, max 500.                                                                                                                                                                                                                        |
-| Search        | A single `search` query param, `icontains` across display/first/last name, email, phone, and external ID (`customers/selectors.py customer_list_for_workspace`) — no explicit-submit contract, so the UI debounces type-ahead (300ms) rather than firing per keystroke.                                                                                                                       |
-| Filters       | `is_active` (boolean) — real and backend-tested, surfaced as a Status select (All/Active/Inactive).                                                                                                                                                                                                                                                                                           |
-| Sort          | None. `ordering` appears in the generated OpenAPI schema only because `OrderingFilter` is in the project's global `DEFAULT_FILTER_BACKENDS` — the view sets no `ordering_fields`, so the backend silently ignores it. The frontend never sends it (see the comment in `features/customers/api.ts`) — sending an unsupported control would be building UI for a capability that doesn't exist. |
-| Create/update | `POST`/`PATCH` exist on the backend (`CustomerWriteSerializer`) but are out of Chunk 1's scope — the Customers UI is intentionally **read-only** for now; a real write UI is better deferred than faked.                                                                                                                                                                                      |
+| Question             | Answer                                                                                                                                                                   |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| List                  | `GET /api/v1/workspaces/{workspace_id}/customers/` — `customers/views.py` `CustomerListCreateView`, any active member.                                                 |
+| Detail                | `GET /api/v1/workspaces/{workspace_id}/customers/{customer_id}/` — `CustomerDetailView`. A customer belonging to a different workspace 404s exactly like one that never existed (`customers/selectors.py customer_get_for_workspace_or_404`) — never a 403, no existence leakage. |
+| Pagination            | Backend-standard `PageNumberPagination` (`common/pagination.py`) — `{count, next, previous, results}`, `page`/`page_size` query params, default page size 50, max 500. |
+| Search                | A single `search` query param, `icontains` across display/first/last name, email, phone, and external ID (`customers/selectors.py customer_list_for_workspace`) — no explicit-submit contract, so the UI debounces type-ahead (300ms) rather than firing per keystroke. |
+| Filters               | `is_active` (boolean) — real and backend-tested, surfaced as a Status select (All/Active/Inactive).                                                                    |
+| Sort                  | None. `ordering` appears in the generated OpenAPI schema only because `OrderingFilter` is in the project's global `DEFAULT_FILTER_BACKENDS` — the view sets no `ordering_fields`, so the backend silently ignores it. The frontend never sends it (see the comment in `features/customers/api.ts`) — sending an unsupported control would be building UI for a capability that doesn't exist. |
+| Create/update         | `POST`/`PATCH` exist on the backend (`CustomerWriteSerializer`) but are out of Chunk 1's scope — the Customers UI is intentionally **read-only** for now; a real write UI is better deferred than faked. |
 
 **Schema gap (Category A — typing deficiency, not a missing capability)**:
 `is_active` is a real, tested filter the view reads directly from
@@ -884,7 +884,7 @@ messages depending on whether a filter is active), and success. Detail
 additionally distinguishes a confirmed 404 (`EntityNotFound` — deliberately
 generic wording, since the backend returns the identical 404 for "doesn't
 exist" and "exists in a different workspace") from a malformed route ID
-(validated client-side against a UUID pattern _before_ any request is
+(validated client-side against a UUID pattern *before* any request is
 made — `customer-detail-page.test.tsx` asserts no network call happens for
 a non-UUID `customerId`) and from a genuine network error. The
 zero-workspace/workspace-load-error/loading states are already handled
@@ -900,7 +900,7 @@ navigation is now Overview → Inbox → Customers; Tickets is **not** added
 yet — an unclickable nav entry for a route that doesn't exist yet is worse
 than a short sidebar. `NavLinks`' active-route matching
 (`components/shell/nav-links.tsx`) treats every non-`/app` destination as
-active for its own path _and_ any nested route under it (`startsWith`), so
+active for its own path *and* any nested route under it (`startsWith`), so
 the sidebar stays highlighted while drilled into `/app/customers/[id]` or
 `/app/inbox/[id]`.
 
@@ -914,16 +914,16 @@ alternative. No duplicate route exists for the same data.
 
 **Conversation API contract**:
 
-| Question   | Answer                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| List       | `GET /api/v1/workspaces/{workspace_id}/conversations/` — any active member.                                                                                                                                                                                                                                                                                                                                                |
-| Detail     | `GET /api/v1/workspaces/{workspace_id}/conversations/{conversation_id}/` — 404s exactly like a nonexistent conversation for one belonging to a different workspace.                                                                                                                                                                                                                                                        |
-| Messages   | `GET /api/v1/workspaces/{workspace_id}/conversations/{conversation_id}/messages/` — scoped by **both** workspace and conversation (`conversations/selectors.py`): a foreign-workspace conversation ID 404s this endpoint too, not just conversation detail.                                                                                                                                                                |
-| Pagination | Backend-standard `PageNumberPagination` on both list and message endpoints — `{count, next, previous, results}`, default page size 50.                                                                                                                                                                                                                                                                                     |
-| Filters    | `status` (open/pending/closed), `channel` (web/chat/email/sms/api), `unassigned` (boolean) — all real and backend-tested (`conversations/selectors.py conversation_list_for_workspace`). `customer`/`assigned_to` (UUID) filters also exist backend-side but have no UI control in Chunk 2 — an operator-facing customer/assignee _picker_ is a materially separate UX investment better scoped with assignment UI itself. |
-| Search     | **Not implemented on the backend** for either endpoint — see the schema-gap note below. No search control exists in the UI.                                                                                                                                                                                                                                                                                                |
-| Ordering   | Not implemented on the backend (same dead-parameter situation as `search`) — never sent.                                                                                                                                                                                                                                                                                                                                   |
-| Mutations  | Real and backend-tested (`POST .../messages/` to send, `.../status/`, `.../close/`, `.../reopen/`, `.../assign/`) but **deferred** — see "Deferred: operator reply and status mutations" below.                                                                                                                                                                                                                            |
+| Question   | Answer                                                                                                                                                                                                                    |
+| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| List       | `GET /api/v1/workspaces/{workspace_id}/conversations/` — any active member.                                                                                                                                            |
+| Detail     | `GET /api/v1/workspaces/{workspace_id}/conversations/{conversation_id}/` — 404s exactly like a nonexistent conversation for one belonging to a different workspace.                                                    |
+| Messages   | `GET /api/v1/workspaces/{workspace_id}/conversations/{conversation_id}/messages/` — scoped by **both** workspace and conversation (`conversations/selectors.py`): a foreign-workspace conversation ID 404s this endpoint too, not just conversation detail. |
+| Pagination | Backend-standard `PageNumberPagination` on both list and message endpoints — `{count, next, previous, results}`, default page size 50.                                                                                  |
+| Filters    | `status` (open/pending/closed), `channel` (web/chat/email/sms/api), `unassigned` (boolean) — all real and backend-tested (`conversations/selectors.py conversation_list_for_workspace`). `customer`/`assigned_to` (UUID) filters also exist backend-side but have no UI control in Chunk 2 — an operator-facing customer/assignee *picker* is a materially separate UX investment better scoped with assignment UI itself. |
+| Search     | **Not implemented on the backend** for either endpoint — see the schema-gap note below. No search control exists in the UI.                                                                                             |
+| Ordering   | Not implemented on the backend (same dead-parameter situation as `search`) — never sent.                                                                                                                                |
+| Mutations  | Real and backend-tested (`POST .../messages/` to send, `.../status/`, `.../close/`, `.../reopen/`, `.../assign/`) but **deferred** — see "Deferred: operator reply and status mutations" below.                        |
 
 **Schema gaps (Category A — typing deficiencies, same shape as Chunk 1's
 `is_active`/`ordering` findings)**:
@@ -1041,20 +1041,20 @@ per the build prompt's Part G, not just "retry: false".
 
 **Ticket API contract**:
 
-| Question              | Answer                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| List                  | `GET /api/v1/workspaces/{workspace_id}/tickets/` — any active member.                                                                                                                                                                                                                                                                                                                                                                           |
-| Detail                | `GET /api/v1/workspaces/{workspace_id}/tickets/{ticket_id}/` — 404s exactly like a nonexistent ticket for one belonging to a different workspace.                                                                                                                                                                                                                                                                                               |
-| Create                | `POST .../tickets/` — supported, non-viewer role. Not implemented in this chunk (see "Read-only by design" below).                                                                                                                                                                                                                                                                                                                              |
-| Update                | `PATCH .../tickets/{id}/` — supported (manager+, or the assigned agent). Not implemented.                                                                                                                                                                                                                                                                                                                                                       |
-| Status                | `POST .../{id}/status\|resolve\|reopen/`, assignment via `.../assign/`, `.../unassign/` — all real and backend-tested (`tickets/services.py`). Not implemented — see "Mutation decision" below.                                                                                                                                                                                                                                                 |
-| Pagination            | Backend-standard `PageNumberPagination` — `{count, next, previous, results}`, default page size 50.                                                                                                                                                                                                                                                                                                                                             |
-| Filters               | `status` (open/in_progress/pending/resolved/closed), `priority` (low/normal/high/urgent), `customer`, `assigned_to`, `unassigned`, `conversation` — all real (`tickets/selectors.py ticket_list_for_workspace`). Only `status`/`priority` have UI selects.                                                                                                                                                                                      |
-| Search                | **Not implemented on the backend.** No search control exists in the UI.                                                                                                                                                                                                                                                                                                                                                                         |
-| Ordering              | **Not a client concern**: the backend always sorts by priority (urgent → low) then most-recently-created (`ticket_list_for_workspace`'s `_PRIORITY_ORDER` annotation) — a fixed, deliberate operational order. The generated `ordering` query parameter is a dead global-filter-backend artifact exactly like Customers/Conversations; never sent, and no sort control is offered (a regression test asserts no "sort"/"order" control exists). |
-| Customer relation     | `customer_id` — always present (a ticket always belongs to a customer). Links to the existing `/app/customers/[customerId]` route.                                                                                                                                                                                                                                                                                                              |
-| Conversation relation | `conversation_id` — nullable (a ticket may be created directly, not from a conversation). When present, links to the existing `/app/inbox/[conversationId]` route.                                                                                                                                                                                                                                                                              |
-| Handoff relation      | `HumanHandoff.ticket_id` exists backend-side, but `Ticket` itself carries no handoff/origin field, and `Conversation` exposes neither a ticket nor a handoff field — there is no real "created via handoff" fact surfaceable from the Ticket or Conversation API without a separate Handoff-domain fetch per row (N+1). Omitted; not inferred.                                                                                                  |
+| Question   | Answer                                                                                                                                                                                                                                                     |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| List       | `GET /api/v1/workspaces/{workspace_id}/tickets/` — any active member.                                                                                                                                                                                       |
+| Detail     | `GET /api/v1/workspaces/{workspace_id}/tickets/{ticket_id}/` — 404s exactly like a nonexistent ticket for one belonging to a different workspace.                                                                                                          |
+| Create     | `POST .../tickets/` — supported, non-viewer role. Not implemented in this chunk (see "Read-only by design" below).                                                                                                                                          |
+| Update     | `PATCH .../tickets/{id}/` — supported (manager+, or the assigned agent). Not implemented.                                                                                                                                                                    |
+| Status     | `POST .../{id}/status\|resolve\|reopen/`, assignment via `.../assign/`, `.../unassign/` — all real and backend-tested (`tickets/services.py`). Not implemented — see "Mutation decision" below.                                                            |
+| Pagination | Backend-standard `PageNumberPagination` — `{count, next, previous, results}`, default page size 50.                                                                                                                                                         |
+| Filters    | `status` (open/in_progress/pending/resolved/closed), `priority` (low/normal/high/urgent), `customer`, `assigned_to`, `unassigned`, `conversation` — all real (`tickets/selectors.py ticket_list_for_workspace`). Only `status`/`priority` have UI selects. |
+| Search     | **Not implemented on the backend.** No search control exists in the UI.                                                                                                                                                                                      |
+| Ordering   | **Not a client concern**: the backend always sorts by priority (urgent → low) then most-recently-created (`ticket_list_for_workspace`'s `_PRIORITY_ORDER` annotation) — a fixed, deliberate operational order. The generated `ordering` query parameter is a dead global-filter-backend artifact exactly like Customers/Conversations; never sent, and no sort control is offered (a regression test asserts no "sort"/"order" control exists). |
+| Customer relation | `customer_id` — always present (a ticket always belongs to a customer). Links to the existing `/app/customers/[customerId]` route.                                                                                                                    |
+| Conversation relation | `conversation_id` — nullable (a ticket may be created directly, not from a conversation). When present, links to the existing `/app/inbox/[conversationId]` route.                                                                                    |
+| Handoff relation | `HumanHandoff.ticket_id` exists backend-side, but `Ticket` itself carries no handoff/origin field, and `Conversation` exposes neither a ticket nor a handoff field — there is no real "created via handoff" fact surfaceable from the Ticket or Conversation API without a separate Handoff-domain fetch per row (N+1). Omitted; not inferred.                                                                                                     |
 
 **Schema gaps (Category A — typing deficiencies, same shape as prior chunks)**:
 
@@ -1113,14 +1113,14 @@ lesser one — see the build prompt's Part G, "Read-only is acceptable."
 **Cross-domain operational navigation** — the actual new capability this
 chunk adds:
 
-| Link                             | Real?                                                                                       | Mechanism                                                                                                                       |
-| -------------------------------- | ------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| Ticket → Customer                | Yes (`Ticket.customer_id`, always present)                                                  | Shared `components/support/customer-ref-link.tsx`, linking to `/app/customers/[customerId]`.                                    |
-| Ticket → Conversation            | Yes, when `conversation_id` is non-null                                                     | "View originating conversation" link to `/app/inbox/[conversationId]`.                                                          |
-| Conversation → Customer          | Yes (unchanged from Chunk 2)                                                                | Same shared `CustomerRefLink`.                                                                                                  |
-| Conversation → Ticket            | **N/A — not real.** `ConversationSerializer` exposes no ticket/handoff field.               | Omitted; not inferred (build prompt Part F §19: "If not directly exposed, do not infer it").                                    |
-| Customer → related Conversations | Yes — a real `customer` filter on the conversation list (`conversation_list_for_workspace`) | `RelatedConversationsPanel` (single bounded query, page 1, on Customer detail) + "View all" link to `/app/inbox?customer=<id>`. |
-| Customer → related Tickets       | Yes — a real `customer` filter on the ticket list (`ticket_list_for_workspace`)             | `RelatedTicketsPanel` (same pattern) + "View all" link to `/app/tickets?customer=<id>`.                                         |
+| Link                                   | Real?                                                                                                     | Mechanism                                                                                                          |
+| --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Ticket → Customer                       | Yes (`Ticket.customer_id`, always present)                                                                | Shared `components/support/customer-ref-link.tsx`, linking to `/app/customers/[customerId]`.                       |
+| Ticket → Conversation                   | Yes, when `conversation_id` is non-null                                                                   | "View originating conversation" link to `/app/inbox/[conversationId]`.                                             |
+| Conversation → Customer                 | Yes (unchanged from Chunk 2)                                                                              | Same shared `CustomerRefLink`.                                                                                     |
+| Conversation → Ticket                   | **N/A — not real.** `ConversationSerializer` exposes no ticket/handoff field.                              | Omitted; not inferred (build prompt Part F §19: "If not directly exposed, do not infer it").                       |
+| Customer → related Conversations        | Yes — a real `customer` filter on the conversation list (`conversation_list_for_workspace`)               | `RelatedConversationsPanel` (single bounded query, page 1, on Customer detail) + "View all" link to `/app/inbox?customer=<id>`. |
+| Customer → related Tickets              | Yes — a real `customer` filter on the ticket list (`ticket_list_for_workspace`)                            | `RelatedTicketsPanel` (same pattern) + "View all" link to `/app/tickets?customer=<id>`.                             |
 
 `customer` was already a real, backend-tested filter on both the
 conversation and ticket list endpoints before this chunk (the Chunk 2
@@ -1176,25 +1176,25 @@ build prompt's Part E guidance.
 
 **Agent Run API contract**:
 
-| Question                | Answer                                                                                                                                                                                                                                                                                                                |
-| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| List                    | `GET /api/v1/workspaces/{workspace_id}/agent-runs/` — any active member.                                                                                                                                                                                                                                              |
-| Detail                  | `GET .../agent-runs/{run_id}/` — 404s exactly like a nonexistent run for one belonging to a different workspace (`agents/selectors.py agent_run_get_for_workspace_or_404`).                                                                                                                                           |
-| Steps (execution trace) | `GET .../agent-runs/{run_id}/steps/` — safe, structured trace events only (`AgentStepSerializer`); never hidden chain-of-thought.                                                                                                                                                                                     |
-| Create                  | `POST .../agent-runs/` — starts a real run (`CanRunAgents` role, rate-limited). Not implemented — Chunk 1 is visibility-only, no run-triggering UI.                                                                                                                                                                   |
-| Cancel                  | `POST .../agent-runs/{run_id}/cancel/` — real and backend-tested (`agents/orchestration.py cancel_support_agent_run`), 409 if not cancellable. **Deferred** (see below), not "not supported."                                                                                                                         |
-| Pagination              | Backend-standard `PageNumberPagination` — `{count, next, previous, results}`, default page size 50.                                                                                                                                                                                                                   |
-| Filters                 | `status` (all 8 real enum values) and `agent_id` — both real (`agents/selectors.py agent_run_list_for_workspace`). Only `status` has a UI select; `agent_id` has no picker in Chunk 1 (no Agent Definition management UI exists) but is typed for a future caller.                                                    |
-| Ordering                | Fixed backend order, `-created_at, -id` — no client sort control.                                                                                                                                                                                                                                                     |
-| Status enum             | `pending`, `running`, `succeeded`, `failed`, `cancelled`, `budget_exceeded`, `waiting_for_approval`, `handed_off` (`AgentRunStatusEnum`).                                                                                                                                                                             |
-| Terminal states         | `succeeded`, `failed`, `cancelled`, `budget_exceeded`, `handed_off` — mirrored in the frontend as `AGENT_RUN_TERMINAL_STATUSES` (`features/agent-runs/types.ts`), not imported (separate deployables). `pending`/`running`/`waiting_for_approval` are non-terminal.                                                   |
-| Conversation relation   | `conversation_id` — nullable. Links to the existing `/app/inbox/[conversationId]` route when present.                                                                                                                                                                                                                 |
-| Customer relation       | **Not real on `AgentRun` itself** — no `customer_id` field exists on the serializer. Not inferred through Conversation (would require a second fetch per row/detail; the build prompt's Part F §55 rule against inferring un-exposed relationships applies the same way it did for Conversation → Ticket in Chunk 3). |
-| Ticket relation         | `ticket_id` — nullable. Links to the existing `/app/tickets/[ticketId]` route when present.                                                                                                                                                                                                                           |
-| Tool execution relation | Real (`ToolExecution.agent_run` FK), but no `GET` list-by-run endpoint is exposed yet on `tools/urls.py` — Chunk 2's job. Not surfaced here beyond the run's own `tool_call_count` counter.                                                                                                                           |
-| Approval relation       | Real (`ApprovalRequest.tool_execution` → `ToolExecution.agent_run`), transitively — no direct run-level approval list endpoint. Chunk 3's job. The run's `waiting_for_approval` status is visible today; the approval record itself is not.                                                                           |
-| Handoff relation        | Not surfaced — `AgentRun` carries no handoff FK/field in the current serializer. The `handed_off` terminal status is visible; the underlying `HumanHandoff` record is Chunk 3's job.                                                                                                                                  |
-| Permissions             | List/detail/steps: any `IsWorkspaceMember`. Create/cancel: `CanRunAgents` (owner/admin/support_manager/support_agent) — irrelevant to this read-only chunk.                                                                                                                                                           |
+| Question | Answer |
+| --- | --- |
+| List | `GET /api/v1/workspaces/{workspace_id}/agent-runs/` — any active member. |
+| Detail | `GET .../agent-runs/{run_id}/` — 404s exactly like a nonexistent run for one belonging to a different workspace (`agents/selectors.py agent_run_get_for_workspace_or_404`). |
+| Steps (execution trace) | `GET .../agent-runs/{run_id}/steps/` — safe, structured trace events only (`AgentStepSerializer`); never hidden chain-of-thought. |
+| Create | `POST .../agent-runs/` — starts a real run (`CanRunAgents` role, rate-limited). Not implemented — Chunk 1 is visibility-only, no run-triggering UI. |
+| Cancel | `POST .../agent-runs/{run_id}/cancel/` — real and backend-tested (`agents/orchestration.py cancel_support_agent_run`), 409 if not cancellable. **Deferred** (see below), not "not supported." |
+| Pagination | Backend-standard `PageNumberPagination` — `{count, next, previous, results}`, default page size 50. |
+| Filters | `status` (all 8 real enum values) and `agent_id` — both real (`agents/selectors.py agent_run_list_for_workspace`). Only `status` has a UI select; `agent_id` has no picker in Chunk 1 (no Agent Definition management UI exists) but is typed for a future caller. |
+| Ordering | Fixed backend order, `-created_at, -id` — no client sort control. |
+| Status enum | `pending`, `running`, `succeeded`, `failed`, `cancelled`, `budget_exceeded`, `waiting_for_approval`, `handed_off` (`AgentRunStatusEnum`). |
+| Terminal states | `succeeded`, `failed`, `cancelled`, `budget_exceeded`, `handed_off` — mirrored in the frontend as `AGENT_RUN_TERMINAL_STATUSES` (`features/agent-runs/types.ts`), not imported (separate deployables). `pending`/`running`/`waiting_for_approval` are non-terminal. |
+| Conversation relation | `conversation_id` — nullable. Links to the existing `/app/inbox/[conversationId]` route when present. |
+| Customer relation | **Not real on `AgentRun` itself** — no `customer_id` field exists on the serializer. Not inferred through Conversation (would require a second fetch per row/detail; the build prompt's Part F §55 rule against inferring un-exposed relationships applies the same way it did for Conversation → Ticket in Chunk 3). |
+| Ticket relation | `ticket_id` — nullable. Links to the existing `/app/tickets/[ticketId]` route when present. |
+| Tool execution relation | Real (`ToolExecution.agent_run` FK), but no `GET` list-by-run endpoint is exposed yet on `tools/urls.py` — Chunk 2's job. Not surfaced here beyond the run's own `tool_call_count` counter. |
+| Approval relation | Real (`ApprovalRequest.tool_execution` → `ToolExecution.agent_run`), transitively — no direct run-level approval list endpoint. Chunk 3's job. The run's `waiting_for_approval` status is visible today; the approval record itself is not. |
+| Handoff relation | Not surfaced — `AgentRun` carries no handoff FK/field in the current serializer. The `handed_off` terminal status is visible; the underlying `HumanHandoff` record is Chunk 3's job. |
+| Permissions | List/detail/steps: any `IsWorkspaceMember`. Create/cancel: `CanRunAgents` (owner/admin/support_manager/support_agent) — irrelevant to this read-only chunk. |
 
 **Schema gap (Category A)**: `status`/`agent_id` are real, backend-tested
 list filters absent from the generated `api_v1_workspaces_agent_runs_list`
@@ -1216,7 +1216,7 @@ half-built here.
 WebSocket/push channel on this backend for run progress, so a **non-terminal
 run's detail and step trace** are polled at a fixed `AGENT_RUN_POLL_INTERVAL_MS`
 (5000ms) via TanStack Query's `refetchInterval`, which re-evaluates against
-the _latest fetched status_ on every scheduling decision — so polling stops
+the *latest fetched status* on every scheduling decision — so polling stops
 on the very next check once a run turns terminal, not one cycle late. The
 **list is never polled** — Chunk 1 is a detail-first workflow (an operator
 opens one run to watch it); polling every row of a list would be a much
@@ -1256,7 +1256,7 @@ executions" card alongside the existing "Agent steps" card — no
 `/app/agent-runs/[runId]/tools/[executionId]` or `/app/tool-executions/...`
 route exists. The two are deliberately separate sections, not merged into
 one interleaved timeline: `AgentStep` and `ToolExecution` share no explicit
-join key (a step records `tool_requested`/`tool_execution_*` step _types_,
+join key (a step records `tool_requested`/`tool_execution_*` step *types*,
 but never a `tool_execution_id` FK) closer than "both belong to the same
 run," so fabricating a merged order would be inventing a relationship the
 backend doesn't expose. Both lists preserve their own backend-authoritative
@@ -1265,22 +1265,22 @@ order verbatim (`AgentStep.sequence` ascending; `ToolExecution` list
 
 **Tool Execution API contract**:
 
-| Question            | Answer                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| List                | `GET /api/v1/workspaces/{workspace_id}/tools/tool-executions/` — any active member (`ToolExecutionListView`, no explicit permission override beyond workspace membership).                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| Detail              | `GET .../tools/tool-executions/{execution_id}/` — real, but **unused in Chunk 2**: the list, filtered by `agent_run_id`, already returns every field the detail endpoint would (same `ToolExecutionSerializer`), so fetching each row's detail individually would be a pure N+1 with zero additional information.                                                                                                                                                                                                                                                                                          |
-| Catalog             | `GET /api/v1/workspaces/{workspace_id}/tools/` — code-owned, workspace-independent `ToolDefinition` metadata (same rows for every workspace). Fetched once per Agent Run detail view to attach each execution's real `risk_level`/`side_effect_type`/`display_name` (absent from `ToolExecution` itself).                                                                                                                                                                                                                                                                                                  |
-| Pagination          | Backend-standard `PageNumberPagination`, page size 50. Never paginated client-side in Chunk 2: an `AgentVersion.max_tool_calls` is server-capped at 20 (`agents/serializers.py`), so one run's tool-execution list is provably always a single page.                                                                                                                                                                                                                                                                                                                                                       |
-| Filters             | `status` and `agent_run_id` — both real (`tools/selectors.py tool_execution_list_for_workspace`). Only `agent_run_id` is sent (this chunk has no standalone list UI to offer a `status` picker on).                                                                                                                                                                                                                                                                                                                                                                                                        |
-| Ordering            | Fixed backend order, `-created_at, -id` — rendered exactly as returned.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| Status enum         | `pending`, `running`, `succeeded`, `failed`, `timed_out`, `cancelled`, `waiting_for_approval`, `blocked_by_policy`, `approval_terminated` (`ToolExecutionStatusEnum`).                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| Terminal states     | `succeeded`, `failed`, `timed_out`, `cancelled`, `blocked_by_policy`, `approval_terminated` — mirrored as `TOOL_EXECUTION_TERMINAL_STATUSES` (`features/tool-executions/types.ts`), matching `tools/models.py`.                                                                                                                                                                                                                                                                                                                                                                                            |
-| Attempts/retries    | `attempt_count` — a single integer counter on the one `ToolExecution` row (Phase 6's idempotency model: one logical invocation, not one row per attempt). There is no per-attempt history (timestamp/output per retry) in the persisted schema, so none is fabricated — "Attempts: N" is rendered as exactly that, a count.                                                                                                                                                                                                                                                                                |
-| Idempotency         | `idempotency_key` (may be blank — a tool opted out) rendered as a plain field when present. No idempotency _behavior_ is exposed or claimed beyond what the field itself says.                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| Side-effect honesty | `ToolDefinition.side_effect_type` (`none`/`read`/`internal_write`/`external_write`/`financial`/`destructive`) is shown via `SideEffectBadge`, straight from the catalog — never a claim of "exactly once." Phase 10's real external-delivery guarantee is at-least-once; nothing in this UI says otherwise.                                                                                                                                                                                                                                                                                                |
-| Approval relation   | **No direct FK** on `ToolExecution` to an `ApprovalRequest`. A real, read-only approval context is still derivable honestly from `ToolExecution`'s own fields: `status="waiting_for_approval"`/`"blocked_by_policy"` are already fully conveyed by the status badge; `status="approval_terminated"` additionally decodes its real `error_code` (`approval_rejected`/`approval_expired`/`approval_cancelled`, per `tools/models.py`'s `APPROVAL_TERMINATED` docstring) into a specific label via `deriveApprovalContext`. No Approve/Reject action, no link to a not-yet-existing Approval route (Chunk 3). |
-| Retry endpoint      | Not supported by the public API (no manual retry is exposed to a client) — no Retry Tool action exists, matching the build prompt's Part G default.                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| Redaction           | Backend-primary: `arguments_redacted`/`result_redacted` are already redacted server-side before being persisted (`common/redaction.py redact()`, applied in `tools/execution.py`) — sensitive-looking keys (password/secret/token/api_key/authorization/…) are replaced with the literal string `"***REDACTED***"` before the row is ever written. The frontend renders exactly what it receives and never attempts to reconstruct a redacted value; the only frontend-side defense-in-depth is that payloads are never interpreted as markup (see below).                                                 |
+| Question | Answer |
+| --- | --- |
+| List | `GET /api/v1/workspaces/{workspace_id}/tools/tool-executions/` — any active member (`ToolExecutionListView`, no explicit permission override beyond workspace membership). |
+| Detail | `GET .../tools/tool-executions/{execution_id}/` — real, but **unused in Chunk 2**: the list, filtered by `agent_run_id`, already returns every field the detail endpoint would (same `ToolExecutionSerializer`), so fetching each row's detail individually would be a pure N+1 with zero additional information. |
+| Catalog | `GET /api/v1/workspaces/{workspace_id}/tools/` — code-owned, workspace-independent `ToolDefinition` metadata (same rows for every workspace). Fetched once per Agent Run detail view to attach each execution's real `risk_level`/`side_effect_type`/`display_name` (absent from `ToolExecution` itself). |
+| Pagination | Backend-standard `PageNumberPagination`, page size 50. Never paginated client-side in Chunk 2: an `AgentVersion.max_tool_calls` is server-capped at 20 (`agents/serializers.py`), so one run's tool-execution list is provably always a single page. |
+| Filters | `status` and `agent_run_id` — both real (`tools/selectors.py tool_execution_list_for_workspace`). Only `agent_run_id` is sent (this chunk has no standalone list UI to offer a `status` picker on). |
+| Ordering | Fixed backend order, `-created_at, -id` — rendered exactly as returned. |
+| Status enum | `pending`, `running`, `succeeded`, `failed`, `timed_out`, `cancelled`, `waiting_for_approval`, `blocked_by_policy`, `approval_terminated` (`ToolExecutionStatusEnum`). |
+| Terminal states | `succeeded`, `failed`, `timed_out`, `cancelled`, `blocked_by_policy`, `approval_terminated` — mirrored as `TOOL_EXECUTION_TERMINAL_STATUSES` (`features/tool-executions/types.ts`), matching `tools/models.py`. |
+| Attempts/retries | `attempt_count` — a single integer counter on the one `ToolExecution` row (Phase 6's idempotency model: one logical invocation, not one row per attempt). There is no per-attempt history (timestamp/output per retry) in the persisted schema, so none is fabricated — "Attempts: N" is rendered as exactly that, a count. |
+| Idempotency | `idempotency_key` (may be blank — a tool opted out) rendered as a plain field when present. No idempotency *behavior* is exposed or claimed beyond what the field itself says. |
+| Side-effect honesty | `ToolDefinition.side_effect_type` (`none`/`read`/`internal_write`/`external_write`/`financial`/`destructive`) is shown via `SideEffectBadge`, straight from the catalog — never a claim of "exactly once." Phase 10's real external-delivery guarantee is at-least-once; nothing in this UI says otherwise. |
+| Approval relation | **No direct FK** on `ToolExecution` to an `ApprovalRequest`. A real, read-only approval context is still derivable honestly from `ToolExecution`'s own fields: `status="waiting_for_approval"`/`"blocked_by_policy"` are already fully conveyed by the status badge; `status="approval_terminated"` additionally decodes its real `error_code` (`approval_rejected`/`approval_expired`/`approval_cancelled`, per `tools/models.py`'s `APPROVAL_TERMINATED` docstring) into a specific label via `deriveApprovalContext`. No Approve/Reject action, no link to a not-yet-existing Approval route (Chunk 3). |
+| Retry endpoint | Not supported by the public API (no manual retry is exposed to a client) — no Retry Tool action exists, matching the build prompt's Part G default. |
+| Redaction | Backend-primary: `arguments_redacted`/`result_redacted` are already redacted server-side before being persisted (`common/redaction.py redact()`, applied in `tools/execution.py`) — sensitive-looking keys (password/secret/token/api_key/authorization/…) are replaced with the literal string `"***REDACTED***"` before the row is ever written. The frontend renders exactly what it receives and never attempts to reconstruct a redacted value; the only frontend-side defense-in-depth is that payloads are never interpreted as markup (see below). |
 
 **Payload safety** (`components/support/structured-payload.tsx`, shared by
 `AgentStep.safe_metadata` and both `ToolExecution.arguments_redacted`/
@@ -1339,20 +1339,20 @@ The first Chunk with a sensitive mutation: Approve/Reject a real, pending
 
 **Approval API contract**:
 
-| Question                                         | Answer                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| ------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| List                                             | `GET /api/v1/workspaces/{workspace_id}/approvals/` — any active member (`ApprovalRequestListView`). Ordered `created_at, id` (pending-first, oldest first) — never client-sorted.                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| Detail                                           | `GET .../approvals/{approval_id}/` — any active member.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| Approve                                          | `POST .../approvals/{approval_id}/approve/` — the URL is the decision; body is `{comment?: string}` only (`ApprovalDecisionInputSerializer`). No client-suppliable `decision`/`decided_by`/`required_role`.                                                                                                                                                                                                                                                                                                                                                                                                          |
-| Reject                                           | `POST .../approvals/{approval_id}/reject/` — same shape.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| Pagination                                       | Backend-standard `PageNumberPagination`, page size 50.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| Filters                                          | `status`, `required_role`, `tool_key` are all real (`approvals/views.py`); only `status` is surfaced in this chunk's list UI.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| Statuses                                         | `pending`, `approved`, `rejected`, `expired`, `cancelled` (`ApprovalStatusEnum`). Only `pending` is actionable; every other value — including any future one this frontend doesn't recognize — is treated as non-actionable, never assumed decidable (safe fallback, `isActionableApprovalStatus`).                                                                                                                                                                                                                                                                                                                  |
-| Expiry                                           | Server-authoritative: `expires_at` is a real field, but the frontend's clock is never treated as the source of truth for whether a decision will be honored — an already-expired-server-side `pending`-looking row still gets a real 409 from a decide call, handled the same as any other conflict (see "Decision safety" below).                                                                                                                                                                                                                                                                                   |
-| Requester/decider identity                       | `requested_by`/`decision.decided_by` are raw `accounts.User` numeric IDs — no membership/email expansion exists on either serializer. Rendered honestly as `User #<id>`, never resolved to a name/email the API doesn't provide (no guessing via a separate broad members query).                                                                                                                                                                                                                                                                                                                                    |
+| Question | Answer |
+| --- | --- |
+| List | `GET /api/v1/workspaces/{workspace_id}/approvals/` — any active member (`ApprovalRequestListView`). Ordered `created_at, id` (pending-first, oldest first) — never client-sorted. |
+| Detail | `GET .../approvals/{approval_id}/` — any active member. |
+| Approve | `POST .../approvals/{approval_id}/approve/` — the URL is the decision; body is `{comment?: string}` only (`ApprovalDecisionInputSerializer`). No client-suppliable `decision`/`decided_by`/`required_role`. |
+| Reject | `POST .../approvals/{approval_id}/reject/` — same shape. |
+| Pagination | Backend-standard `PageNumberPagination`, page size 50. |
+| Filters | `status`, `required_role`, `tool_key` are all real (`approvals/views.py`); only `status` is surfaced in this chunk's list UI. |
+| Statuses | `pending`, `approved`, `rejected`, `expired`, `cancelled` (`ApprovalStatusEnum`). Only `pending` is actionable; every other value — including any future one this frontend doesn't recognize — is treated as non-actionable, never assumed decidable (safe fallback, `isActionableApprovalStatus`). |
+| Expiry | Server-authoritative: `expires_at` is a real field, but the frontend's clock is never treated as the source of truth for whether a decision will be honored — an already-expired-server-side `pending`-looking row still gets a real 409 from a decide call, handled the same as any other conflict (see "Decision safety" below). |
+| Requester/decider identity | `requested_by`/`decision.decided_by` are raw `accounts.User` numeric IDs — no membership/email expansion exists on either serializer. Rendered honestly as `User #<id>`, never resolved to a name/email the API doesn't provide (no guessing via a separate broad members query). |
 | AgentRun / ToolExecution / Conversation relation | **None.** `ApprovalRequestSerializer` exposes no `tool_execution_id`, `agent_run_id`, or `conversation_id` field at all (verified directly against the real serializer before building this UI) — only `safe_context` (an opaque JSON blob with `tool_key`/`tool_display_name`/`risk_level`/`side_effect_type`/`policy_reason`/`arguments`). This is why Approval detail carries no "View run"/"View execution" link, and why AgentRun/ToolExecution detail (Chunk 1/2) carry no "pending approval" section — no real, filtered join exists in either direction (master prompt Part H, "no relationship inference"). |
-| Frozen action                                    | `safe_context` is the frozen, already-redacted context the decision is made against — rendered read-only via the shared `StructuredPayload` viewer, never re-derived from the gated action's _current_ state.                                                                                                                                                                                                                                                                                                                                                                                                        |
-| Audit                                            | Every decision emits a real `AuditAction.APPROVAL_APPROVED`/`APPROVAL_REJECTED` event server-side (`approvals/services.py decide_approval`) — not surfaced in any UI here (no Audit UI exists), but real and verifiable via a direct DB check.                                                                                                                                                                                                                                                                                                                                                                       |
+| Frozen action | `safe_context` is the frozen, already-redacted context the decision is made against — rendered read-only via the shared `StructuredPayload` viewer, never re-derived from the gated action's *current* state. |
+| Audit | Every decision emits a real `AuditAction.APPROVAL_APPROVED`/`APPROVAL_REJECTED` event server-side (`approvals/services.py decide_approval`) — not surfaced in any UI here (no Audit UI exists), but real and verifiable via a direct DB check. |
 
 **Decision safety** (master prompt Part B, the reason this is the first
 Chunk with mutations):
@@ -1365,7 +1365,7 @@ Chunk with mutations):
   mutation settling — never optimistically re-enabled before the server
   responds.
 - **No optimistic state.** The UI never marks "Approved"/"Rejected" before
-  the server confirms; on success, the server's _returned_ row replaces the
+  the server confirms; on success, the server's *returned* row replaces the
   cached detail directly (`setQueryData`), and the list cache is invalidated
   — never a locally-guessed status.
 - **Already-decided / expired / self-approval-forbidden / permission-denied
@@ -1389,11 +1389,11 @@ Chunk with mutations):
 **Permission model**: Approval authority is a linear escalation
 (`support_manager` < `admin` < `owner`) distinct from the workspace's
 general capability RBAC — mirrored client-side as `roleSatisfiesRequirement`
-(`features/approvals/types.ts`) purely to decide whether to _show_ Approve/
+(`features/approvals/types.ts`) purely to decide whether to *show* Approve/
 Reject at all, using the caller's own real, already-fetched workspace role
 (`useWorkspace().activeWorkspace.role`, from `/auth/me/`) — never inferred
 from email/name. The backend remains fully authoritative and re-derives
-this from the caller's _current_ DB membership on every decide call
+this from the caller's *current* DB membership on every decide call
 regardless of what the UI renders (proven directly: `e2e/approvals.spec.ts`'s
 permission-denial case attempts a real decide call as a `support_agent`,
 which the backend genuinely rejects).
@@ -1404,21 +1404,21 @@ actionable and permitted). Both are new top-level nav entries.
 
 **Human Handoff API contract** (read-only this chunk):
 
-| Question                                  | Answer                                                                                                                                                                                                                                                                                                                                                                       |
-| ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| List                                      | `GET /api/v1/workspaces/{workspace_id}/handoffs/` — any active member.                                                                                                                                                                                                                                                                                                       |
-| Detail                                    | `GET .../handoffs/{handoff_id}/` — any active member.                                                                                                                                                                                                                                                                                                                        |
-| Assign / Resolve                          | Real endpoints exist (`HumanHandoffAssignView`/`HumanHandoffResolveView`, manager-role-gated) but are **not implemented in this chunk** — master prompt Part G explicitly allows read-only-only ("Read-only is acceptable"), and mutating a handoff pulls in a second manager-only RBAC surface this chunk's scope didn't budget for. Documented here, not silently omitted. |
-| Statuses                                  | `pending`, `assigned`, `resolved`, `cancelled`.                                                                                                                                                                                                                                                                                                                              |
-| Conversation / AgentRun / Ticket relation | **Real** — `HumanHandoffSerializer` exposes `conversation_id`, `agent_run_id` (nullable), `ticket_id` (nullable) directly, unlike `ApprovalRequest`. Every real relation gets a real link; a null one gets an honest "— (not tied to a …)" note, never a guessed link.                                                                                                       |
-| Filters                                   | `status` and `conversation` are both real (`tickets/selectors.py handoff_list_for_workspace`) — notably **not** `agent_run`, which is why AgentRun detail carries no "related handoff" section (no real filtered join exists for that direction either).                                                                                                                     |
+| Question | Answer |
+| --- | --- |
+| List | `GET /api/v1/workspaces/{workspace_id}/handoffs/` — any active member. |
+| Detail | `GET .../handoffs/{handoff_id}/` — any active member. |
+| Assign / Resolve | Real endpoints exist (`HumanHandoffAssignView`/`HumanHandoffResolveView`, manager-role-gated) but are **not implemented in this chunk** — master prompt Part G explicitly allows read-only-only ("Read-only is acceptable"), and mutating a handoff pulls in a second manager-only RBAC surface this chunk's scope didn't budget for. Documented here, not silently omitted. |
+| Statuses | `pending`, `assigned`, `resolved`, `cancelled`. |
+| Conversation / AgentRun / Ticket relation | **Real** — `HumanHandoffSerializer` exposes `conversation_id`, `agent_run_id` (nullable), `ticket_id` (nullable) directly, unlike `ApprovalRequest`. Every real relation gets a real link; a null one gets an honest "— (not tied to a …)" note, never a guessed link. |
+| Filters | `status` and `conversation` are both real (`tickets/selectors.py handoff_list_for_workspace`) — notably **not** `agent_run`, which is why AgentRun detail carries no "related handoff" section (no real filtered join exists for that direction either). |
 
 **Placement**: a standalone `/app/handoffs` + `/app/handoffs/[handoffId]`
 route (justified — `HumanHandoffListView` is a real, filterable, paginated
 operational queue, the same shape as Approvals) **and** a compact "Human
 handoff" section embedded in Conversation detail (`/app/inbox/[id]`), using
 the real `conversation` filter — never a guessed join. A conversation may
-have at most one _active_ handoff at a time
+have at most one *active* handoff at a time
 (`handoff_one_active_per_conversation`), but the section renders whatever
 real rows the filter returns (including a resolved, non-active one), never
 hard-codes "only the active one."
@@ -1464,15 +1464,15 @@ redesigned or invented for the frontend.
 `knowledge/tests/test_views.py` — never inferred from models/services
 alone):
 
-| Capability           | Status                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Document list/detail | **Real**, implemented this chunk. `GET .../knowledge/documents/`, `GET .../knowledge/documents/{id}/`.                                                                                                                                                                                                                                                                                                                        |
-| Source list/detail   | **Real**, implemented this chunk. `GET .../knowledge/sources/`, `GET .../knowledge/sources/{id}/`.                                                                                                                                                                                                                                                                                                                            |
-| Upload               | Real endpoint (`POST .../documents/`, multipart, `KnowledgeDocumentListCreateView.create`) — **not implemented this chunk** (Chunk 2).                                                                                                                                                                                                                                                                                        |
-| Ingestion / retry    | Real (`POST .../documents/{id}/retry/`, `GET .../ingestion-jobs/{id}/`) — **not implemented this chunk** (Chunk 2). Not read either: a document's own `status`/`last_ingested_at`/`last_error_code`/`chunk_count` fields already carry every ingestion signal this chunk needs, and there is no field linking a document to its ingestion job IDs, so reading one would mean guessing an ID or an N+1 pattern — both avoided. |
-| Retrieval / search   | Real (`POST .../search/`, `GET .../retrieval-events/{id}/`) — **not implemented this chunk** (Chunk 3).                                                                                                                                                                                                                                                                                                                       |
-| Delete / archive     | **Not a real endpoint at all.** No delete/archive view exists in `knowledge/urls.py` — `KnowledgeSource`/`KnowledgeDocument` only expose `is_active` as a field; there is no way to delete either through the public API. Never invented.                                                                                                                                                                                     |
-| Chunk API            | **Not a real endpoint at all.** `KnowledgeChunk` is a real model but has no dedicated view — chunk text is only ever visible embedded in a search/retrieval-event response (Chunk 3 territory).                                                                                                                                                                                                                               |
+| Capability | Status |
+| --- | --- |
+| Document list/detail | **Real**, implemented this chunk. `GET .../knowledge/documents/`, `GET .../knowledge/documents/{id}/`. |
+| Source list/detail | **Real**, implemented this chunk. `GET .../knowledge/sources/`, `GET .../knowledge/sources/{id}/`. |
+| Upload | Real endpoint (`POST .../documents/`, multipart, `KnowledgeDocumentListCreateView.create`) — **not implemented this chunk** (Chunk 2). |
+| Ingestion / retry | Real (`POST .../documents/{id}/retry/`, `GET .../ingestion-jobs/{id}/`) — **not implemented this chunk** (Chunk 2). Not read either: a document's own `status`/`last_ingested_at`/`last_error_code`/`chunk_count` fields already carry every ingestion signal this chunk needs, and there is no field linking a document to its ingestion job IDs, so reading one would mean guessing an ID or an N+1 pattern — both avoided. |
+| Retrieval / search | Real (`POST .../search/`, `GET .../retrieval-events/{id}/`) — **not implemented this chunk** (Chunk 3). |
+| Delete / archive | **Not a real endpoint at all.** No delete/archive view exists in `knowledge/urls.py` — `KnowledgeSource`/`KnowledgeDocument` only expose `is_active` as a field; there is no way to delete either through the public API. Never invented. |
+| Chunk API | **Not a real endpoint at all.** `KnowledgeChunk` is a real model but has no dedicated view — chunk text is only ever visible embedded in a search/retrieval-event response (Chunk 3 territory). |
 
 **Document filters** (`knowledge/selectors.py document_list_for_workspace`):
 real filters are `source_id` and `status` — **not** `search`, which the
@@ -1519,12 +1519,12 @@ HTML/script-looking metadata content that renders as inert text.
 
 **Known Phase 21 schema gaps** (none blocking):
 
-| Endpoint                     | Gap                                                                                                                                                                                                                            | Blocking?                                                               |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------- |
-| `documents_list`             | Generated schema types `search`/`ordering`; real filters are `source_id`/`status`, untyped.                                                                                                                                    | No — narrowed locally in `features/knowledge/api.ts`.                   |
-| `sources_list`               | Generated schema types `ordering` (dead) but not `is_active` (real).                                                                                                                                                           | No — same narrowing.                                                    |
-| `documents_create` (Chunk 2) | Generated 201 response is typed as `KnowledgeDocumentUpload` (the _request_ shape) instead of the real `{document, ingestion_job}` body; `file` is typed `string` (openapi-typescript can't express a binary multipart field). | No — explicit, narrow, documented casts in `features/knowledge/api.ts`. |
-| `sources_create` (Chunk 2)   | Generated 201 response is typed as `KnowledgeSourceWrite` (the _request_ shape) instead of the real full `KnowledgeSource` body; `source_type` is typed required despite the backend's real `required=False, default=upload`.  | No — same cast pattern; `source_type: "upload"` sent explicitly.        |
+| Endpoint | Gap | Blocking? |
+| --- | --- | --- |
+| `documents_list` | Generated schema types `search`/`ordering`; real filters are `source_id`/`status`, untyped. | No — narrowed locally in `features/knowledge/api.ts`. |
+| `sources_list` | Generated schema types `ordering` (dead) but not `is_active` (real). | No — same narrowing. |
+| `documents_create` (Chunk 2) | Generated 201 response is typed as `KnowledgeDocumentUpload` (the *request* shape) instead of the real `{document, ingestion_job}` body; `file` is typed `string` (openapi-typescript can't express a binary multipart field). | No — explicit, narrow, documented casts in `features/knowledge/api.ts`. |
+| `sources_create` (Chunk 2) | Generated 201 response is typed as `KnowledgeSourceWrite` (the *request* shape) instead of the real full `KnowledgeSource` body; `source_type` is typed required despite the backend's real `required=False, default=upload`. | No — same cast pattern; `source_type: "upload"` sent explicitly. |
 
 ### Knowledge upload, ingestion, and retry (Phase 21 Chunk 2)
 
@@ -1536,13 +1536,13 @@ active source yet.
 `knowledge/serializers.py`, `knowledge/views.py`, `knowledge/tests/
 test_views.py`):
 
-| Operation            | Method/path                                            | Notes                                                                                                                                                                                                                                                                                                                                                                                                |
-| -------------------- | ------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Upload               | `POST .../knowledge/documents/`, `multipart/form-data` | Real fields only: `source_id`, `title`, `file` (`metadata` is real but unused by this chunk's UI). The backend silently discards any other field a client sends (verified: `test_manager_uploads_multipart_and_internal_fields_are_ignored` posts a spoofed `status`/`chunk_count`/`workspace` and asserts they're ignored) — always creates a document with real server-derived `status: "queued"`. |
-| Retry                | `POST .../knowledge/documents/{id}/retry/`, no body    | Only a `failed` document can be retried — any other status is a real 409 `conflict` ("Only failed documents can be retried."). Response is the `KnowledgeIngestionJob`, not the document; the document's own now-`queued` status is refetched, never hand-assembled.                                                                                                                                 |
-| Source creation      | `POST .../knowledge/sources/`                          | Real fields `name` (required), `description` (optional) — this chunk sends only those two; `source_type`/`is_active`/`metadata` are left to their real backend defaults.                                                                                                                                                                                                                             |
-| Delete/archive       | —                                                      | **Not a real endpoint.** No delete/archive view exists in `knowledge/urls.py`; `is_active` is the only lifecycle field either entity exposes. Never invented.                                                                                                                                                                                                                                        |
-| Ingestion job detail | `GET .../knowledge/ingestion-jobs/{id}/`               | Real and public, but never called by this frontend — see types.ts's doc comment: a document's own status fields already carry every signal the UI needs, and there is no field linking a document to its job ID (so reading one would mean guessing an ID).                                                                                                                                          |
+| Operation | Method/path | Notes |
+| --- | --- | --- |
+| Upload | `POST .../knowledge/documents/`, `multipart/form-data` | Real fields only: `source_id`, `title`, `file` (`metadata` is real but unused by this chunk's UI). The backend silently discards any other field a client sends (verified: `test_manager_uploads_multipart_and_internal_fields_are_ignored` posts a spoofed `status`/`chunk_count`/`workspace` and asserts they're ignored) — always creates a document with real server-derived `status: "queued"`. |
+| Retry | `POST .../knowledge/documents/{id}/retry/`, no body | Only a `failed` document can be retried — any other status is a real 409 `conflict` ("Only failed documents can be retried."). Response is the `KnowledgeIngestionJob`, not the document; the document's own now-`queued` status is refetched, never hand-assembled. |
+| Source creation | `POST .../knowledge/sources/` | Real fields `name` (required), `description` (optional) — this chunk sends only those two; `source_type`/`is_active`/`metadata` are left to their real backend defaults. |
+| Delete/archive | — | **Not a real endpoint.** No delete/archive view exists in `knowledge/urls.py`; `is_active` is the only lifecycle field either entity exposes. Never invented. |
+| Ingestion job detail | `GET .../knowledge/ingestion-jobs/{id}/` | Real and public, but never called by this frontend — see types.ts's doc comment: a document's own status fields already carry every signal the UI needs, and there is no field linking a document to its job ID (so reading one would mean guessing an ID). |
 
 **File constraints** (backend/config/settings.py, `knowledge/ingestion/
 validators.py` — mirrored client-side for UX only, never authoritative):
@@ -1575,10 +1575,10 @@ progress percentage exists anywhere in the contract; none is invented.
 **Polling** (`features/knowledge/queries.ts`, same pattern as
 `features/agent-runs/queries.ts` `pollWhileNonTerminal`/
 `features/approvals/queries.ts`'s approval-detail poll): only the Document
-_detail_ query polls (`KNOWLEDGE_DOCUMENT_POLL_INTERVAL_MS` = 5000ms), and
+*detail* query polls (`KNOWLEDGE_DOCUMENT_POLL_INTERVAL_MS` = 5000ms), and
 only while the fetched document's `status` is non-terminal;
 `refetchIntervalInBackground: false` stops it on a hidden tab or unmount.
-The Documents _list_ is never polled — an operator watching ingestion
+The Documents *list* is never polled — an operator watching ingestion
 progress opens the one document they uploaded/retried, exactly like
 AgentRun/Approval before it; a second, list-level poll underneath an
 already-polling detail tab would be a compounded request stream for no
@@ -1631,15 +1631,15 @@ KnowledgeSearchView`, `knowledge/retrieval/services.py search_knowledge`,
 `knowledge/serializers.py KnowledgeSearchRequestSerializer`/
 `KnowledgeSearchResponseSerializer`):
 
-| Field            | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Method/path      | `POST .../knowledge/search/` — a real mutation, not a read: every call persists a real `RetrievalEvent` (+ one `RetrievalHit` per returned result), verified directly against the service, which wraps both writes in `transaction.atomic()`.                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| Request fields   | `query` (required, max `KNOWLEDGE_MAX_QUERY_LENGTH` = 2000 chars), `top_k` (optional, real bounds `[1, KNOWLEDGE_MAX_TOP_K]` = `[1, 20]`, default `KNOWLEDGE_DEFAULT_TOP_K` = 5), `minimum_score`, `source_ids`, `document_ids` (all optional). This chunk's UI exposes `query`, `top_k` (a bounded `[3, 5, 10, 20]` select), and a single-source filter only — `minimum_score` and `document_ids` are real but deliberately unexposed (see `features/knowledge/types.ts`'s doc comment on `KnowledgeSearchRequestInput` for why: no product-safe way to offer a document picker without an unbounded fetch, and a raw score-threshold control isn't part of this chunk's minimal scope). |
-| Permission       | `IsAuthenticated` + workspace membership only (`WorkspaceScopedMixin`/`get_workspace_for_user_or_404`) — **no `CanManageKnowledge` gate**, same as the read-only Documents/Sources tabs. Any active member, including `support_agent`, can search; reconfirmed by a real E2E test (`e2e/knowledge-search.spec.ts`) that a read-only member's search is never rejected.                                                                                                                                                                                                                                                                                                                    |
-| Searchable scope | Only `ready`, active documents under an active source (`document__status=READY, document__is_active=True, document__source__is_active=True` — part of the SQL query itself, never a post-filter). A `pending`/`queued`/`processing`/`failed` document's chunks are never returned, and this is never implied otherwise in the UI.                                                                                                                                                                                                                                                                                                                                                         |
-| Response fields  | `event_id`, `query`, `sufficient_context`, `results[]` (`chunk_id`, `document_id`, `document_title`, `source_id`, `source_name`, `rank`, `score`, `text`, `citation`). The generated OpenAPI types for this endpoint are accurate — no schema-gap cast needed here, unlike Chunk 2's upload/source-create endpoints.                                                                                                                                                                                                                                                                                                                                                                      |
-| Ordering         | Backend-authoritative: `queryset.annotate(distance=CosineDistance(...)).order_by("distance", "document_id", "ordinal", "id")[:top_k]`, with `rank` assigned in that same order. The frontend renders `results` in array order and never re-sorts.                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| Rate limit       | None (`DEFAULT_THROTTLE_CLASSES: []`, and `KnowledgeSearchView` sets no `throttle_scope`) — a real, current backend fact reported here, not a frontend concern to compensate for.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| Field | Notes |
+| --- | --- |
+| Method/path | `POST .../knowledge/search/` — a real mutation, not a read: every call persists a real `RetrievalEvent` (+ one `RetrievalHit` per returned result), verified directly against the service, which wraps both writes in `transaction.atomic()`. |
+| Request fields | `query` (required, max `KNOWLEDGE_MAX_QUERY_LENGTH` = 2000 chars), `top_k` (optional, real bounds `[1, KNOWLEDGE_MAX_TOP_K]` = `[1, 20]`, default `KNOWLEDGE_DEFAULT_TOP_K` = 5), `minimum_score`, `source_ids`, `document_ids` (all optional). This chunk's UI exposes `query`, `top_k` (a bounded `[3, 5, 10, 20]` select), and a single-source filter only — `minimum_score` and `document_ids` are real but deliberately unexposed (see `features/knowledge/types.ts`'s doc comment on `KnowledgeSearchRequestInput` for why: no product-safe way to offer a document picker without an unbounded fetch, and a raw score-threshold control isn't part of this chunk's minimal scope). |
+| Permission | `IsAuthenticated` + workspace membership only (`WorkspaceScopedMixin`/`get_workspace_for_user_or_404`) — **no `CanManageKnowledge` gate**, same as the read-only Documents/Sources tabs. Any active member, including `support_agent`, can search; reconfirmed by a real E2E test (`e2e/knowledge-search.spec.ts`) that a read-only member's search is never rejected. |
+| Searchable scope | Only `ready`, active documents under an active source (`document__status=READY, document__is_active=True, document__source__is_active=True` — part of the SQL query itself, never a post-filter). A `pending`/`queued`/`processing`/`failed` document's chunks are never returned, and this is never implied otherwise in the UI. |
+| Response fields | `event_id`, `query`, `sufficient_context`, `results[]` (`chunk_id`, `document_id`, `document_title`, `source_id`, `source_name`, `rank`, `score`, `text`, `citation`). The generated OpenAPI types for this endpoint are accurate — no schema-gap cast needed here, unlike Chunk 2's upload/source-create endpoints. |
+| Ordering | Backend-authoritative: `queryset.annotate(distance=CosineDistance(...)).order_by("distance", "document_id", "ordinal", "id")[:top_k]`, with `rank` assigned in that same order. The frontend renders `results` in array order and never re-sorts. |
+| Rate limit | None (`DEFAULT_THROTTLE_CLASSES: []`, and `KnowledgeSearchView` sets no `throttle_scope`) — a real, current backend fact reported here, not a frontend concern to compensate for. |
 
 **Score semantics** (traced through the actual math, not inferred from the
 field name): `score = max(-1.0, min(1.0, 1.0 - cosine_distance))` — this is
@@ -1768,18 +1768,18 @@ for this chunk (Chunk 2/3) — see "Deferred Phase 22 capabilities" below.
 `integrations/serializers.py`, and `integrations/permissions.py` — never
 inferred from models/services alone):
 
-| Capability                   | Status                                                                                                                                                                                                                                                                                                               |
-| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Connection list/detail       | **Real**, implemented this chunk. `GET .../integrations/`, `GET .../integrations/{id}/`. Any active workspace member can read (no manage permission required).                                                                                                                                                       |
-| Create connection            | Real endpoint (`POST .../integrations/`, owner/admin only) — **not implemented this chunk**. Accepts raw provider credentials directly; deferred to a later chunk once its credential-entry UI can be reviewed on its own (see "Mutation deferral decision" below).                                                  |
-| Update configuration         | Real (`PATCH .../integrations/{id}/`, owner/admin only, non-secret `display_name`/`configuration` only) — **not implemented this chunk**.                                                                                                                                                                            |
-| Rotate credentials           | Real (`PUT .../integrations/{id}/credentials/`, owner/admin only, throttled as a sensitive mutation) — **not implemented this chunk**. Accepts raw credentials directly, same deferral reasoning as create.                                                                                                          |
-| Enable/disable               | Real (`PATCH .../integrations/{id}/enabled/`, owner/admin only) — **not implemented this chunk**.                                                                                                                                                                                                                    |
-| Test connection              | Real (`POST .../integrations/{id}/test/`, owner/admin only) — **not implemented this chunk**. A genuine mutation (persists `last_checked_at`/`last_success_at`/`last_error_code`), not read-only metadata, so it doesn't qualify for this chunk's "embed as read-only detail metadata" allowance.                    |
-| OAuth                        | **Not supported at all.** No OAuth initiation/callback endpoint exists anywhere in `integrations/urls.py` — credentials are always submitted directly (API keys, tokens, refresh tokens, depending on provider). No "Connect with Stripe"-style flow was built or implied.                                           |
-| Provider catalog             | Server-owned enum only (`integrations/models.py IntegrationProvider`) — `stripe`, `google_calendar`, `email`, `demo_commerce`. No public catalog/discovery endpoint; mirrored (not imported) in `features/integrations/components/integration-badges.tsx`, same pattern as every other domain's status-label mirror. |
-| Webhook endpoints/deliveries | Real, separate domain (`backend/webhooks/`) with its own full public CRUD + redrive contract — **not implemented this chunk** (Chunk 2).                                                                                                                                                                             |
-| Notifications                | **Internal only** — `backend/notifications/` has no `urls.py`/`views.py`/`serializers.py` at all; verified directly against the app's file listing and `config/urls.py`'s route table (notifications are never `include()`d). No public API exists for this chunk (or any chunk) to expose.                          |
+| Capability | Status |
+| --- | --- |
+| Connection list/detail | **Real**, implemented this chunk. `GET .../integrations/`, `GET .../integrations/{id}/`. Any active workspace member can read (no manage permission required). |
+| Create connection | Real endpoint (`POST .../integrations/`, owner/admin only) — **not implemented this chunk**. Accepts raw provider credentials directly; deferred to a later chunk once its credential-entry UI can be reviewed on its own (see "Mutation deferral decision" below). |
+| Update configuration | Real (`PATCH .../integrations/{id}/`, owner/admin only, non-secret `display_name`/`configuration` only) — **not implemented this chunk**. |
+| Rotate credentials | Real (`PUT .../integrations/{id}/credentials/`, owner/admin only, throttled as a sensitive mutation) — **not implemented this chunk**. Accepts raw credentials directly, same deferral reasoning as create. |
+| Enable/disable | Real (`PATCH .../integrations/{id}/enabled/`, owner/admin only) — **not implemented this chunk**. |
+| Test connection | Real (`POST .../integrations/{id}/test/`, owner/admin only) — **not implemented this chunk**. A genuine mutation (persists `last_checked_at`/`last_success_at`/`last_error_code`), not read-only metadata, so it doesn't qualify for this chunk's "embed as read-only detail metadata" allowance. |
+| OAuth | **Not supported at all.** No OAuth initiation/callback endpoint exists anywhere in `integrations/urls.py` — credentials are always submitted directly (API keys, tokens, refresh tokens, depending on provider). No "Connect with Stripe"-style flow was built or implied. |
+| Provider catalog | Server-owned enum only (`integrations/models.py IntegrationProvider`) — `stripe`, `google_calendar`, `email`, `demo_commerce`. No public catalog/discovery endpoint; mirrored (not imported) in `features/integrations/components/integration-badges.tsx`, same pattern as every other domain's status-label mirror. |
+| Webhook endpoints/deliveries | Real, separate domain (`backend/webhooks/`) with its own full public CRUD + redrive contract — **not implemented this chunk** (Chunk 2). |
+| Notifications | **Internal only** — `backend/notifications/` has no `urls.py`/`views.py`/`serializers.py` at all; verified directly against the app's file listing and `config/urls.py`'s route table (notifications are never `include()`d). No public API exists for this chunk (or any chunk) to expose. |
 
 **Mutation deferral decision** (master prompt Part J §35): this chunk
 implements list + detail only. Every one of the five write endpoints above
@@ -1851,10 +1851,10 @@ public endpoint is added first.
 
 **Known Phase 22 Chunk 1 schema gaps** (none blocking):
 
-| Endpoint                         | Gap                                                                                                                                                                                                                                                     | Blocking?                                                                                               |
-| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| `integrations_list`              | Generated schema types `ordering`/`search`; neither is real (no filter backend on the view at all). Only `page` is real.                                                                                                                                | No — narrowed locally in `features/integrations/api.ts`.                                                |
-| `integrations_create` (deferred) | Generated 201 response is typed as `IntegrationConnectionCreate` (the _request_ shape) instead of the real full `IntegrationConnection` body (`IntegrationConnectionListCreateView.create` returns `IntegrationConnectionSerializer(connection).data`). | No — not exercised this chunk (create is deferred); documented for whichever later chunk implements it. |
+| Endpoint | Gap | Blocking? |
+| --- | --- | --- |
+| `integrations_list` | Generated schema types `ordering`/`search`; neither is real (no filter backend on the view at all). Only `page` is real. | No — narrowed locally in `features/integrations/api.ts`. |
+| `integrations_create` (deferred) | Generated 201 response is typed as `IntegrationConnectionCreate` (the *request* shape) instead of the real full `IntegrationConnection` body (`IntegrationConnectionListCreateView.create` returns `IntegrationConnectionSerializer(connection).data`). | No — not exercised this chunk (create is deferred); documented for whichever later chunk implements it. |
 
 ### Webhook Endpoints + Deliveries (Phase 22 Chunk 2)
 
@@ -1869,18 +1869,18 @@ never a separate top-level Webhooks/Deliveries nav entry).
 `webhooks/selectors.py`, `webhooks/serializers.py`, `webhooks/services.py`,
 and `webhooks/permissions.py` — never inferred from models/services alone):
 
-| Capability                                | Status                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| ----------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Endpoint list/detail                      | **Real**, implemented this chunk. `GET .../webhooks/endpoints/`, `GET .../webhooks/endpoints/{id}/`. Any active workspace member can read.                                                                                                                                                                                                                                                                                             |
-| Endpoint create                           | Real (`POST .../webhooks/endpoints/`, support_manager/admin/owner) — **not implemented this chunk**. Accepts a raw destination URL and produces a raw signing secret, once.                                                                                                                                                                                                                                                            |
-| Endpoint update                           | Real (`PATCH .../webhooks/endpoints/{id}/`, name/url/subscribed_event_types) — **not implemented this chunk**.                                                                                                                                                                                                                                                                                                                         |
-| Endpoint enable/disable                   | Real (`PATCH .../webhooks/endpoints/{id}/status/`) — **not implemented this chunk**.                                                                                                                                                                                                                                                                                                                                                   |
-| Rotate signing secret                     | Real (`POST .../webhooks/endpoints/{id}/rotate-secret/`, throttled as a sensitive mutation) — **not implemented this chunk**.                                                                                                                                                                                                                                                                                                          |
-| Endpoint delete                           | **Not a real endpoint at all.** No delete view exists in `webhooks/urls.py` — an endpoint can only be disabled, never deleted, through the public API.                                                                                                                                                                                                                                                                                 |
-| Delivery list/detail                      | **Real**, implemented this chunk. `GET .../webhooks/deliveries/`, `GET .../webhooks/deliveries/{id}/`. Any active workspace member can read (same permission as endpoints — not the manage-only permission Chunk 1 assumed for Integrations).                                                                                                                                                                                          |
-| Redrive                                   | Real (`POST .../webhooks/deliveries/{id}/redrive/`, support_manager/admin/owner, only from a terminal `failed`/`dead` delivery) — **discovered and documented, not implemented this chunk** (master prompt Part D §16 — Chunk 3 territory).                                                                                                                                                                                            |
-| Individual attempt rows                   | **Not a real endpoint at all.** `DeliveryAttempt` is a real model (`notifications/models.py`) with no public list/detail view anywhere — `WebhookDeliverySerializer` only ever exposes the aggregate `attempt_count`/`max_attempts` plus the single latest attempt's `last_http_status` (a `SerializerMethodField` reading `delivery.attempts.order_by("-attempt_number").first()`). No per-attempt timeline is fetched or fabricated. |
-| Request payload / response body / headers | **Not exposed by any public serializer at all** — verified directly against `WebhookDeliverySerializer`'s exhaustive field list. There is nothing to render as untrusted response content beyond the already-safe `last_error_code` string and `last_http_status` integer.                                                                                                                                                             |
+| Capability | Status |
+| --- | --- |
+| Endpoint list/detail | **Real**, implemented this chunk. `GET .../webhooks/endpoints/`, `GET .../webhooks/endpoints/{id}/`. Any active workspace member can read. |
+| Endpoint create | Real (`POST .../webhooks/endpoints/`, support_manager/admin/owner) — **not implemented this chunk**. Accepts a raw destination URL and produces a raw signing secret, once. |
+| Endpoint update | Real (`PATCH .../webhooks/endpoints/{id}/`, name/url/subscribed_event_types) — **not implemented this chunk**. |
+| Endpoint enable/disable | Real (`PATCH .../webhooks/endpoints/{id}/status/`) — **not implemented this chunk**. |
+| Rotate signing secret | Real (`POST .../webhooks/endpoints/{id}/rotate-secret/`, throttled as a sensitive mutation) — **not implemented this chunk**. |
+| Endpoint delete | **Not a real endpoint at all.** No delete view exists in `webhooks/urls.py` — an endpoint can only be disabled, never deleted, through the public API. |
+| Delivery list/detail | **Real**, implemented this chunk. `GET .../webhooks/deliveries/`, `GET .../webhooks/deliveries/{id}/`. Any active workspace member can read (same permission as endpoints — not the manage-only permission Chunk 1 assumed for Integrations). |
+| Redrive | Real (`POST .../webhooks/deliveries/{id}/redrive/`, support_manager/admin/owner, only from a terminal `failed`/`dead` delivery) — **discovered and documented, not implemented this chunk** (master prompt Part D §16 — Chunk 3 territory). |
+| Individual attempt rows | **Not a real endpoint at all.** `DeliveryAttempt` is a real model (`notifications/models.py`) with no public list/detail view anywhere — `WebhookDeliverySerializer` only ever exposes the aggregate `attempt_count`/`max_attempts` plus the single latest attempt's `last_http_status` (a `SerializerMethodField` reading `delivery.attempts.order_by("-attempt_number").first()`). No per-attempt timeline is fetched or fabricated. |
+| Request payload / response body / headers | **Not exposed by any public serializer at all** — verified directly against `WebhookDeliverySerializer`'s exhaustive field list. There is nothing to render as untrusted response content beyond the already-safe `last_error_code` string and `last_http_status` integer. |
 
 **Mutation deferral decision** (same posture as Chunk 1's Integration
 Connections decision, master prompt's explicit "read/operations visibility"
@@ -1921,8 +1921,8 @@ above), never a fabricated per-attempt timeline.
 
 **At-least-once honesty** (master prompt Part D §14): this platform never
 guarantees exactly-once external delivery — the delivery detail page states
-this explicitly ("Delivered" means the endpoint returned 2xx _at least
-once_, not that it was called exactly once). Automatic retry is real,
+this explicitly ("Delivered" means the endpoint returned 2xx *at least
+once*, not that it was called exactly once). Automatic retry is real,
 deterministic, bounded exponential backoff
 (`notifications/backoff.py compute_retry_delay_seconds`, base/cap server
 settings only) — never estimated or countdown-animated client-side; the
@@ -1953,9 +1953,9 @@ dead, only-`page`-is-real gap as Integrations' Chunk 1 list (no
 entry. **Server state**:
 `["workspaces", wsId, "integrations", "webhooks", "endpoints"|"deliveries", "list"|"detail", ...]`
 query keys (`features/webhooks/query-keys.ts`), nested under the same
-`integrations` root as connections. **Polling**: only Delivery _detail_
+`integrations` root as connections. **Polling**: only Delivery *detail*
 polls, and only while non-terminal — same `refetchInterval`-reads-latest-
-data pattern as Knowledge's document polling; the Delivery _list_ and
+data pattern as Knowledge's document polling; the Delivery *list* and
 Endpoint list/detail are never polled.
 
 **Notifications**: confirmed, again, to have no public API at all
@@ -1986,13 +1986,13 @@ assumption.
 **Connection mutation contract** (`integrations/views.py`,
 `integrations/services.py`, `integrations/schemas.py`):
 
-| Mutation                             | Endpoint                                 | Permission                                    | Status      |
-| ------------------------------------ | ---------------------------------------- | --------------------------------------------- | ----------- |
-| Create                               | `POST .../integrations/`                 | owner/admin (`CanManageIntegrations`)         | Implemented |
-| Update (display name, configuration) | `PATCH .../integrations/{id}/`           | owner/admin                                   | Implemented |
-| Credential rotation                  | `PUT .../integrations/{id}/credentials/` | owner/admin, throttled (`sensitive_mutation`) | Implemented |
-| Enable/disable                       | `PATCH .../integrations/{id}/enabled/`   | owner/admin                                   | Implemented |
-| Test connection                      | `POST .../integrations/{id}/test/`       | owner/admin                                   | Implemented |
+| Mutation | Endpoint | Permission | Status |
+| --- | --- | --- | --- |
+| Create | `POST .../integrations/` | owner/admin (`CanManageIntegrations`) | Implemented |
+| Update (display name, configuration) | `PATCH .../integrations/{id}/` | owner/admin | Implemented |
+| Credential rotation | `PUT .../integrations/{id}/credentials/` | owner/admin, throttled (`sensitive_mutation`) | Implemented |
+| Enable/disable | `PATCH .../integrations/{id}/enabled/` | owner/admin | Implemented |
+| Test connection | `POST .../integrations/{id}/test/` | owner/admin | Implemented |
 
 **Provider credential/configuration schemas are real and exact**
 (`integrations/schemas.py` — `pydantic`, `extra="forbid"`), so this chunk
@@ -2021,13 +2021,13 @@ for them.
 **Webhook endpoint mutation contract** (`webhooks/views.py`,
 `webhooks/services.py`):
 
-| Mutation                              | Endpoint                                                     | Permission                                        | Status                                                                                                             |
-| ------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| Create                                | `POST .../webhooks/endpoints/`                               | support_manager/admin/owner (`CanManageWebhooks`) | Implemented                                                                                                        |
-| Update (name, URL, subscribed events) | `PATCH .../webhooks/endpoints/{id}/`                         | support_manager/admin/owner                       | Implemented                                                                                                        |
-| Enable/disable                        | `PATCH .../webhooks/endpoints/{id}/status/`                  | support_manager/admin/owner                       | Implemented                                                                                                        |
-| Rotate signing secret                 | `POST .../webhooks/endpoints/{id}/rotate-secret/`, throttled | support_manager/admin/owner                       | Implemented                                                                                                        |
-| Delete                                | —                                                            | —                                                 | **Absent** — no delete view exists in `webhooks/urls.py`; confirmed again this chunk. No delete control was built. |
+| Mutation | Endpoint | Permission | Status |
+| --- | --- | --- | --- |
+| Create | `POST .../webhooks/endpoints/` | support_manager/admin/owner (`CanManageWebhooks`) | Implemented |
+| Update (name, URL, subscribed events) | `PATCH .../webhooks/endpoints/{id}/` | support_manager/admin/owner | Implemented |
+| Enable/disable | `PATCH .../webhooks/endpoints/{id}/status/` | support_manager/admin/owner | Implemented |
+| Rotate signing secret | `POST .../webhooks/endpoints/{id}/rotate-secret/`, throttled | support_manager/admin/owner | Implemented |
+| Delete | — | — | **Absent** — no delete view exists in `webhooks/urls.py`; confirmed again this chunk. No delete control was built. |
 
 **One-time secret reveal**: both endpoint create and secret rotation return
 the plaintext signing secret exactly once, in the mutation response body
@@ -2043,7 +2043,7 @@ absent from the page's HTML immediately after dismissal).
 (`webhooks/security.py resolve_and_validate` — a fail-closed
 global-routability allowlist: loopback/private/link-local/cloud-metadata/
 carrier-grade-NAT/benchmarking/documentation ranges are all rejected, and
-even _creating_ an endpoint against one of those addresses is rejected
+even *creating* an endpoint against one of those addresses is rejected
 synchronously by `_best_effort_ssrf_check` at create/update time, before
 any delivery is ever scheduled). The frontend never weakens or duplicates
 this — it submits whatever URL the operator enters and renders the real
@@ -2062,7 +2062,7 @@ duplicate," because a redrive really can cause an external side effect to
 be repeated if an earlier attempt actually reached the endpoint.
 
 **Critical safety limitation, by design (not a defect)**: a genuinely
-_successful_ redrive always schedules a real Celery dispatch on commit
+*successful* redrive always schedules a real Celery dispatch on commit
 (`redrive_webhook_delivery`'s `transaction.on_commit(partial(
 dispatch_delivery_for_processing, ...))`), which — in an environment
 running a real Celery worker against the real Redis broker, as this
@@ -2106,7 +2106,7 @@ handlers invalidate/replace only the affected connection/endpoint/delivery
 query, never the whole cache.
 
 **Schema gap**: the generated `IntegrationConnectionCreate` operation types
-its 201 response as the _request_ shape (same drf-spectacular limitation as
+its 201 response as the *request* shape (same drf-spectacular limitation as
 every other `Serializer`-only create response in this codebase) rather than
 the real `IntegrationConnectionSerializer` body `IntegrationConnectionListCreateView.create`
 actually returns — an explicit, narrow cast at the one call site, same
@@ -2122,7 +2122,7 @@ security property never weakened by anything below (see
 `backend/accounts/tests/test_auth_views.py
 test_old_refresh_token_cannot_be_reused`, unchanged and still passing).
 `ensureFreshAccessToken()` (`src/lib/api/session.ts`) already deduped
-concurrent refresh callers _within one document_ via a module-level
+concurrent refresh callers *within one document* via a module-level
 `refreshInFlight` promise; this chunk closes two further real races that
 same-document dedup cannot reach:
 
@@ -2140,10 +2140,10 @@ same-document dedup cannot reach:
    Each document still performs its own real refresh call and gets its own
    real access token (in-memory only, per `token-store.ts` — access tokens
    are never shared between documents by design); the lock only ever
-   changes _when_ that call is sent.
+   changes *when* that call is sent.
 2. **Response loss on navigation**: a hard navigation starting mid-request
-   can sever the connection _after_ the backend has already committed a
-   rotation but _before_ the browser applies the response's `Set-Cookie`.
+   can sever the connection *after* the backend has already committed a
+   rotation but *before* the browser applies the response's `Set-Cookie`.
    `keepalive: true` on the refresh fetch lets the browser finish that one
    in-flight request in the background, including applying its
    `Set-Cookie`, even after the initiating document is gone — the same
@@ -2157,18 +2157,18 @@ exactly one refresh attempt per document — no storm, no loop, no stuck
 spinner.
 
 **Known, tracked residual gap**: a third scenario — two hard navigations
-fired with _zero_ settle time between them in a single tab — still has an
+fired with *zero* settle time between them in a single tab — still has an
 open race (`e2e/auth-refresh-concurrency.spec.ts`'s `test.fixme`,
 reproduced directly in ~1 of 3 runs during this chunk's investigation).
 `navigator.locks` releases a document's lock the instant that document is
 torn down, but a `keepalive: true` request it started can still be
-completing on the wire _after_ that release — a second, freshly-navigated
+completing on the wire *after* that release — a second, freshly-navigated
 document can then acquire the now-free lock and send its own refresh
 using the still-old cookie while the first (abandoned) document's request
 is still in flight server-side, reopening the exact race the lock exists
 to prevent. This is not reachable by normal pointer/keyboard interaction
 (no real user can fire two top-level navigations this close together);
-it is a genuine gap for rapid _programmatic_ navigation. Closing it fully
+it is a genuine gap for rapid *programmatic* navigation. Closing it fully
 would need either a persistent (Service-Worker-backed) coordinator that
 outlives any single document, or a narrow backend accommodation — the
 latter was deliberately not pursued here: any design where a request
@@ -2195,7 +2195,7 @@ PHASE22-3-04 below.
   refresh, with the loser receiving a real, correct-per-the-backend 401
   (genuine single-use-token reuse) and being pushed to `/login`.
   **Fix**: `withCrossTabRefreshLock` (Web Locks API, `src/lib/api/
-refresh-lock.ts`) serializes every refresh attempt across tabs/documents
+  refresh-lock.ts`) serializes every refresh attempt across tabs/documents
   sharing an origin, with no token material passed through the
   coordination signal; `keepalive: true` on the refresh fetch
   (`src/lib/api/session.ts`) prevents a navigation-severed connection from
@@ -2233,16 +2233,16 @@ but is explicitly **out of scope** — see "Deferred capabilities" below.
 `evaluations/serializers.py`, `evaluations/permissions.py`, and
 `evaluations/models.py` — never inferred from models/services alone):
 
-| Capability                                                                       | Status                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| -------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Run list/detail                                                                  | **Real**, implemented this chunk. `GET .../evaluations/runs/`, `GET .../evaluations/runs/{run_id}/`. Any active workspace member with `CanViewEvaluations` (owner/admin/support_manager/support_agent/viewer — every real role) can read.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| Result list/detail                                                               | **Real**, implemented this chunk. `GET .../evaluations/runs/{run_id}/results/`, `GET .../evaluations/runs/{run_id}/results/{result_id}/` (detail endpoint exists but this chunk's list view already renders every field the detail endpoint would add — no separate detail fetch is made).                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| Dataset/Case list/detail/create/update                                           | **Real**, implemented Phase 23 Chunk 2 (see below). No delete/archive/reorder/bulk endpoint exists — soft-removal is the real `status="archived"` value via the same PATCH used for every other edit. `EvaluationRun.dataset_id` remains a plain, unlinked identifier on the Run detail page — no dataset-scoped run filter/browse UI exists yet.                                                                                                                                                                                                                                                                                                                                                                                               |
-| Start run (`POST .../evaluations/runs/`)                                         | Real, throttled (`evaluation_execution` scope), owner/admin/support_manager only — **not implemented this chunk**. Chunk 1 is read-only by design (master prompt Part C §15).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| Cancel run (`POST .../evaluations/runs/{run_id}/cancel/`)                        | Real — **not implemented this chunk**.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| Replay result (`POST .../evaluations/runs/{run_id}/results/{result_id}/replay/`) | Real — **not implemented this chunk**.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| Compare runs (`POST .../evaluations/compare/`)                                   | Real — **not implemented this chunk**; a genuine comparison action, not a read, and owner/admin/support_manager scoped.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| Observability (traces/spans)                                                     | **Internal-only.** `backend/observability/` exposes exactly one route, `GET /metrics/` — a Prometheus scrape endpoint wired directly at the top level in `config/urls.py`, explicitly documented in its own module docstring as "deployment infrastructure, not a tenant API": no workspace scoping, no auth, no JSON — a Prometheus text-exposition payload. There is no trace/span/event resource, no per-run telemetry endpoint, and no workspace-scoped observability API of any kind. No UI was built or implied for it — deferred to Chunk 2 for another contract-discovery pass in case a future backend change adds one; if none appears, Chunk 2 will document this as a permanent N/A rather than build a UI over internal-only data. |
+| Capability | Status |
+| --- | --- |
+| Run list/detail | **Real**, implemented this chunk. `GET .../evaluations/runs/`, `GET .../evaluations/runs/{run_id}/`. Any active workspace member with `CanViewEvaluations` (owner/admin/support_manager/support_agent/viewer — every real role) can read. |
+| Result list/detail | **Real**, implemented this chunk. `GET .../evaluations/runs/{run_id}/results/`, `GET .../evaluations/runs/{run_id}/results/{result_id}/` (detail endpoint exists but this chunk's list view already renders every field the detail endpoint would add — no separate detail fetch is made). |
+| Dataset/Case list/detail/create/update | **Real**, implemented Phase 23 Chunk 2 (see below). No delete/archive/reorder/bulk endpoint exists — soft-removal is the real `status="archived"` value via the same PATCH used for every other edit. `EvaluationRun.dataset_id` remains a plain, unlinked identifier on the Run detail page — no dataset-scoped run filter/browse UI exists yet. |
+| Start run (`POST .../evaluations/runs/`) | Real, throttled (`evaluation_execution` scope), owner/admin/support_manager only — **not implemented this chunk**. Chunk 1 is read-only by design (master prompt Part C §15). |
+| Cancel run (`POST .../evaluations/runs/{run_id}/cancel/`) | Real — **not implemented this chunk**. |
+| Replay result (`POST .../evaluations/runs/{run_id}/results/{result_id}/replay/`) | Real — **not implemented this chunk**. |
+| Compare runs (`POST .../evaluations/compare/`) | Real — **not implemented this chunk**; a genuine comparison action, not a read, and owner/admin/support_manager scoped. |
+| Observability (traces/spans) | **Internal-only.** `backend/observability/` exposes exactly one route, `GET /metrics/` — a Prometheus scrape endpoint wired directly at the top level in `config/urls.py`, explicitly documented in its own module docstring as "deployment infrastructure, not a tenant API": no workspace scoping, no auth, no JSON — a Prometheus text-exposition payload. There is no trace/span/event resource, no per-run telemetry endpoint, and no workspace-scoped observability API of any kind. No UI was built or implied for it — deferred to Chunk 2 for another contract-discovery pass in case a future backend change adds one; if none appears, Chunk 2 will document this as a permanent N/A rather than build a UI over internal-only data. |
 
 **Mutation deferral decision** (master prompt Part C §15): this chunk
 implements run + result **list and detail only** — no execute/cancel/
@@ -2336,11 +2336,11 @@ content that renders as inert text, with no unsafe auto-linking.
 
 **Phase 23 Chunk 1 schema gap register** (none blocking):
 
-| Endpoint / field                                                   | Gap                                                                                                                                                                                                                             | Frontend narrowing                                                                                                           | Blocking? |
-| ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- | --------- |
-| `EvaluationRun.threshold_config`, `EvaluationResult.scorer_output` | Generated as `unknown` — both are plain `JSONField`s with no fixed shape at the API layer.                                                                                                                                      | Rendered via `StructuredPayload`, never destructured into named fields.                                                      | No        |
-| `EvaluationResult.agent_run_id`, `.replay_of_id`                   | Generated as required `string` (uuid), but the underlying model columns are nullable (`ForeignKey(..., null=True)`); DRF's plain `UUIDField(read_only=True)` still serializes `None` as JSON `null`.                            | Re-typed locally in `features/evaluations/types.ts` as `string \| null`; every render site handles the null case explicitly. | No        |
-| `evaluations_runs_list`, `evaluations_runs_results_list`           | Generated query type only carries `ordering`/`page`/`page_size`/`search`; the real filters (`status`/`dataset_id`, `status`/`passed`) are invisible to drf-spectacular because both views read `request.query_params` directly. | Narrowed locally in `features/evaluations/api.ts`, same pattern as every prior domain.                                       | No        |
+| Endpoint / field | Gap | Frontend narrowing | Blocking? |
+| --- | --- | --- | --- |
+| `EvaluationRun.threshold_config`, `EvaluationResult.scorer_output` | Generated as `unknown` — both are plain `JSONField`s with no fixed shape at the API layer. | Rendered via `StructuredPayload`, never destructured into named fields. | No |
+| `EvaluationResult.agent_run_id`, `.replay_of_id` | Generated as required `string` (uuid), but the underlying model columns are nullable (`ForeignKey(..., null=True)`); DRF's plain `UUIDField(read_only=True)` still serializes `None` as JSON `null`. | Re-typed locally in `features/evaluations/types.ts` as `string \| null`; every render site handles the null case explicitly. | No |
+| `evaluations_runs_list`, `evaluations_runs_results_list` | Generated query type only carries `ordering`/`page`/`page_size`/`search`; the real filters (`status`/`dataset_id`, `status`/`passed`) are invisible to drf-spectacular because both views read `request.query_params` directly. | Narrowed locally in `features/evaluations/api.ts`, same pattern as every prior domain. | No |
 
 **Deferred Phase 23 capabilities**: any future workspace-scoped
 observability/trace resource (none exists publicly today — see the
@@ -2363,19 +2363,19 @@ against. Contract re-verified directly against `evaluations/views.py`,
 
 **Public API contract**:
 
-| Capability                                      | Status                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Dataset list                                    | **Real.** `GET .../evaluations/datasets/`. Real, backend-tested `status` filter (`draft`/`active`/`archived`); `ordering`/`search` are dead generated params, never sent. Any `CanViewEvaluations` role (every real workspace role) can read.                                                                                                                                                                                                                                                                                             |
-| Dataset detail                                  | **Real.** `GET .../evaluations/datasets/{dataset_id}/`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| Dataset create                                  | **Real**, implemented. `POST .../evaluations/datasets/` — `name` (required, unique per workspace — a real `IntegrityError`-backed 400 on collision), `description`, `status`. `CanManageEvaluations` (owner/admin/support_manager) only.                                                                                                                                                                                                                                                                                                  |
-| Dataset update                                  | **Real**, implemented. `PATCH .../evaluations/datasets/{dataset_id}/`, same mutable fields as create. `evaluations/services.py update_evaluation_dataset` unconditionally overwrites whatever fields are sent — no optimistic-concurrency guard (`updated_at`/version/ETag) exists, so the frontend invents none.                                                                                                                                                                                                                         |
-| Dataset delete/archive                          | **No delete/archive endpoint exists.** Setting `status="active"`/`"archived"` via the same edit form IS the real, only soft-removal path (`EvaluationDatasetStatus.ARCHIVED`) — never a separate destructive control.                                                                                                                                                                                                                                                                                                                     |
-| Case list                                       | **Real.** `GET .../evaluations/datasets/{dataset_id}/cases/`. Real `status` filter (`active`/`disabled`); server ordering is `dataset_id, key` (`EvaluationCase.Meta.ordering`) — never client-re-sorted.                                                                                                                                                                                                                                                                                                                                 |
-| Case detail                                     | Real endpoint exists (`GET .../cases/{case_id}/`) but **not called separately** — the list response already carries every field the detail endpoint would add (`EvaluationCaseSerializer`'s full field set), so a case row expands in place to an edit form instead of navigating to a second route (master prompt Part C §14).                                                                                                                                                                                                           |
-| Case create                                     | **Real**, implemented. `POST .../evaluations/datasets/{dataset_id}/cases/` — `key` (required, slug, unique per dataset — a real 400 on collision), `name`, `status`, `input_message`, `seeded_context` (JSON), `expectations` (JSON).                                                                                                                                                                                                                                                                                                     |
-| Case update                                     | **Real**, implemented. `PATCH .../evaluations/datasets/{dataset_id}/cases/{case_id}/` — `name`/`status`/`input_message`/`seeded_context`/`expectations` only. `key` is generated as a writable field but `evaluations/services.py update_evaluation_case` only ever reads the five fields above from the PATCH payload — `key` is silently ignored on update (verified directly against the service). The edit form never offers to change it, showing it as read-only text instead, so the UI never implies a no-op write would succeed. |
-| Case delete                                     | **No delete endpoint exists.** Not implemented — nothing to protect/cascade-check.                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| Case reorder / bulk import / bulk update / copy | **No such endpoint exists.** Not implemented. Server ordering (`dataset_id, key`) is the only ordering there is.                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| Capability | Status |
+| --- | --- |
+| Dataset list | **Real.** `GET .../evaluations/datasets/`. Real, backend-tested `status` filter (`draft`/`active`/`archived`); `ordering`/`search` are dead generated params, never sent. Any `CanViewEvaluations` role (every real workspace role) can read. |
+| Dataset detail | **Real.** `GET .../evaluations/datasets/{dataset_id}/`. |
+| Dataset create | **Real**, implemented. `POST .../evaluations/datasets/` — `name` (required, unique per workspace — a real `IntegrityError`-backed 400 on collision), `description`, `status`. `CanManageEvaluations` (owner/admin/support_manager) only. |
+| Dataset update | **Real**, implemented. `PATCH .../evaluations/datasets/{dataset_id}/`, same mutable fields as create. `evaluations/services.py update_evaluation_dataset` unconditionally overwrites whatever fields are sent — no optimistic-concurrency guard (`updated_at`/version/ETag) exists, so the frontend invents none. |
+| Dataset delete/archive | **No delete/archive endpoint exists.** Setting `status="active"`/`"archived"` via the same edit form IS the real, only soft-removal path (`EvaluationDatasetStatus.ARCHIVED`) — never a separate destructive control. |
+| Case list | **Real.** `GET .../evaluations/datasets/{dataset_id}/cases/`. Real `status` filter (`active`/`disabled`); server ordering is `dataset_id, key` (`EvaluationCase.Meta.ordering`) — never client-re-sorted. |
+| Case detail | Real endpoint exists (`GET .../cases/{case_id}/`) but **not called separately** — the list response already carries every field the detail endpoint would add (`EvaluationCaseSerializer`'s full field set), so a case row expands in place to an edit form instead of navigating to a second route (master prompt Part C §14). |
+| Case create | **Real**, implemented. `POST .../evaluations/datasets/{dataset_id}/cases/` — `key` (required, slug, unique per dataset — a real 400 on collision), `name`, `status`, `input_message`, `seeded_context` (JSON), `expectations` (JSON). |
+| Case update | **Real**, implemented. `PATCH .../evaluations/datasets/{dataset_id}/cases/{case_id}/` — `name`/`status`/`input_message`/`seeded_context`/`expectations` only. `key` is generated as a writable field but `evaluations/services.py update_evaluation_case` only ever reads the five fields above from the PATCH payload — `key` is silently ignored on update (verified directly against the service). The edit form never offers to change it, showing it as read-only text instead, so the UI never implies a no-op write would succeed. |
+| Case delete | **No delete endpoint exists.** Not implemented — nothing to protect/cascade-check. |
+| Case reorder / bulk import / bulk update / copy | **No such endpoint exists.** Not implemented. Server ordering (`dataset_id, key`) is the only ordering there is. |
 
 **Snapshot semantics** (master prompt Part 6/26-28 — verified directly
 against `evaluations/models.py`): `EvaluationDataset`/`EvaluationCase` are
@@ -2390,7 +2390,7 @@ rendering (`case_key`, the Run detail page) has always been reading
 snapshot data, not live `EvaluationCase` rows, from the start.
 **Consequence for this chunk's UI**: editing or disabling a live
 `EvaluationCase` is stated explicitly, in real UI copy on the Dataset
-detail page, to only affect _future_ evaluation runs — never described as
+detail page, to only affect *future* evaluation runs — never described as
 versioning (no such concept exists in the public contract; snapshotting is
 not dataset versioning) and never implying a past run's results will
 change. Proven directly in the real-backend E2E (`e2e/evaluations.spec.ts`,
@@ -2451,11 +2451,11 @@ mutation.
 **Phase 23 Chunk 2 schema gap register** (continuing Chunk 1's three; none
 blocking):
 
-| #   | Endpoint / field                                                                             | Gap                                                                                                                                                                                                                                              | Frontend narrowing                                                                                                            | Blocking? |
-| --- | -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------- | --------- |
-| 4   | `EvaluationCase.status` / `EvaluationCaseWrite.status` / `PatchedEvaluationCaseWrite.status` | Generated as `WebhookEndpointStatusEnum` — a drf-spectacular component-naming collision (identical two-value `"active" \| "disabled"` shape as `ToolDefinition.status`'s prior gap), never the real semantics.                                   | Re-typed locally as `EvaluationCaseStatusValue` in `features/evaluations/types.ts`.                                           | No        |
-| 5   | `evaluations_datasets_create`, `evaluations_datasets_cases_create`                           | Both generate their 201 response as the _request_ write shape instead of the real full body the view returns (`Response(<ReadSerializer>(obj).data, status=201)`) — same generated-schema deficiency as Integrations' `integrations_create` gap. | `createEvaluationDataset`/`createEvaluationCase` in `features/evaluations/api.ts` declare the real return type explicitly.    | No        |
-| 6   | `EvaluationCaseWrite`/`PatchedEvaluationCaseWrite` `.key`                                    | Generated as writable on update, but `update_evaluation_case` never reads it from the PATCH payload — see "Case update" above.                                                                                                                   | `UpdateEvaluationCaseInput` (`features/evaluations/types.ts`) omits `key` entirely; the edit form shows it as read-only text. | No        |
+| # | Endpoint / field | Gap | Frontend narrowing | Blocking? |
+| --- | --- | --- | --- | --- |
+| 4 | `EvaluationCase.status` / `EvaluationCaseWrite.status` / `PatchedEvaluationCaseWrite.status` | Generated as `WebhookEndpointStatusEnum` — a drf-spectacular component-naming collision (identical two-value `"active" \| "disabled"` shape as `ToolDefinition.status`'s prior gap), never the real semantics. | Re-typed locally as `EvaluationCaseStatusValue` in `features/evaluations/types.ts`. | No |
+| 5 | `evaluations_datasets_create`, `evaluations_datasets_cases_create` | Both generate their 201 response as the *request* write shape instead of the real full body the view returns (`Response(<ReadSerializer>(obj).data, status=201)`) — same generated-schema deficiency as Integrations' `integrations_create` gap. | `createEvaluationDataset`/`createEvaluationCase` in `features/evaluations/api.ts` declare the real return type explicitly. | No |
+| 6 | `EvaluationCaseWrite`/`PatchedEvaluationCaseWrite` `.key` | Generated as writable on update, but `update_evaluation_case` never reads it from the PATCH payload — see "Case update" above. | `UpdateEvaluationCaseInput` (`features/evaluations/types.ts`) omits `key` entirely; the edit form shows it as read-only text. | No |
 
 ### Evaluation Run execution: start, cancel, replay, compare (Phase 23 Chunk 3)
 
@@ -2474,20 +2474,19 @@ for if no real endpoint existed.
 
 **Public API contract**:
 
-| Capability    | Status                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Start run     | **Real.** `POST .../evaluations/runs/` — body `{dataset_id, agent_version_id, threshold_config?}`. `CanRunEvaluations` (owner/admin/support_manager — `EVALUATION_RUN_ROLES`, defined as `EVALUATION_MANAGE_ROLES` verbatim). Throttled (`evaluation_execution` scope) — listing is not. Creates the `EvaluationRun` in `pending` status and snapshots every active case in the dataset at creation time (`EvaluationCaseSnapshot`); a dataset with zero active cases is a real 400 (`evaluation_dataset_no_active_cases`); a non-published `agent_version_id` is a real 400 (`evaluation_agent_version_not_published`, re-validated server-side regardless of what the picker offers). Runs execute asynchronously (Celery, `evaluations/tasks.py`) — the response returns the `pending` run immediately; the UI does not block on completion. |
-| Cancel run    | **Real.** `POST .../evaluations/runs/{run_id}/cancel/`, same `CanRunEvaluations` gate. Only valid for a non-terminal run (`pending`/`running`); an already-terminal run is a real 409 (`evaluation_run_not_cancellable`) — proven directly in `test_trigger_run_then_read_results_and_cancel`'s "cancel again is 409" assertion, mirrored by this chunk's own cancel-twice unit test. Any still-`pending` result is cancelled outright; a `running` result is left to finish.                                                                                                                                                                                                                                                                                                                                                                   |
-| Replay result | **Real.** `POST .../evaluations/runs/{run_id}/results/{result_id}/replay/` — same `CanRunEvaluations` gate, same `evaluation_execution` throttle scope as start. Only valid for a result already in a terminal status (`succeeded`/`failed`/`cancelled`); replaying a still-`pending`/`running` result is a real 409 (`evaluation_result_not_replayable`). Never mutates the original result — creates a brand-new sibling `EvaluationResult` (`replay_of_id` pointing back at it) against the _same_ case snapshot and the _same_ run's own agent version (documented semantics — replaying against a different version is what start + compare are for, not replay).                                                                                                                                                                          |
-| Compare runs  | **Real** (corrected from Chunk 1's "not documented" note — see above). `POST .../evaluations/compare/` — body `{baseline_run_id, candidate_run_id}`, same `CanRunEvaluations` gate. Server computes real per-run metrics (`pass_rate`, `forbidden_tool_violations`, `approval_violations`, `handoff_rate`) over each run's own non-replay results, real `deltas` (candidate minus baseline, rounded server-side), and real threshold pass/fail verdicts against the _candidate_ run's own `threshold_config` — this chunk renders exactly that response, inventing no additional score, confidence, or "% improvement" label. Two runs over different case sets (by `case_key`) are rejected outright as a real 400 (`evaluation_runs_not_comparable`) rather than silently comparing an incompatible subset.                                   |
+| Capability | Status |
+| --- | --- |
+| Start run | **Real.** `POST .../evaluations/runs/` — body `{dataset_id, agent_version_id, threshold_config?}`. `CanRunEvaluations` (owner/admin/support_manager — `EVALUATION_RUN_ROLES`, defined as `EVALUATION_MANAGE_ROLES` verbatim). Throttled (`evaluation_execution` scope) — listing is not. Creates the `EvaluationRun` in `pending` status and snapshots every active case in the dataset at creation time (`EvaluationCaseSnapshot`); a dataset with zero active cases is a real 400 (`evaluation_dataset_no_active_cases`); a non-published `agent_version_id` is a real 400 (`evaluation_agent_version_not_published`, re-validated server-side regardless of what the picker offers). Runs execute asynchronously (Celery, `evaluations/tasks.py`) — the response returns the `pending` run immediately; the UI does not block on completion. |
+| Cancel run | **Real.** `POST .../evaluations/runs/{run_id}/cancel/`, same `CanRunEvaluations` gate. Only valid for a non-terminal run (`pending`/`running`); an already-terminal run is a real 409 (`evaluation_run_not_cancellable`) — proven directly in `test_trigger_run_then_read_results_and_cancel`'s "cancel again is 409" assertion, mirrored by this chunk's own cancel-twice unit test. Any still-`pending` result is cancelled outright; a `running` result is left to finish. |
+| Replay result | **Real.** `POST .../evaluations/runs/{run_id}/results/{result_id}/replay/` — same `CanRunEvaluations` gate, same `evaluation_execution` throttle scope as start. Only valid for a result already in a terminal status (`succeeded`/`failed`/`cancelled`); replaying a still-`pending`/`running` result is a real 409 (`evaluation_result_not_replayable`). Never mutates the original result — creates a brand-new sibling `EvaluationResult` (`replay_of_id` pointing back at it) against the *same* case snapshot and the *same* run's own agent version (documented semantics — replaying against a different version is what start + compare are for, not replay). |
+| Compare runs | **Real** (corrected from Chunk 1's "not documented" note — see above). `POST .../evaluations/compare/` — body `{baseline_run_id, candidate_run_id}`, same `CanRunEvaluations` gate. Server computes real per-run metrics (`pass_rate`, `forbidden_tool_violations`, `approval_violations`, `handoff_rate`) over each run's own non-replay results, real `deltas` (candidate minus baseline, rounded server-side), and real threshold pass/fail verdicts against the *candidate* run's own `threshold_config` — this chunk renders exactly that response, inventing no additional score, confidence, or "% improvement" label. Two runs over different case sets (by `case_key`) are rejected outright as a real 400 (`evaluation_runs_not_comparable`) rather than silently comparing an incompatible subset. |
 
 **Statuses affected**: `EvaluationRunStatus` (`pending → running → {succeeded,
 partial, failed, cancelled}`, `EVALUATION_RUN_TERMINAL_STATUSES` from Chunk
-
-1. and `EvaluationResultStatus` (`pending → running → {succeeded, failed,
+1) and `EvaluationResultStatus` (`pending → running → {succeeded, failed,
 cancelled}`, `EVALUATION_RESULT_TERMINAL_STATUSES`) — both re-confirmed
-   unchanged against `evaluations/models.py` for this chunk; a replay's new
-   result starts at `pending` exactly like a run's original results.
+unchanged against `evaluations/models.py` for this chunk; a replay's new
+result starts at `pending` exactly like a run's original results.
 
 **UI**:
 
@@ -2495,7 +2494,7 @@ cancelled}`, `EVALUATION_RESULT_TERMINAL_STATUSES`) — both re-confirmed
   card (`StartRunPanel`/`StartEvaluationRunForm`,
   `features/evaluations/components/start-evaluation-run-form.tsx`). The
   dataset is fixed by page context, so the only real choice is which
-  _published_ agent version to run — a bounded, coherent input contract, not
+  *published* agent version to run — a bounded, coherent input contract, not
   a free-form POST. There is no "list every published version across every
   agent" backend endpoint (`agents/urls.py` only nests versions under one
   agent), so the picker is a two-step Agent → Version select, backed by a
@@ -2550,7 +2549,7 @@ Evaluations endpoint (`run_get_for_workspace_or_404`,
 is a real 404, never a leaked-existence 403/400, matching every other
 domain's tenant-isolation posture. No new frontend cache key crosses a
 workspace boundary: run/result mutations invalidate only
-`evaluationKeys.runLists`/`runDetail`/`results` for the _acting_ workspace.
+`evaluationKeys.runLists`/`runDetail`/`results` for the *acting* workspace.
 
 **Mutation safety**: every mutation (`useStartEvaluationRunMutation`,
 `useCancelEvaluationRunMutation`, `useReplayEvaluationResultMutation`,
@@ -2572,9 +2571,9 @@ refetch/mount if the run has already finished).
 **Phase 23 Chunk 3 schema gap register** (continuing Chunks 1-2's six; none
 blocking):
 
-| #   | Endpoint / field                               | Gap                                                                                                                                                                                                                                   | Frontend narrowing                                                                                                                                                                                                                                                  | Blocking? |
-| --- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------- |
-| 7   | `api_v1_workspaces_evaluations_compare_create` | Generated 200 response has `content?: never` — drf-spectacular could not infer a body shape from `EvaluationRunCompareView.post`'s plain-dict `Response(...)` with only an `OpenApiResponse(description=...)`, no `response=` schema. | `EvaluationRunCompareResult` (`features/evaluations/types.ts`) is hand-typed directly from `services.compare_evaluation_runs`'s real return shape; `compareEvaluationRuns` in `api.ts` asserts it explicitly (`as unknown as Promise<EvaluationRunCompareResult>`). | No        |
+| # | Endpoint / field | Gap | Frontend narrowing | Blocking? |
+| --- | --- | --- | --- | --- |
+| 7 | `api_v1_workspaces_evaluations_compare_create` | Generated 200 response has `content?: never` — drf-spectacular could not infer a body shape from `EvaluationRunCompareView.post`'s plain-dict `Response(...)` with only an `OpenApiResponse(description=...)`, no `response=` schema. | `EvaluationRunCompareResult` (`features/evaluations/types.ts`) is hand-typed directly from `services.compare_evaluation_runs`'s real return shape; `compareEvaluationRuns` in `api.ts` asserts it explicitly (`as unknown as Promise<EvaluationRunCompareResult>`). | No |
 
 **Running Phase 23 schema-gap total**: 7 (3 from Chunk 1, 3 from Chunk 2, 1
 from this chunk).
@@ -2729,7 +2728,7 @@ full page-level matrix for both `CustomersListPage` and
 keystrokes producing exactly one URL update, not one per keystroke), the
 status filter and pagination each preserving the other and resetting page
 to 1 where appropriate, a confirmed 404, a customer belonging to a
-_different_ workspace resolving to the identical safe not-found UI (never
+*different* workspace resolving to the identical safe not-found UI (never
 leaking that the ID exists elsewhere), a malformed (non-UUID) route ID
 rejected with **zero** network requests, and — the workspace-isolation
 regression this chunk cares most about — switching the active workspace
@@ -2749,7 +2748,7 @@ request shape (default params send no query string; `status`/`channel`/
 parameters never sent on either endpoint); and the full list/detail/
 timeline matrix — real data rendering, empty vs. network-error (both with
 Retry), status/channel/assignment filters with pagination preserving them,
-a confirmed 404, a conversation belonging to a _different_ workspace
+a confirmed 404, a conversation belonging to a *different* workspace
 resolving to the same safe not-found UI, a malformed route ID rejected
 with zero network requests, an unrecognized future status/channel value
 rendering a safe fallback instead of crashing, the customer cross-link,
@@ -2761,7 +2760,7 @@ exact server order, never re-sorted), and — the workspace-isolation
 regression this chunk cares most about — switching the active workspace
 mid-session causing the old workspace's conversation to disappear from the
 DOM immediately (mocked via `src/tests/msw/conversation-handlers.ts`,
-scoping messages by _both_ workspace and conversation like the real
+scoping messages by *both* workspace and conversation like the real
 backend does).
 
 Added in Phase 19 Chunk 3 (`src/tests/features/tickets/`): the ticket
@@ -2777,7 +2776,7 @@ sent); and the full list/detail matrix — real data rendering, empty vs.
 network-error (both with Retry), status/priority filters with pagination
 preserving them, a regression asserting no sort/order control is offered
 (ordering is backend-fixed), a confirmed 404, a ticket belonging to a
-_different_ workspace resolving to the same safe not-found UI, a malformed
+*different* workspace resolving to the same safe not-found UI, a malformed
 route ID rejected with zero network requests, an unrecognized future
 status/priority value rendering a safe fallback, the real Customer and
 Conversation cross-links (and the honest "created directly, not from a
@@ -2799,7 +2798,7 @@ agent-run API boundary's request shape (default params send no query
 string; `status` sent correctly; the backend-dead `search`/`ordering` never
 sent); the full list/detail matrix — real data rendering, empty vs.
 network-error (both with Retry), the status filter with pagination
-preserving it, a confirmed 404, a run belonging to a _different_ workspace
+preserving it, a confirmed 404, a run belonging to a *different* workspace
 resolving to the same safe not-found UI, a malformed route ID rejected with
 zero network requests, an unrecognized future status value rendering a safe
 fallback, the real Conversation and Ticket cross-links (and the honest
@@ -2832,7 +2831,7 @@ control anywhere in the DOM, a redacted argument rendered exactly as sent,
 verbatim (never re-sorted) ordering for two same-timestamp executions,
 an unrecognized future status value, network-error-with-retry, and a
 regression asserting no manual Retry Tool/Run Tool/Execute action exists.
-A dedicated `polling.test.tsx` proves the run's _entire_ tool-execution
+A dedicated `polling.test.tsx` proves the run's *entire* tool-execution
 list is polled as one request per interval while non-terminal (never one
 request per execution), that polling stops once the owning run turns
 terminal, and that the tool catalog is never polled.
@@ -2930,7 +2929,7 @@ environment-driven settings (`config/settings.py`, defaults `10/min`/`30/min`
 production abuse-prevention against a single real user, not the volume a
 real-browser suite legitimately generates in a few minutes (every page
 load bootstraps via a real refresh call too). No backend code, no backend
-setting, and no security _logic_ changes — CSRF, credential checks, and
+setting, and no security *logic* changes — CSRF, credential checks, and
 cookie issuance/rotation are exercised completely unmodified; only the
 request-volume threshold differs for this process.
 
@@ -3239,7 +3238,7 @@ coordination, CSRF, topology). Summary and explicit non-claims:
   in `playwright.config.ts`) — no backend file or production default
   changed. An earlier attempt to reduce login volume by reusing one
   Playwright `storageState` snapshot across many tests looked like the
-  "correct" fix but was actually wrong: it broke on the _second_ test to
+  "correct" fix but was actually wrong: it broke on the *second* test to
   use a saved snapshot, because the backend rotates the refresh token on
   every use and blacklists the old one — correct, intentional security
   behavior this fix must not (and does not) touch.
@@ -3249,14 +3248,14 @@ coordination, CSRF, topology). Summary and explicit non-claims:
   — fixed by scoping to `page.locator("main").getByRole("alert")`. A test
   assumed workspace "A" (created first) would be the default active
   workspace; the real, correct backend ordering (`-created_at`, so the
-  _most recently created_ membership sorts first) makes workspace "B" the
+  *most recently created* membership sorts first) makes workspace "B" the
   actual default — fixed by asserting against the real ordering instead of
   an assumed one.
 - **A test asserted the wrong post-logout Back-button behavior**: expected
   `page.goBack()` to show the login form. In this app both the post-login
   and post-logout redirects use `router.replace()` (never `push()`), so
   `/app` never becomes its own distinct, back-traversable history entry —
-  a _stronger_ safety guarantee than the test assumed (there is nothing
+  a *stronger* safety guarantee than the test assumed (there is nothing
   privileged to go back to at all, not merely stale content), but it means
   `goBack()`'s actual destination depends on whatever history existed
   before the test's session and isn't reliably `/login`. Fixed by asserting
