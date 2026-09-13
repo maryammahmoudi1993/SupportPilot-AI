@@ -22,7 +22,11 @@
  * coherent entry (master prompt Part D): Observability/Traces are deferred
  * to a later Phase 23 chunk and, per the same "one route family" policy,
  * will live under this same `/app/evaluations` route as tabs rather than a
- * separate top-level nav item.
+ * separate top-level nav item. Phase 24 Chunk 1 adds "Settings" now that
+ * `/app/settings` is real — one coherent entry (master prompt Part D
+ * §16-17), not separate Members/Roles/Account/Security nav items: those
+ * live (or will live, once a later chunk makes them real) under this same
+ * `/app/settings` route family instead.
  */
 export interface NavItem {
   id: string;
@@ -42,4 +46,5 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { id: "knowledge", label: "Knowledge", path: "/app/knowledge" },
   { id: "integrations", label: "Integrations", path: "/app/integrations" },
   { id: "evaluations", label: "Evaluations", path: "/app/evaluations" },
+  { id: "settings", label: "Settings", path: "/app/settings" },
 ];
