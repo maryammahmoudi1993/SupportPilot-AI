@@ -88,6 +88,36 @@ membership_b = WorkspaceMembership.objects.create(
     workspace=ws_b, user=primary, role=WorkspaceRole.SUPPORT_AGENT
 )
 
+# Workspace administration domain (Phase 24 Chunk 1) — additional real
+# WorkspaceMembership rows so the real-backend Members E2E has genuine
+# other members to list/manage, not just the primary user's own row.
+# Workspace A's primary membership is OWNER (able to manage any non-owner
+# role, including granting/revoking admin), so its own additional members
+# (admin + viewer) exercise the real role-update endpoint end to end.
+# Workspace B's primary membership is SUPPORT_AGENT (outside
+# MEMBER_MANAGEMENT_ROLES), used to prove the role-edit control is genuinely
+# absent for a real read-only-role account, and that a direct API mutation
+# attempt is denied server-side (never merely hidden by the frontend).
+e2e_ws_a_admin_user = make_user("e2e-ws-a-admin", "e2e-ws-a-admin@example.com", "E2E", "WsAAdmin")
+e2e_ws_a_admin2_user = make_user("e2e-ws-a-admin2", "e2e-ws-a-admin2@example.com", "E2E", "WsAAdmin2")
+e2e_ws_a_viewer_user = make_user("e2e-ws-a-viewer", "e2e-ws-a-viewer@example.com", "E2E", "WsAViewer")
+membership_a_admin = WorkspaceMembership.objects.create(
+    workspace=ws_a, user=e2e_ws_a_admin_user, role=WorkspaceRole.ADMIN
+)
+# A second real admin membership — used to prove an admin actor cannot
+# manage another admin (backend/workspaces/permissions.py
+# can_manage_target_role: admin may manage only roles strictly below admin).
+membership_a_admin2 = WorkspaceMembership.objects.create(
+    workspace=ws_a, user=e2e_ws_a_admin2_user, role=WorkspaceRole.ADMIN
+)
+membership_a_viewer = WorkspaceMembership.objects.create(
+    workspace=ws_a, user=e2e_ws_a_viewer_user, role=WorkspaceRole.VIEWER
+)
+e2e_ws_b_other_user = make_user("e2e-ws-b-other", "e2e-ws-b-other@example.com", "E2E", "WsBOther")
+membership_b_other = WorkspaceMembership.objects.create(
+    workspace=ws_b, user=e2e_ws_b_other_user, role=WorkspaceRole.VIEWER
+)
+
 # Customers domain (Phase 19 Chunk 1) — real cross-workspace data so the
 # real-backend smoke and later Phase 19 E2E specs can prove tenant
 # isolation, search, and pagination against the actual API, not a mock.
@@ -1030,6 +1060,15 @@ print(json.dumps({
     "workspaceAWebhookDeliveryId": str(ws_a_webhook_delivery.id),
     "workspaceAWebhookEndpointDisabledId": str(ws_a_webhook_endpoint_disabled.id),
     "workspaceAWebhookDeliveryFailedDisabledEndpointId": str(ws_a_webhook_delivery_disabled_endpoint.id),
+    "workspaceAMembershipAdminId": str(membership_a_admin.id),
+    "workspaceAMembershipAdminEmail": e2e_ws_a_admin_user.email,
+    "workspaceAMembershipAdmin2Id": str(membership_a_admin2.id),
+    "workspaceAMembershipAdmin2Email": e2e_ws_a_admin2_user.email,
+    "workspaceAMembershipViewerId": str(membership_a_viewer.id),
+    "workspaceAMembershipViewerEmail": e2e_ws_a_viewer_user.email,
+    "workspaceAMembershipOwnerId": str(membership_a.id),
+    "workspaceBMembershipOtherId": str(membership_b_other.id),
+    "workspaceBMembershipOtherEmail": e2e_ws_b_other_user.email,
 }))
 `;
 
