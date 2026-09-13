@@ -12,6 +12,7 @@ import { knowledgeHandlers } from "@/tests/msw/knowledge-handlers";
 import { ticketHandlers } from "@/tests/msw/ticket-handlers";
 import { toolExecutionHandlers } from "@/tests/msw/tool-execution-handlers";
 import { webhookHandlers } from "@/tests/msw/webhook-handlers";
+import { workspaceMemberHandlers } from "@/tests/msw/workspace-member-handlers";
 
 export const server = setupServer(
   ...authHandlers,
@@ -26,4 +27,5 @@ export const server = setupServer(
   ...knowledgeHandlers,
   ...integrationHandlers,
   ...webhookHandlers,
+  ...workspaceMemberHandlers,
 );

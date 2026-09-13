@@ -20,6 +20,7 @@ import { resetKnowledgeMockState } from "@/tests/msw/knowledge-handlers";
 import { resetTicketMockState } from "@/tests/msw/ticket-handlers";
 import { resetToolExecutionMockState } from "@/tests/msw/tool-execution-handlers";
 import { resetWebhookMockState } from "@/tests/msw/webhook-handlers";
+import { resetWorkspaceMemberMockState } from "@/tests/msw/workspace-member-handlers";
 import { server } from "@/tests/msw/server";
 
 // jsdom's own `File` class and Node's real `fetch` (undici, used by MSW's
@@ -71,6 +72,7 @@ beforeEach(() => {
   resetKnowledgeMockState();
   resetIntegrationMockState();
   resetWebhookMockState();
+  resetWorkspaceMemberMockState();
   localStorage.clear();
   sessionStorage.clear();
 });
