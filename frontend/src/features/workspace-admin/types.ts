@@ -108,10 +108,7 @@ export function canManageMembers(role: string | undefined): boolean {
  * whether to *render* an enabled control; it grants no capability of its
  * own.
  */
-export function canManageTargetRole(
-  actorRole: string | undefined,
-  targetRole: string,
-): boolean {
+export function canManageTargetRole(actorRole: string | undefined, targetRole: string): boolean {
   if (targetRole === "owner") {
     return false;
   }

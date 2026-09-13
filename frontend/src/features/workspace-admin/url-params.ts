@@ -23,9 +23,7 @@ export function parseWorkspaceMemberListParams(
   };
 }
 
-export function buildWorkspaceMemberListQueryString(
-  params: WorkspaceMemberListParams,
-): string {
+export function buildWorkspaceMemberListQueryString(params: WorkspaceMemberListParams): string {
   const search = new URLSearchParams();
   if (params.page > 1) {
     search.set("page", String(params.page));

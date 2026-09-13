@@ -48,12 +48,9 @@ export function MemberRoleCell({
   error: ApiError | null;
 }) {
   const selectId = useId();
-  const [pendingRole, setPendingRole] = useState<Exclude<WorkspaceRoleValue, "owner"> | null>(
-    null,
-  );
+  const [pendingRole, setPendingRole] = useState<Exclude<WorkspaceRoleValue, "owner"> | null>(null);
 
-  const canEdit =
-    currentRole !== "owner" && canManageTargetRole(actorRole, currentRole) && !isSelf;
+  const canEdit = currentRole !== "owner" && canManageTargetRole(actorRole, currentRole) && !isSelf;
 
   if (!canEdit) {
     return (
@@ -106,9 +103,7 @@ export function MemberRoleCell({
         onOpenChange={(open) => {
           if (!open) setPendingRole(null);
         }}
-        title={
-          pendingRole === "admin" ? "Grant admin access?" : "Remove admin access?"
-        }
+        title={pendingRole === "admin" ? "Grant admin access?" : "Remove admin access?"}
         description={
           pendingRole === "admin"
             ? "This member will be able to manage workspace members and settings."

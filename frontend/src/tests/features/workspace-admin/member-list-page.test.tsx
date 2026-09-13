@@ -27,7 +27,9 @@ vi.mock("next/navigation", () => ({
 function setupNavigationMocks(initialQuery = "") {
   const replace = vi.fn();
   const push = vi.fn();
-  vi.mocked(useRouter).mockReturnValue({ replace, push } as unknown as ReturnType<typeof useRouter>);
+  vi.mocked(useRouter).mockReturnValue({ replace, push } as unknown as ReturnType<
+    typeof useRouter
+  >);
   vi.mocked(usePathname).mockReturnValue("/app/settings/members");
   vi.mocked(useSearchParams).mockReturnValue(
     new URLSearchParams(initialQuery) as unknown as ReturnType<typeof useSearchParams>,
@@ -272,9 +274,8 @@ describe("MembersListPage", () => {
   });
 
   it("direct unauthorized API mutation is blocked by the mock backend contract (not merely hidden by the UI)", async () => {
-    const { fetchWorkspaceMemberList, updateWorkspaceMemberRole } = await import(
-      "@/features/workspace-admin/api"
-    );
+    const { fetchWorkspaceMemberList, updateWorkspaceMemberRole } =
+      await import("@/features/workspace-admin/api");
     signIn([FIXTURE_WORKSPACE_ACME]);
     workspaceMemberMockState.actorRole = "support_agent";
     seedWorkspaceMembers(FIXTURE_WORKSPACE_ACME.id, [

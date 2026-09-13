@@ -55,10 +55,7 @@ export const workspaceMemberMockState = {
   actorRole: "owner" as "owner" | "admin" | "support_manager" | "support_agent" | "viewer",
 };
 
-export function seedWorkspaceMembers(
-  workspaceId: string,
-  members: WorkspaceMemberFixture[],
-): void {
+export function seedWorkspaceMembers(workspaceId: string, members: WorkspaceMemberFixture[]): void {
   workspaceMemberMockState.membersByWorkspace[workspaceId] = members;
 }
 
@@ -104,23 +101,20 @@ export const workspaceMemberHandlers = [
     return HttpResponse.json(paginate(results, url));
   }),
 
-  http.get(
-    `${BASE}/api/v1/workspaces/:workspaceId/members/:membershipId/`,
-    async ({ params }) => {
-      const workspaceId = params.workspaceId as string;
-      const membershipId = params.membershipId as string;
-      const member = workspaceMemberMockState.membersByWorkspace[workspaceId]?.find(
-        (m) => m.id === membershipId,
+  http.get(`${BASE}/api/v1/workspaces/:workspaceId/members/:membershipId/`, async ({ params }) => {
+    const workspaceId = params.workspaceId as string;
+    const membershipId = params.membershipId as string;
+    const member = workspaceMemberMockState.membersByWorkspace[workspaceId]?.find(
+      (m) => m.id === membershipId,
+    );
+    if (!member) {
+      return HttpResponse.json(
+        { error: { code: "not_found", message: "Membership not found." } },
+        { status: 404 },
       );
-      if (!member) {
-        return HttpResponse.json(
-          { error: { code: "not_found", message: "Membership not found." } },
-          { status: 404 },
-        );
-      }
-      return HttpResponse.json(member);
-    },
-  ),
+    }
+    return HttpResponse.json(member);
+  }),
 
   http.patch(
     `${BASE}/api/v1/workspaces/:workspaceId/members/:membershipId/`,
@@ -158,12 +152,18 @@ export const workspaceMemberHandlers = [
       if (target.role === "owner") {
         return HttpResponse.json(
           {
-            error: { code: "validation_error", message: "The owner's role cannot be changed here." },
+            error: {
+              code: "validation_error",
+              message: "The owner's role cannot be changed here.",
+            },
           },
           { status: 400 },
         );
       }
-      if (!canManageTargetRole(actorRole, newRole) || !canManageTargetRole(actorRole, target.role)) {
+      if (
+        !canManageTargetRole(actorRole, newRole) ||
+        !canManageTargetRole(actorRole, target.role)
+      ) {
         return HttpResponse.json(
           {
             error: {
@@ -175,7 +175,11 @@ export const workspaceMemberHandlers = [
         );
       }
 
-      list[index] = { ...target, role: newRole as WorkspaceMemberFixture["role"], updated_at: "2026-01-02T00:00:00Z" };
+      list[index] = {
+        ...target,
+        role: newRole as WorkspaceMemberFixture["role"],
+        updated_at: "2026-01-02T00:00:00Z",
+      };
       return HttpResponse.json(list[index]);
     },
   ),

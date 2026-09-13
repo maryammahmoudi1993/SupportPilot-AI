@@ -41,7 +41,9 @@ test.describe("Workspace Members", () => {
     // The owner's own row: no edit control, labeled (You).
     await expect(page.getByText("(You)")).toBeVisible();
 
-    const viewerRow = page.getByRole("row", { name: new RegExp(data.workspaceAMembershipViewerEmail) });
+    const viewerRow = page.getByRole("row", {
+      name: new RegExp(data.workspaceAMembershipViewerEmail),
+    });
     const select = viewerRow.getByRole("combobox");
     await expect(select).toBeVisible();
     await select.selectOption("admin");
@@ -58,7 +60,9 @@ test.describe("Workspace Members", () => {
     await expect(select).toHaveValue("viewer");
   });
 
-  test("an admin cannot manage another admin — no control renders for that row", async ({ page }) => {
+  test("an admin cannot manage another admin — no control renders for that row", async ({
+    page,
+  }) => {
     const data = e2eData();
     // Logged in as e2e-ws-a-admin (admin), whose only membership is
     // Workspace A — the real, authoritative rule this proves is
@@ -75,7 +79,9 @@ test.describe("Workspace Members", () => {
     await expect(otherAdminRow.getByRole("combobox")).toHaveCount(0);
 
     // A lower-role member (viewer) IS manageable by this admin actor.
-    const viewerRow = page.getByRole("row", { name: new RegExp(data.workspaceAMembershipViewerEmail) });
+    const viewerRow = page.getByRole("row", {
+      name: new RegExp(data.workspaceAMembershipViewerEmail),
+    });
     await expect(viewerRow.getByRole("combobox")).toBeVisible();
   });
 
@@ -103,7 +109,9 @@ test.describe("Workspace Members", () => {
     expect(body.error.code).toBe("permission_denied");
   });
 
-  test("a foreign-workspace membership id is rejected as not_found, never leaked", async ({ page }) => {
+  test("a foreign-workspace membership id is rejected as not_found, never leaked", async ({
+    page,
+  }) => {
     const data = e2eData();
     await login(page, data.primaryEmail, data.primaryPassword);
     // Default active workspace B; workspaceAMembershipAdminId belongs to workspace A.
