@@ -2798,6 +2798,118 @@ mistaken for newly-introduced drift.
 3. `cp .env.example .env.local` (adjust if the backend isn't on the default port)
 4. `npm run dev` and open http://localhost:3000
 
+### Workspace Members + Roles + Admin Foundation (Phase 24 Chunk 1)
+
+The first chunk of Phase 24's workspace/admin/settings UI. Scope is
+deliberately narrow: **only capabilities backed by a real, verified public
+backend contract are implemented** — no invitation workflow, no member
+removal, no workspace-settings mutation, no account/security UI. See the
+master prompt's capability-classification rule and `features/workspace-admin/
+types.ts`'s module doc comment for the full reasoning.
+
+**Real public contract discovered** (backend/workspaces/views.py,
+selectors.py, serializers.py, services.py, permissions.py — all pre-existing
+on `main`; this chunk is the first frontend UI built against them):
+
+- `GET /api/v1/workspaces/{workspace_id}/members/` — any active member;
+  DRF `PageNumberPagination` (`page`; no filter/search/ordering — see the
+  schema-gap note below).
+- `GET .../members/{membership_id}/` — any active member; real tenant-hiding
+  404 for a foreign membership ID (not implemented as a separate page in
+  this chunk — the list embeds every field a detail view would show, so a
+  redundant per-row detail fetch was deliberately not built; see "No N+1"
+  below).
+- `PATCH .../members/{membership_id}/` (role only) — owner/admin, gated by
+  the exact, non-hierarchical `can_manage_target_role` rule mirrored in
+  `types.ts`'s `canManageTargetRole` — **implemented** (the one real
+  mutation this chunk ships).
+- `POST .../members/` (add member) and `DELETE .../members/{id}/` (remove)
+  — real, but **deferred** to a later chunk (master prompt Part C §15: "Defer
+  … member removal unless essential"). There is no separate
+  "invitation"/pending-accept entity at all: `POST /members/` adds an
+  already-existing, active user directly and immediately by exact email
+  (backend/workspaces/services.py `add_workspace_member`) — no token, no
+  accept step, no resend/revoke. Documented here as N/A-as-an-invitation-
+  concept, not merely postponed.
+- `POST .../transfer-ownership/` — real, **deferred**; ownership is not a
+  role, it is the sole `WorkspaceRole.OWNER` row per workspace (DB-enforced,
+  `uniq_active_owner_per_ws`), and `owner` is never assignable through the
+  generic role-update endpoint.
+- Workspace read/update (`GET`/`PATCH /workspaces/{id}/`), account/profile,
+  password/session/security endpoints — real but **out of Chunk 1's scope**
+  (later chunks per the master prompt's chunk plan).
+
+**Role model** (backend/workspaces/models.py `WorkspaceRole`, mirrored in
+`features/workspace-admin/types.ts`): `owner`, `admin`, `support_manager`,
+`support_agent`, `viewer` — explicit and non-hierarchical. `owner` is a
+role, not a separate boolean/field; at most one *active* owner per workspace
+is a database constraint, and the invariant "never zero owners" is enforced
+transactionally in the service layer (not reproduced or re-derived
+client-side — the frontend never assumes it, it only reflects what the
+server returns). `canManageTargetRole` in `types.ts` is a direct mirror of
+`workspaces/permissions.py can_manage_target_role`: nobody may create/edit
+an `owner`; an owner may manage any non-owner role including admin; an
+admin may manage only roles strictly below admin — **never another admin**.
+This single rule is also what makes self-lockout structurally impossible
+without any separate "is this me" special case: an admin's own membership
+row always has `role === "admin"`, which the rule already refuses for an
+admin actor, and an owner's own row always has `role === "owner"`, which the
+rule refuses for anyone. The frontend renders a `(You)` marker next to the
+signed-in caller's own row (identified by `MembershipUser.id` from the real
+membership payload matched against `/me/`'s real `id` — never inferred from
+display name) purely for clarity; it grants or removes no capability of its
+own, and the backend re-derives and re-checks the real rule on every request
+regardless of what the frontend rendered.
+
+**UI**: one coherent `Settings` nav entry (`/app/settings`, redirects to
+`/app/settings/members` — the only real sub-route this chunk ships) rather
+than separate Members/Roles/Account/Security nav items (master prompt Part
+D §16-17). `features/workspace-admin/components/member-list-page.tsx`
+renders the real member list — loading/empty/error+retry/pagination states,
+same conventions as every other domain's list page (see "Operational
+Support Workspace" above) — with `MemberRoleCell` rendering role as plain
+text (never color-only) plus, only where the signed-in caller's real
+capability allows it, an accessible `<select>` role-editor. A role change
+into/out of `admin` (the meaningful escalation/reduction boundary — grants
+or removes member-management and workspace-settings capability) requires
+explicit confirmation via the shared `ConfirmDialog`; a move among the three
+non-manage roles applies immediately, since confirming a harmless edit is
+its own usability defect (master prompt Part F §22). Every mutation is
+`retry: 0` and the server's response is authoritative — no optimistic role
+update, no client-side capability invention.
+
+**No N+1** (master prompt Part E §20): the member list embeds the full
+`MembershipUser` (id/email/display_name) and role directly — no per-row
+detail fetch of any kind. A role-change mutation is exactly one `PATCH`;
+its `onSuccess` invalidates this workspace's own member-list query key only
+(`["workspaces", wsId, "settings", "members", "list", …]`), never the whole
+app cache, and issues a single refetch rather than hand-patching every
+possible cached page.
+
+**Schema gaps** (Phase 24-only register — do not mix with prior phases'
+counts):
+
+| Endpoint | Field/parameter | Generated | Real | Frontend narrowing | Blocking |
+| --- | --- | --- | --- | --- | --- |
+| `GET .../members/` | `ordering`, `search` | Typed as real query params | Dead — `WorkspaceMemberListCreateView` declares no `filter_backends`; the list is always ordered `-created_at, -id` (workspaces/selectors.py `get_workspace_members`) | `features/workspace-admin/api.ts`'s `MemberListQuery` narrows the generated query type to `page` only | No |
+| `POST .../members/` (add member) | request body | Typed as `WorkspaceMembership` (the *read* shape) | Real request is `MemberAddSerializer` (`email`, `role` only) | Not exercised — add-member is deferred to a later chunk; documented here for whoever implements it | No |
+
+**Testing**: `src/tests/features/workspace-admin/` covers the real
+`can_manage_target_role` matrix as pure functions, workspace-scoped query
+keys, list success/empty/error+retry/pagination, A→B workspace-switch
+isolation (no stale-workspace flash), role rendering (owner/self/other-admin
+all correctly non-editable), a real confirmation-gated privilege escalation,
+and — via `features/workspace-admin/api.ts` directly against the mock
+server's own `can_manage_target_role` mirror — a direct "unauthorized role
+mutation is rejected server-side" case and a foreign-membership-ID
+not-found case. `e2e/workspace-members.spec.ts` proves the same real
+contract end to end against the actual Django backend: real owner/admin/
+viewer/support_agent fixtures (`e2e/global-setup.ts`), a real grant-then-
+revert admin role change with its confirmation dialog, an admin genuinely
+unable to manage another real admin, a direct unauthorized API mutation
+denied with the real `permission_denied` code, a real foreign-membership
+404, and the real zero-workspace account state.
+
 ## Scripts
 
 | Command                           | Purpose                                                               |
