@@ -13,6 +13,7 @@ import {
 } from "@/tests/msw/handlers";
 import {
   makeWorkspaceMemberFixture,
+  seedKnownUser,
   seedWorkspaceMembers,
   workspaceMemberMockState,
 } from "@/tests/msw/workspace-member-handlers";
@@ -297,5 +298,175 @@ describe("MembersListPage", () => {
 
     const acmeList = await fetchWorkspaceMemberList(FIXTURE_WORKSPACE_ACME.id, { page: 1 });
     expect(acmeList.results.find((m) => m.id === "globex-only")).toBeUndefined();
+  });
+
+  // --- Phase 24 Chunk 2: Add member / Remove member ----------------------
+
+  it("shows no 'Add member' control for a read-only support_agent role", async () => {
+    signIn([FIXTURE_WORKSPACE_ACME]); // support_agent
+    seedWorkspaceMembers(FIXTURE_WORKSPACE_ACME.id, []);
+    setupNavigationMocks();
+
+    renderAuthenticated(<MembersListPage />);
+    await screen.findByText("No workspace members yet");
+
+    expect(screen.queryByRole("button", { name: "Add member" })).not.toBeInTheDocument();
+  });
+
+  it("an admin adds an existing account by exact email, honestly labeled (not 'Invite')", async () => {
+    signIn([FIXTURE_WORKSPACE_GLOBEX]); // admin
+    seedWorkspaceMembers(FIXTURE_WORKSPACE_GLOBEX.id, []);
+    seedKnownUser({
+      id: 500,
+      email: "new-member@example.com",
+      display_name: "New Member",
+      is_active: true,
+    });
+    setupNavigationMocks();
+
+    renderAuthenticated(<MembersListPage />);
+    await screen.findByText("No workspace members yet");
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Add member" }));
+    expect(screen.queryByText(/invite/i)).not.toBeInTheDocument();
+
+    await user.type(screen.getByLabelText("Email"), "new-member@example.com");
+    await user.click(screen.getByRole("button", { name: "Add member" }));
+
+    expect(await screen.findByText("New Member")).toBeInTheDocument();
+  });
+
+  it("adding a nonexistent/inactive account shows the real, generic server error", async () => {
+    signIn([FIXTURE_WORKSPACE_GLOBEX]); // admin
+    seedWorkspaceMembers(FIXTURE_WORKSPACE_GLOBEX.id, []);
+    setupNavigationMocks();
+
+    renderAuthenticated(<MembersListPage />);
+    await screen.findByText("No workspace members yet");
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Add member" }));
+    await user.type(screen.getByLabelText("Email"), "unknown@example.com");
+    await user.click(screen.getByRole("button", { name: "Add member" }));
+
+    expect(
+      await screen.findByText("This account could not be added to the workspace."),
+    ).toBeInTheDocument();
+  });
+
+  it("adding an already-active member shows the real conflict error", async () => {
+    signIn([FIXTURE_WORKSPACE_GLOBEX]); // admin
+    seedKnownUser({
+      id: 501,
+      email: "existing@example.com",
+      display_name: "Existing Member",
+      is_active: true,
+    });
+    seedWorkspaceMembers(FIXTURE_WORKSPACE_GLOBEX.id, [
+      makeWorkspaceMemberFixture({
+        id: "m-existing",
+        user: { id: 501, email: "existing@example.com", display_name: "Existing Member" },
+        role: "viewer",
+      }),
+    ]);
+    setupNavigationMocks();
+
+    renderAuthenticated(<MembersListPage />);
+    await screen.findByText("Existing Member");
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Add member" }));
+    await user.type(screen.getByLabelText("Email"), "existing@example.com");
+    await user.click(screen.getByRole("button", { name: "Add member" }));
+
+    expect(
+      await screen.findByText("This user is already a member of the workspace."),
+    ).toBeInTheDocument();
+  });
+
+  it("does not render a Remove control for a support_agent (read-only role)", async () => {
+    signIn([FIXTURE_WORKSPACE_ACME]); // support_agent
+    seedWorkspaceMembers(FIXTURE_WORKSPACE_ACME.id, [
+      makeWorkspaceMemberFixture({ id: "m-other", user: AGENT_USER, role: "viewer" }),
+    ]);
+    setupNavigationMocks();
+
+    renderAuthenticated(<MembersListPage />);
+    await screen.findByText("Agent Person");
+
+    expect(screen.queryByRole("button", { name: /remove/i })).not.toBeInTheDocument();
+  });
+
+  it("does not render a Remove control for the owner row", async () => {
+    signIn([FIXTURE_WORKSPACE_GLOBEX]); // admin
+    seedWorkspaceMembers(FIXTURE_WORKSPACE_GLOBEX.id, [
+      makeWorkspaceMemberFixture({ id: "m-owner", user: OWNER_USER, role: "owner" }),
+    ]);
+    setupNavigationMocks();
+
+    renderAuthenticated(<MembersListPage />);
+    await screen.findByText("Owner Person");
+
+    expect(screen.queryByRole("button", { name: /remove/i })).not.toBeInTheDocument();
+  });
+
+  it("does not render a Remove control for the signed-in caller's own row (self)", async () => {
+    signIn([FIXTURE_WORKSPACE_GLOBEX]); // admin, own row is role admin
+    seedWorkspaceMembers(FIXTURE_WORKSPACE_GLOBEX.id, [
+      makeWorkspaceMemberFixture({
+        id: "m-self",
+        user: { id: FIXTURE_USER.id, email: FIXTURE_USER.email, display_name: "Jane Doe" },
+        role: "admin",
+      }),
+    ]);
+    setupNavigationMocks();
+
+    renderAuthenticated(<MembersListPage />);
+    await screen.findByText("(You)");
+
+    expect(screen.queryByRole("button", { name: /remove/i })).not.toBeInTheDocument();
+  });
+
+  it("an admin removes a lower-role member with confirmation, and the server-authoritative removal is reflected (member disappears from the list)", async () => {
+    signIn([FIXTURE_WORKSPACE_GLOBEX]); // admin
+    seedWorkspaceMembers(FIXTURE_WORKSPACE_GLOBEX.id, [
+      makeWorkspaceMemberFixture({ id: "m-agent", user: AGENT_USER, role: "support_agent" }),
+    ]);
+    setupNavigationMocks();
+
+    renderAuthenticated(<MembersListPage />);
+    await screen.findByText("Agent Person");
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: /remove agent person/i }));
+    expect(await screen.findByText("Remove this member?")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Remove member" }));
+
+    await waitFor(() => expect(screen.queryByText("Agent Person")).not.toBeInTheDocument());
+    expect(await screen.findByText("No workspace members yet")).toBeInTheDocument();
+  });
+
+  it("direct unauthorized removal API call is blocked by the mock backend contract", async () => {
+    const { removeWorkspaceMember } = await import("@/features/workspace-admin/api");
+    workspaceMemberMockState.actorRole = "support_agent";
+    seedWorkspaceMembers(FIXTURE_WORKSPACE_ACME.id, [
+      makeWorkspaceMemberFixture({ id: "m-1", user: AGENT_USER, role: "viewer" }),
+    ]);
+
+    await expect(removeWorkspaceMember(FIXTURE_WORKSPACE_ACME.id, "m-1")).rejects.toMatchObject({
+      status: 403,
+    });
+  });
+
+  it("removing the owner is rejected by the mock backend contract (never possible)", async () => {
+    const { removeWorkspaceMember } = await import("@/features/workspace-admin/api");
+    seedWorkspaceMembers(FIXTURE_WORKSPACE_GLOBEX.id, [
+      makeWorkspaceMemberFixture({ id: "m-owner", user: OWNER_USER, role: "owner" }),
+    ]);
+
+    await expect(
+      removeWorkspaceMember(FIXTURE_WORKSPACE_GLOBEX.id, "m-owner"),
+    ).rejects.toMatchObject({ status: 400 });
   });
 });

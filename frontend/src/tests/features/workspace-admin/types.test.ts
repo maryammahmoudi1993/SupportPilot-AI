@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  canManageMemberRow,
   canManageMembers,
   canManageTargetRole,
+  canManageWorkspace,
+  workspaceAdminErrorMessage,
   workspaceRoleLabel,
 } from "@/features/workspace-admin/types";
-import { workspaceMemberKeys } from "@/features/workspace-admin/query-keys";
+import { workspaceMemberKeys, workspaceSettingsKeys } from "@/features/workspace-admin/query-keys";
 
 describe("canManageMembers", () => {
   it("is true only for owner/admin", () => {
@@ -63,6 +66,84 @@ describe("workspaceRoleLabel", () => {
 
   it("never crashes on an unrecognized role — falls back to the raw value", () => {
     expect(workspaceRoleLabel("future_role")).toBe("future_role");
+  });
+});
+
+describe("canManageWorkspace (mirrors backend CanManageWorkspace.WORKSPACE_SETTINGS_ROLES)", () => {
+  it("is true only for owner/admin", () => {
+    expect(canManageWorkspace("owner")).toBe(true);
+    expect(canManageWorkspace("admin")).toBe(true);
+    expect(canManageWorkspace("support_manager")).toBe(false);
+    expect(canManageWorkspace("support_agent")).toBe(false);
+    expect(canManageWorkspace("viewer")).toBe(false);
+    expect(canManageWorkspace(undefined)).toBe(false);
+  });
+});
+
+describe("canManageMemberRow (shared row-level gate for role-edit and remove controls)", () => {
+  it("defers entirely to canManageTargetRole when not self", () => {
+    expect(canManageMemberRow("owner", "admin", false)).toBe(true);
+    expect(canManageMemberRow("admin", "admin", false)).toBe(false);
+    expect(canManageMemberRow("admin", "viewer", false)).toBe(true);
+  });
+
+  it("is always false for the caller's own row, defensively, even though canManageTargetRole already refuses every real self case", () => {
+    expect(canManageMemberRow("owner", "owner", true)).toBe(false);
+    expect(canManageMemberRow("admin", "admin", true)).toBe(false);
+  });
+});
+
+describe("workspaceAdminErrorMessage (unwraps the real dict-shaped ValidationError envelope)", () => {
+  it("returns the specific detail message when the backend wraps it as a generic validation_error", () => {
+    expect(
+      workspaceAdminErrorMessage({
+        code: "validation_error",
+        message: "Invalid request.",
+        details: { email: "This account could not be added to the workspace." },
+      }),
+    ).toBe("This account could not be added to the workspace.");
+  });
+
+  it("falls back to the top-level message when there is no details object", () => {
+    expect(
+      workspaceAdminErrorMessage({
+        code: "validation_error",
+        message: "Invalid request.",
+        details: undefined,
+      }),
+    ).toBe("Invalid request.");
+  });
+
+  it("passes through non-validation_error messages unchanged (e.g. permission_denied, conflict)", () => {
+    expect(
+      workspaceAdminErrorMessage({
+        code: "permission_denied",
+        message: "You do not have permission to manage this member.",
+        details: undefined,
+      }),
+    ).toBe("You do not have permission to manage this member.");
+    expect(
+      workspaceAdminErrorMessage({
+        code: "conflict",
+        message: "This user is already a member of the workspace.",
+        details: undefined,
+      }),
+    ).toBe("This user is already a member of the workspace.");
+  });
+});
+
+describe("workspaceSettingsKeys", () => {
+  it("includes the workspace ID", () => {
+    expect(workspaceSettingsKeys.detail("ws-1")).toEqual([
+      "workspaces",
+      "ws-1",
+      "settings",
+      "workspace",
+    ]);
+  });
+
+  it("produces distinct keys for distinct workspaces", () => {
+    expect(workspaceSettingsKeys.detail("ws-1")).not.toEqual(workspaceSettingsKeys.detail("ws-2"));
   });
 });
 
