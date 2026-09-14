@@ -3013,6 +3013,69 @@ membership (`e2e/global-setup.ts` — never reused by any other spec, so
 permanently deactivating it is safe), and a direct unauthorized removal
 denied with `permission_denied`.
 
+### Account / Security (Phase 24 Chunk 3)
+
+Re-verified the entire account/security candidate space directly against
+`main` before building anything (master prompt's contract-discovery-first
+rule) — reading every URL config, not just `accounts/urls.py`:
+
+- `backend/accounts/urls.py` exposes exactly `login/`, `refresh/`,
+  `logout/`, `me/`, `csrf/`. No profile update, no password-change, no
+  session list/revoke/logout-all endpoint exists anywhere.
+- No `django-allauth`/`dj-rest-auth` app is installed
+  (`config/settings.py INSTALLED_APPS`); `django.contrib.auth`'s own
+  built-in password-reset views exist in the framework but are never
+  `include()`-d into `config/urls.py` — genuinely unreachable, not merely
+  unused.
+- No MFA, email-verification, or account-disable/delete capability exists
+  anywhere in the backend.
+
+**Real capability**: `GET /api/v1/auth/me/` (`MeView`) — already fetched
+once at session bootstrap by `AuthProvider`, already consumed by
+`WorkspaceProvider`. Per the master prompt's "decide if a dedicated profile
+display view is warranted" question: yes — a real, safe, read-only Account
+page (`/app/settings/account`) was worth building because it costs zero
+marginal network requests (renders the exact data `AuthProvider` already
+holds) and completes the Settings nav family coherently. It shows the
+caller's own `display_name`/`email` and their real workspace-membership
+list (id/name/role per workspace, via the same `parseWorkspaceMemberships`
+narrowing `WorkspaceProvider` itself uses) — nothing else, and no mutation
+of any kind, because none exists to perform. `SettingsNav` is now
+data-driven (Members/Workspace/Account) rather than two hand-written
+links.
+
+**Explicitly N/A this chunk** (per the master prompt's own "do not invent"
+list, confirmed absent rather than assumed): profile update, password
+change, session list/revoke/logout-all, MFA, email verification, account
+disable/delete, billing/subscriptions, SSO/SAML, API-key management,
+audit-log UI, user impersonation, notification preferences, feature flags,
+usage quotas, plans/pricing, ownership-transfer UI (still deferred from
+Chunk 1/2), workspace deletion.
+
+**Privacy/content-safety**: no password field exists anywhere in this
+chunk's UI (there is no password-change capability to build one for) — no
+password value is ever read, logged, cached, or persisted by any code this
+chunk adds. The Account page renders only the same safe fields every other
+Phase 24 chunk already renders (email, display name, role).
+
+**Schema gap register — Phase 24 additions**: none this chunk. `Me`'s
+generated type is unchanged from what Chunk 1's `WorkspaceProvider`
+already narrows around (`workspaces: {[key: string]: unknown}[]` — see
+`features/workspace/types.ts`'s own doc comment); this chunk reuses that
+existing narrowing rather than introducing a new gap.
+
+**Testing**: `account-settings-page.test.tsx` covers real email/display-name
+rendering, every real workspace membership with its real role, the
+zero-membership empty state (a real, non-crashing answer at the component
+level — in the live app this state is actually pre-empted by the shared
+shell's own zero-workspace screen, documented honestly as such in the test
+itself rather than claimed as reachable), and the explicit absence of any
+password/session/MFA control. `e2e/account-settings.spec.ts` proves the
+same real contract end to end: the real account email and every real
+workspace/role pair, the same absence-of-credential-controls assertion
+against the real rendered page, and the Settings nav's three real,
+bookmarkable routes.
+
 ## Scripts
 
 | Command                           | Purpose                                                               |
