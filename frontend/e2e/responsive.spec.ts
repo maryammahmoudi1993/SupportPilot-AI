@@ -205,6 +205,29 @@ for (const viewport of VIEWPORTS) {
         await assertNoHorizontalOverflow(page);
       });
     }
+
+    // Phase 24 Chunk 4 (final Workspace/Admin/Settings acceptance gate):
+    // the three Settings pages, at every required viewport. Workspace A
+    // (switched into) is owner, so the wider control surface (Add member,
+    // role-edit selects, Remove) is exercised, not just the read-only
+    // support_agent view.
+    const SETTINGS_PAGES: { name: string; path: string }[] = [
+      { name: "Settings: Members", path: "/app/settings/members" },
+      { name: "Settings: Workspace", path: "/app/settings/workspace" },
+      { name: "Settings: Account", path: "/app/settings/account" },
+    ];
+
+    for (const { name, path } of SETTINGS_PAGES) {
+      test(`${name} has no horizontal overflow`, async ({ page }) => {
+        const data = e2eData();
+        await login(page, data.primaryEmail, data.primaryPassword);
+        await page.getByRole("button", { name: data.defaultWorkspaceName }).click();
+        await page.getByRole("menuitem", { name: new RegExp(data.otherWorkspaceName) }).click();
+        await page.goto(path);
+        await expect(page.locator("table, h1").first()).toBeVisible();
+        await assertNoHorizontalOverflow(page);
+      });
+    }
   });
 }
 
@@ -524,6 +547,40 @@ test.describe("Mobile shell (375px)", () => {
     await expect(page.getByLabel("Name")).toBeVisible();
     await expect(page.getByLabel("Input message")).toBeVisible();
     await assertNoHorizontalOverflow(page);
+  });
+
+  // Phase 24 Chunk 4: the Add member form and the remove-member
+  // confirmation dialog both remain usable at mobile width — same posture
+  // as every other real form/dialog scanned in this describe block.
+  test("Add member form is usable at mobile width", async ({ page }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+    await page.getByRole("button", { name: data.defaultWorkspaceName }).click();
+    await page.getByRole("menuitem", { name: new RegExp(data.otherWorkspaceName) }).click();
+    await page.goto("/app/settings/members");
+    await page.getByRole("button", { name: "Add member" }).click();
+
+    const addMemberForm = page.getByRole("form", { name: "Add workspace member" });
+    await expect(addMemberForm.getByLabel("Email")).toBeVisible();
+    await expect(addMemberForm.getByLabel("Role", { exact: true })).toBeVisible();
+    await assertNoHorizontalOverflow(page);
+  });
+
+  test("the remove-member confirmation dialog is usable at mobile width", async ({ page }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+    await page.getByRole("button", { name: data.defaultWorkspaceName }).click();
+    await page.getByRole("menuitem", { name: new RegExp(data.otherWorkspaceName) }).click();
+    await page.goto("/app/settings/members");
+
+    const viewerRow = page.getByRole("row", {
+      name: new RegExp(data.workspaceAMembershipViewerEmail),
+    });
+    await viewerRow.getByRole("button", { name: /remove/i }).click();
+    await expect(page.getByRole("dialog", { name: "Remove this member?" })).toBeVisible();
+    await assertNoHorizontalOverflow(page);
+    // Never actually confirm — must not mutate fixture state other specs depend on.
+    await page.keyboard.press("Escape");
   });
 });
 

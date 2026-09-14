@@ -348,7 +348,9 @@ test.describe("Accessibility (axe)", () => {
     const form = page.getByRole("form", { name: "Search knowledge" });
     await form.getByLabel("Query").fill("duplicate payment refund");
     await form.getByRole("button", { name: "Search" }).click();
-    await expect(page.getByRole("region", { name: "Search results" }).getByRole("list")).toBeVisible();
+    await expect(
+      page.getByRole("region", { name: "Search results" }).getByRole("list"),
+    ).toBeVisible();
 
     const results = await new AxeBuilder({ page }).analyze();
     expect(seriousOrCritical(results), JSON.stringify(seriousOrCritical(results), null, 2)).toEqual(
@@ -417,9 +419,7 @@ test.describe("Accessibility (axe)", () => {
     });
   }
 
-  test("the connection create form (open) has no serious/critical violations", async ({
-    page,
-  }) => {
+  test("the connection create form (open) has no serious/critical violations", async ({ page }) => {
     const data = e2eData();
     await login(page, data.primaryEmail, data.primaryPassword);
     await page.getByRole("button", { name: data.defaultWorkspaceName }).click();
@@ -690,9 +690,7 @@ test.describe("Accessibility (axe)", () => {
   }) => {
     const data = e2eData();
     await login(page, data.primaryEmail, data.primaryPassword);
-    await page.route("**/api/v1/workspaces/*/evaluations/runs/*", (route) =>
-      route.abort("failed"),
-    );
+    await page.route("**/api/v1/workspaces/*/evaluations/runs/*", (route) => route.abort("failed"));
     await page.goto("/app/evaluations");
     await expect(page.getByText("Something went wrong")).toBeVisible();
 
@@ -750,9 +748,7 @@ test.describe("Keyboard-only pass", () => {
     await login(page, data.primaryEmail, data.primaryPassword);
     await page.getByRole("button", { name: data.defaultWorkspaceName }).focus();
     await page.keyboard.press("Enter");
-    await page
-      .getByRole("menuitem", { name: new RegExp(data.otherWorkspaceName) })
-      .press("Enter");
+    await page.getByRole("menuitem", { name: new RegExp(data.otherWorkspaceName) }).press("Enter");
 
     // Nav -> runs list, via the sidebar link.
     const evaluationsLink = page.getByRole("link", { name: "Evaluations" });
@@ -904,5 +900,164 @@ test.describe("Keyboard-only pass", () => {
     await expect(signOut).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(userMenu).toBeFocused();
+  });
+
+  // Phase 24 Chunk 4 (final Workspace/Admin/Settings acceptance gate): the
+  // three Settings pages (Members, Workspace, Account) and their real
+  // dialogs/controls, scanned separately from the Phase 18-23 pages above,
+  // per this gate's explicit requirement (Chunks 1-3 deferred full
+  // accessibility acceptance to this gate, same pattern as every prior
+  // domain's own final chunk).
+  const SETTINGS_PAGES: { name: string; path: string }[] = [
+    { name: "Settings: Members", path: "/app/settings/members" },
+    { name: "Settings: Workspace", path: "/app/settings/workspace" },
+    { name: "Settings: Account", path: "/app/settings/account" },
+  ];
+
+  for (const { name, path } of SETTINGS_PAGES) {
+    test(`${name} has no serious/critical violations`, async ({ page }) => {
+      const data = e2eData();
+      await login(page, data.primaryEmail, data.primaryPassword);
+      await page.getByRole("button", { name: data.defaultWorkspaceName }).click();
+      await page.getByRole("menuitem", { name: new RegExp(data.otherWorkspaceName) }).click();
+      // Active workspace is now A — owner, so every real control (Add
+      // member, role-edit selects, Remove) actually renders.
+      await page.goto(path);
+      await expect(page.locator("table, h1").first()).toBeVisible();
+
+      const results = await new AxeBuilder({ page }).analyze();
+      expect(
+        seriousOrCritical(results),
+        JSON.stringify(seriousOrCritical(results), null, 2),
+      ).toEqual([]);
+    });
+  }
+
+  test("Settings: Members for a role without manage permission (support_agent) has no serious/critical violations", async ({
+    page,
+  }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+    // Default active workspace B — support_agent: no Add member button, no
+    // role-edit/Remove controls anywhere — the read-only rendering itself
+    // is the state under test, same posture as every other domain's own
+    // permission-denied accessibility case above.
+    await page.goto("/app/settings/members");
+    await expect(page.getByRole("table")).toBeVisible();
+
+    const results = await new AxeBuilder({ page }).analyze();
+    expect(seriousOrCritical(results), JSON.stringify(seriousOrCritical(results), null, 2)).toEqual(
+      [],
+    );
+  });
+
+  test("the Add member form has no serious/critical violations", async ({ page }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+    await page.getByRole("button", { name: data.defaultWorkspaceName }).click();
+    await page.getByRole("menuitem", { name: new RegExp(data.otherWorkspaceName) }).click();
+    await page.goto("/app/settings/members");
+    await page.getByRole("button", { name: "Add member" }).click();
+    await expect(page.getByRole("form", { name: "Add workspace member" })).toBeVisible();
+
+    const results = await new AxeBuilder({ page }).analyze();
+    expect(seriousOrCritical(results), JSON.stringify(seriousOrCritical(results), null, 2)).toEqual(
+      [],
+    );
+  });
+
+  test("the grant-admin role-change confirmation dialog has no serious/critical violations", async ({
+    page,
+  }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+    await page.getByRole("button", { name: data.defaultWorkspaceName }).click();
+    await page.getByRole("menuitem", { name: new RegExp(data.otherWorkspaceName) }).click();
+    await page.goto("/app/settings/members");
+
+    const viewerRow = page.getByRole("row", {
+      name: new RegExp(data.workspaceAMembershipViewerEmail),
+    });
+    await viewerRow.getByRole("combobox").selectOption("admin");
+    await expect(page.getByRole("dialog", { name: "Grant admin access?" })).toBeVisible();
+
+    const results = await new AxeBuilder({ page }).analyze();
+    expect(seriousOrCritical(results), JSON.stringify(seriousOrCritical(results), null, 2)).toEqual(
+      [],
+    );
+
+    // Never actually confirm — this scan must not mutate real fixture state
+    // any other spec in this suite depends on.
+    await page.keyboard.press("Escape");
+  });
+
+  test("the remove-member confirmation dialog has no serious/critical violations", async ({
+    page,
+  }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+    await page.getByRole("button", { name: data.defaultWorkspaceName }).click();
+    await page.getByRole("menuitem", { name: new RegExp(data.otherWorkspaceName) }).click();
+    await page.goto("/app/settings/members");
+
+    const viewerRow = page.getByRole("row", {
+      name: new RegExp(data.workspaceAMembershipViewerEmail),
+    });
+    await viewerRow.getByRole("button", { name: /remove/i }).click();
+    await expect(page.getByRole("dialog", { name: "Remove this member?" })).toBeVisible();
+
+    const results = await new AxeBuilder({ page }).analyze();
+    expect(seriousOrCritical(results), JSON.stringify(seriousOrCritical(results), null, 2)).toEqual(
+      [],
+    );
+
+    // Never actually confirm — this scan must not mutate real fixture state
+    // any other spec in this suite depends on.
+    await page.keyboard.press("Escape");
+  });
+
+  test("the remove-member confirmation dialog is keyboard-operable: Escape closes it and focus returns to the trigger", async ({
+    page,
+  }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+    await page.getByRole("button", { name: data.defaultWorkspaceName }).click();
+    await page.getByRole("menuitem", { name: new RegExp(data.otherWorkspaceName) }).click();
+    await page.goto("/app/settings/members");
+
+    const viewerRow = page.getByRole("row", {
+      name: new RegExp(data.workspaceAMembershipViewerEmail),
+    });
+    const removeButton = viewerRow.getByRole("button", { name: /remove/i });
+    await removeButton.focus();
+    await page.keyboard.press("Enter");
+    const dialog = page.getByRole("dialog", { name: "Remove this member?" });
+    await expect(dialog).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+    await expect(removeButton).toBeFocused();
+  });
+
+  test("the Settings nav (Members/Workspace/Account) is keyboard-reachable and marks the active route", async ({
+    page,
+  }) => {
+    const data = e2eData();
+    await login(page, data.primaryEmail, data.primaryPassword);
+    await page.goto("/app/settings/members");
+
+    const membersLink = page.getByRole("link", { name: "Members" });
+    const workspaceLink = page.getByRole("link", { name: "Workspace" });
+    const accountLink = page.getByRole("link", { name: "Account" });
+    await expect(membersLink).toHaveAttribute("aria-current", "page");
+
+    await workspaceLink.focus();
+    await page.keyboard.press("Enter");
+    await expect(page).toHaveURL(/\/app\/settings\/workspace$/);
+    await expect(workspaceLink).toHaveAttribute("aria-current", "page");
+
+    await accountLink.focus();
+    await page.keyboard.press("Enter");
+    await expect(page).toHaveURL(/\/app\/settings\/account$/);
+    await expect(accountLink).toHaveAttribute("aria-current", "page");
   });
 });
