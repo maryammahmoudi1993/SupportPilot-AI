@@ -2910,6 +2910,109 @@ unable to manage another real admin, a direct unauthorized API mutation
 denied with the real `permission_denied` code, a real foreign-membership
 404, and the real zero-workspace account state.
 
+### Workspace Settings + Membership Lifecycle (Phase 24 Chunk 2)
+
+Re-verified the entire Chunk 1 discovery directly against `main` before
+building anything (master prompt's contract-discovery-first rule) — nothing
+had changed: `workspaces/views.py`, `serializers.py`, `services.py`,
+`permissions.py` are byte-identical to what Chunk 1 read. This chunk
+implements the three remaining real, safe capabilities that discovery
+already flagged:
+
+- **Workspace settings** — `GET`/`PATCH /api/v1/workspaces/{workspace_id}/`
+  (`WorkspaceDetailView`). `name` is the only mutable field; `slug`,
+  `is_active`, `created_at`, `updated_at` are read-only. Gated to owner/admin
+  (`CanManageWorkspace` — mirrored as `canManageWorkspace`, the identical
+  role set as `canManageMembers` but kept as its own named check since the
+  two backend permission classes are declared separately).
+- **Add member** — `POST /members/` (`add_workspace_member`). Still no
+  invitation entity of any kind (re-confirmed): this adds an already-
+  existing, active account directly and immediately by exact email. The UI
+  is labeled honestly as "Add member" everywhere — the word "invite" appears
+  nowhere in this feature, and this is explicitly asserted in both the
+  component test and the real-backend E2E spec.
+- **Remove member** — `DELETE /members/{membership_id}/`
+  (`remove_workspace_member`, a soft delete: `is_active=False`, history
+  preserved). Gated by the exact same `can_manage_target_role` rule as role
+  update (`canManageMemberRow` in `types.ts` — one function now serves both
+  the role-edit and remove controls, since the backend enforces the
+  identical rule for both mutations). Always confirmed via `ConfirmDialog` —
+  unlike a role change, there is no harmless removal.
+
+**Self-lockout / owner-immutability, re-verified for removal**: the backend
+has no separate "can't remove self" check at all — it doesn't need one.
+`remove_workspace_member` only checks "not the owner" and
+`can_manage_target_role`, and those two rules alone make self-removal
+structurally impossible for every real role: an owner's own row always has
+`role="owner"` (blocked by the owner check); an admin's own row always has
+`role="admin"` (blocked by `can_manage_target_role(admin, admin) === false`,
+same reasoning as Chunk 1's role-update self-lockout finding); nobody else
+can even reach the endpoint (`CanManageMembers` requires owner/admin).
+`RemoveMemberButton` reuses `canManageMemberRow` — the identical gate as
+`MemberRoleCell` — so this is provably not a separate, possibly-inconsistent
+frontend rule.
+
+**Real discovery made while building this chunk (not assumed from reading
+the serializer)**: every `ValidationError` `workspaces/services.py` raises
+with a field-keyed dict — e.g. `ValidationError({"email": "This account
+could not be added to the workspace."})`, `{"role": "Ownership can only
+change via ownership transfer."}`, `{"membership": "The workspace owner
+cannot be removed."}` — produces a **generic top-level `message: "Invalid
+request."`** in the response envelope (`common/exceptions.py
+custom_exception_handler` cannot distinguish a service-raised field dict
+from an ordinary serializer field-validation dict); the real, specific,
+safe reason only exists in `error.details`. Verified empirically against
+the running backend, not assumed. `ConflictError`/`PermissionDenied` raised
+with a single string are unaffected — those already carry the real message
+at the top level. `workspaceAdminErrorMessage()` (`types.ts`) unwraps
+`details` whenever the generic wrapper is present so every workspace-admin
+form shows the real, specific reason rather than "Invalid request." for
+every validation failure; every mutation-error render in this domain
+(`AddMemberForm`, `MemberRoleCell`, `RemoveMemberButton`,
+`WorkspaceSettingsForm`) goes through it. This is a real, whole-app-shaped
+defect class (any domain whose service layer raises a dict-shaped
+`ValidationError` would hit it) — fixed narrowly here for the
+workspace-admin domain the chunk actually touches; not applied elsewhere
+without a mandate to change shared `lib/api/errors.ts` behavior other
+domains depend on.
+
+**UI**: `SettingsNav` (real links, `aria-current="page"`, never ARIA tabs —
+same pattern as `integrations-list-page.tsx`'s `TabLink`) now appears on
+both `/app/settings/members` and the new `/app/settings/workspace`. The
+Members page gained an "Add member" toggle (visible only to
+`canManageMembers`) and a per-row "Remove" control (visible only where
+`canManageMemberRow` allows it).
+
+**No N+1**: add-member and remove-member are each exactly one request
+(`POST`/`DELETE`); `onSuccess` invalidates only this workspace's own
+member-list query keys, same as role update.
+
+**Schema gap register — Phase 24 additions**:
+
+| Endpoint | Field/parameter | Generated | Real | Frontend narrowing | Blocking |
+| --- | --- | --- | --- | --- | --- |
+| `POST .../members/` (add member) | request body | Typed as `WorkspaceMembership` (the *read* shape) | Real request is `MemberAddSerializer` (`email`, `role` only) | `addWorkspaceMember` (`api.ts`) sends the real shape directly via an explicit, narrow cast — never the generated request type, never `any` | No |
+| Every `ValidationError({field: message})` response (role update, add-member, remove-member) | top-level `error.message` | Not schema-typed at all (`error` envelope is hand-written, not generated) | Always the generic `"Invalid request."`; the real safe message is in `error.details[field]` | `workspaceAdminErrorMessage()` (`types.ts`) unwraps `details` before rendering | No — a real UX-affecting behavior, not an OpenAPI type gap, but registered here since it was discovered during this chunk's own contract verification |
+
+**Testing**: `workspace-settings-page.test.tsx` covers real workspace name/
+slug/created rendering, network error + retry, a read-only role's disabled
+field with no Save button, and an owner's real rename reflected from the
+server. `member-list-page.test.tsx` gained add-member (success, honest
+labeling, nonexistent-account and conflict errors, all via the real
+generic-wrapper-plus-`details` envelope) and remove-member (absent for
+support_agent/owner/self, present and confirmed for a manageable row, a
+direct unauthorized-removal API case, and an owner-removal-is-rejected
+case) coverage. `e2e/workspace-settings.spec.ts` proves the same real
+contract end to end: a real rename (reverted at the end of the test, since
+other specs' `otherWorkspaceName` fixture depends on the original name), a
+read-only role's disabled field, a direct unauthorized `PATCH` denied with
+`permission_denied`, a real add-member by email (never the word "invite"),
+a real nonexistent-account rejection showing the real unwrapped message, a
+real remove with confirmation against a dedicated disposable fixture
+membership (`e2e/global-setup.ts` — never reused by any other spec, so
+permanently deactivating it is safe), and a direct unauthorized removal
+denied with `permission_denied`.
+
 ## Scripts
 
 | Command                           | Purpose                                                               |
