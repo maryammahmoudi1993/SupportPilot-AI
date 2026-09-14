@@ -2798,6 +2798,385 @@ mistaken for newly-introduced drift.
 3. `cp .env.example .env.local` (adjust if the backend isn't on the default port)
 4. `npm run dev` and open http://localhost:3000
 
+### Workspace Members + Roles + Admin Foundation (Phase 24 Chunk 1)
+
+The first chunk of Phase 24's workspace/admin/settings UI. Scope is
+deliberately narrow: **only capabilities backed by a real, verified public
+backend contract are implemented** — no invitation workflow, no member
+removal, no workspace-settings mutation, no account/security UI. See the
+master prompt's capability-classification rule and `features/workspace-admin/
+types.ts`'s module doc comment for the full reasoning.
+
+**Real public contract discovered** (backend/workspaces/views.py,
+selectors.py, serializers.py, services.py, permissions.py — all pre-existing
+on `main`; this chunk is the first frontend UI built against them):
+
+- `GET /api/v1/workspaces/{workspace_id}/members/` — any active member;
+  DRF `PageNumberPagination` (`page`; no filter/search/ordering — see the
+  schema-gap note below).
+- `GET .../members/{membership_id}/` — any active member; real tenant-hiding
+  404 for a foreign membership ID (not implemented as a separate page in
+  this chunk — the list embeds every field a detail view would show, so a
+  redundant per-row detail fetch was deliberately not built; see "No N+1"
+  below).
+- `PATCH .../members/{membership_id}/` (role only) — owner/admin, gated by
+  the exact, non-hierarchical `can_manage_target_role` rule mirrored in
+  `types.ts`'s `canManageTargetRole` — **implemented** (the one real
+  mutation this chunk ships).
+- `POST .../members/` (add member) and `DELETE .../members/{id}/` (remove)
+  — real, but **deferred** to a later chunk (master prompt Part C §15: "Defer
+  … member removal unless essential"). There is no separate
+  "invitation"/pending-accept entity at all: `POST /members/` adds an
+  already-existing, active user directly and immediately by exact email
+  (backend/workspaces/services.py `add_workspace_member`) — no token, no
+  accept step, no resend/revoke. Documented here as N/A-as-an-invitation-
+  concept, not merely postponed.
+- `POST .../transfer-ownership/` — real, **deferred**; ownership is not a
+  role, it is the sole `WorkspaceRole.OWNER` row per workspace (DB-enforced,
+  `uniq_active_owner_per_ws`), and `owner` is never assignable through the
+  generic role-update endpoint.
+- Workspace read/update (`GET`/`PATCH /workspaces/{id}/`), account/profile,
+  password/session/security endpoints — real but **out of Chunk 1's scope**
+  (later chunks per the master prompt's chunk plan).
+
+**Role model** (backend/workspaces/models.py `WorkspaceRole`, mirrored in
+`features/workspace-admin/types.ts`): `owner`, `admin`, `support_manager`,
+`support_agent`, `viewer` — explicit and non-hierarchical. `owner` is a
+role, not a separate boolean/field; at most one *active* owner per workspace
+is a database constraint, and the invariant "never zero owners" is enforced
+transactionally in the service layer (not reproduced or re-derived
+client-side — the frontend never assumes it, it only reflects what the
+server returns). `canManageTargetRole` in `types.ts` is a direct mirror of
+`workspaces/permissions.py can_manage_target_role`: nobody may create/edit
+an `owner`; an owner may manage any non-owner role including admin; an
+admin may manage only roles strictly below admin — **never another admin**.
+This single rule is also what makes self-lockout structurally impossible
+without any separate "is this me" special case: an admin's own membership
+row always has `role === "admin"`, which the rule already refuses for an
+admin actor, and an owner's own row always has `role === "owner"`, which the
+rule refuses for anyone. The frontend renders a `(You)` marker next to the
+signed-in caller's own row (identified by `MembershipUser.id` from the real
+membership payload matched against `/me/`'s real `id` — never inferred from
+display name) purely for clarity; it grants or removes no capability of its
+own, and the backend re-derives and re-checks the real rule on every request
+regardless of what the frontend rendered.
+
+**UI**: one coherent `Settings` nav entry (`/app/settings`, redirects to
+`/app/settings/members` — the only real sub-route this chunk ships) rather
+than separate Members/Roles/Account/Security nav items (master prompt Part
+D §16-17). `features/workspace-admin/components/member-list-page.tsx`
+renders the real member list — loading/empty/error+retry/pagination states,
+same conventions as every other domain's list page (see "Operational
+Support Workspace" above) — with `MemberRoleCell` rendering role as plain
+text (never color-only) plus, only where the signed-in caller's real
+capability allows it, an accessible `<select>` role-editor. A role change
+into/out of `admin` (the meaningful escalation/reduction boundary — grants
+or removes member-management and workspace-settings capability) requires
+explicit confirmation via the shared `ConfirmDialog`; a move among the three
+non-manage roles applies immediately, since confirming a harmless edit is
+its own usability defect (master prompt Part F §22). Every mutation is
+`retry: 0` and the server's response is authoritative — no optimistic role
+update, no client-side capability invention.
+
+**No N+1** (master prompt Part E §20): the member list embeds the full
+`MembershipUser` (id/email/display_name) and role directly — no per-row
+detail fetch of any kind. A role-change mutation is exactly one `PATCH`;
+its `onSuccess` invalidates this workspace's own member-list query key only
+(`["workspaces", wsId, "settings", "members", "list", …]`), never the whole
+app cache, and issues a single refetch rather than hand-patching every
+possible cached page.
+
+**Schema gaps** (Phase 24-only register — do not mix with prior phases'
+counts):
+
+| Endpoint | Field/parameter | Generated | Real | Frontend narrowing | Blocking |
+| --- | --- | --- | --- | --- | --- |
+| `GET .../members/` | `ordering`, `search` | Typed as real query params | Dead — `WorkspaceMemberListCreateView` declares no `filter_backends`; the list is always ordered `-created_at, -id` (workspaces/selectors.py `get_workspace_members`) | `features/workspace-admin/api.ts`'s `MemberListQuery` narrows the generated query type to `page` only | No |
+| `POST .../members/` (add member) | request body | Typed as `WorkspaceMembership` (the *read* shape) | Real request is `MemberAddSerializer` (`email`, `role` only) | Not exercised — add-member is deferred to a later chunk; documented here for whoever implements it | No |
+
+**Testing**: `src/tests/features/workspace-admin/` covers the real
+`can_manage_target_role` matrix as pure functions, workspace-scoped query
+keys, list success/empty/error+retry/pagination, A→B workspace-switch
+isolation (no stale-workspace flash), role rendering (owner/self/other-admin
+all correctly non-editable), a real confirmation-gated privilege escalation,
+and — via `features/workspace-admin/api.ts` directly against the mock
+server's own `can_manage_target_role` mirror — a direct "unauthorized role
+mutation is rejected server-side" case and a foreign-membership-ID
+not-found case. `e2e/workspace-members.spec.ts` proves the same real
+contract end to end against the actual Django backend: real owner/admin/
+viewer/support_agent fixtures (`e2e/global-setup.ts`), a real grant-then-
+revert admin role change with its confirmation dialog, an admin genuinely
+unable to manage another real admin, a direct unauthorized API mutation
+denied with the real `permission_denied` code, a real foreign-membership
+404, and the real zero-workspace account state.
+
+### Workspace Settings + Membership Lifecycle (Phase 24 Chunk 2)
+
+Re-verified the entire Chunk 1 discovery directly against `main` before
+building anything (master prompt's contract-discovery-first rule) — nothing
+had changed: `workspaces/views.py`, `serializers.py`, `services.py`,
+`permissions.py` are byte-identical to what Chunk 1 read. This chunk
+implements the three remaining real, safe capabilities that discovery
+already flagged:
+
+- **Workspace settings** — `GET`/`PATCH /api/v1/workspaces/{workspace_id}/`
+  (`WorkspaceDetailView`). `name` is the only mutable field; `slug`,
+  `is_active`, `created_at`, `updated_at` are read-only. Gated to owner/admin
+  (`CanManageWorkspace` — mirrored as `canManageWorkspace`, the identical
+  role set as `canManageMembers` but kept as its own named check since the
+  two backend permission classes are declared separately).
+- **Add member** — `POST /members/` (`add_workspace_member`). Still no
+  invitation entity of any kind (re-confirmed): this adds an already-
+  existing, active account directly and immediately by exact email. The UI
+  is labeled honestly as "Add member" everywhere — the word "invite" appears
+  nowhere in this feature, and this is explicitly asserted in both the
+  component test and the real-backend E2E spec.
+- **Remove member** — `DELETE /members/{membership_id}/`
+  (`remove_workspace_member`, a soft delete: `is_active=False`, history
+  preserved). Gated by the exact same `can_manage_target_role` rule as role
+  update (`canManageMemberRow` in `types.ts` — one function now serves both
+  the role-edit and remove controls, since the backend enforces the
+  identical rule for both mutations). Always confirmed via `ConfirmDialog` —
+  unlike a role change, there is no harmless removal.
+
+**Self-lockout / owner-immutability, re-verified for removal**: the backend
+has no separate "can't remove self" check at all — it doesn't need one.
+`remove_workspace_member` only checks "not the owner" and
+`can_manage_target_role`, and those two rules alone make self-removal
+structurally impossible for every real role: an owner's own row always has
+`role="owner"` (blocked by the owner check); an admin's own row always has
+`role="admin"` (blocked by `can_manage_target_role(admin, admin) === false`,
+same reasoning as Chunk 1's role-update self-lockout finding); nobody else
+can even reach the endpoint (`CanManageMembers` requires owner/admin).
+`RemoveMemberButton` reuses `canManageMemberRow` — the identical gate as
+`MemberRoleCell` — so this is provably not a separate, possibly-inconsistent
+frontend rule.
+
+**Real discovery made while building this chunk (not assumed from reading
+the serializer)**: every `ValidationError` `workspaces/services.py` raises
+with a field-keyed dict — e.g. `ValidationError({"email": "This account
+could not be added to the workspace."})`, `{"role": "Ownership can only
+change via ownership transfer."}`, `{"membership": "The workspace owner
+cannot be removed."}` — produces a **generic top-level `message: "Invalid
+request."`** in the response envelope (`common/exceptions.py
+custom_exception_handler` cannot distinguish a service-raised field dict
+from an ordinary serializer field-validation dict); the real, specific,
+safe reason only exists in `error.details`. Verified empirically against
+the running backend, not assumed. `ConflictError`/`PermissionDenied` raised
+with a single string are unaffected — those already carry the real message
+at the top level. `workspaceAdminErrorMessage()` (`types.ts`) unwraps
+`details` whenever the generic wrapper is present so every workspace-admin
+form shows the real, specific reason rather than "Invalid request." for
+every validation failure; every mutation-error render in this domain
+(`AddMemberForm`, `MemberRoleCell`, `RemoveMemberButton`,
+`WorkspaceSettingsForm`) goes through it. This is a real, whole-app-shaped
+defect class (any domain whose service layer raises a dict-shaped
+`ValidationError` would hit it) — fixed narrowly here for the
+workspace-admin domain the chunk actually touches; not applied elsewhere
+without a mandate to change shared `lib/api/errors.ts` behavior other
+domains depend on.
+
+**UI**: `SettingsNav` (real links, `aria-current="page"`, never ARIA tabs —
+same pattern as `integrations-list-page.tsx`'s `TabLink`) now appears on
+both `/app/settings/members` and the new `/app/settings/workspace`. The
+Members page gained an "Add member" toggle (visible only to
+`canManageMembers`) and a per-row "Remove" control (visible only where
+`canManageMemberRow` allows it).
+
+**No N+1**: add-member and remove-member are each exactly one request
+(`POST`/`DELETE`); `onSuccess` invalidates only this workspace's own
+member-list query keys, same as role update.
+
+**Schema gap register — Phase 24 additions**:
+
+| Endpoint | Field/parameter | Generated | Real | Frontend narrowing | Blocking |
+| --- | --- | --- | --- | --- | --- |
+| `POST .../members/` (add member) | request body | Typed as `WorkspaceMembership` (the *read* shape) | Real request is `MemberAddSerializer` (`email`, `role` only) | `addWorkspaceMember` (`api.ts`) sends the real shape directly via an explicit, narrow cast — never the generated request type, never `any` | No |
+| Every `ValidationError({field: message})` response (role update, add-member, remove-member) | top-level `error.message` | Not schema-typed at all (`error` envelope is hand-written, not generated) | Always the generic `"Invalid request."`; the real safe message is in `error.details[field]` | `workspaceAdminErrorMessage()` (`types.ts`) unwraps `details` before rendering | No — a real UX-affecting behavior, not an OpenAPI type gap, but registered here since it was discovered during this chunk's own contract verification |
+
+**Testing**: `workspace-settings-page.test.tsx` covers real workspace name/
+slug/created rendering, network error + retry, a read-only role's disabled
+field with no Save button, and an owner's real rename reflected from the
+server. `member-list-page.test.tsx` gained add-member (success, honest
+labeling, nonexistent-account and conflict errors, all via the real
+generic-wrapper-plus-`details` envelope) and remove-member (absent for
+support_agent/owner/self, present and confirmed for a manageable row, a
+direct unauthorized-removal API case, and an owner-removal-is-rejected
+case) coverage. `e2e/workspace-settings.spec.ts` proves the same real
+contract end to end: a real rename (reverted at the end of the test, since
+other specs' `otherWorkspaceName` fixture depends on the original name), a
+read-only role's disabled field, a direct unauthorized `PATCH` denied with
+`permission_denied`, a real add-member by email (never the word "invite"),
+a real nonexistent-account rejection showing the real unwrapped message, a
+real remove with confirmation against a dedicated disposable fixture
+membership (`e2e/global-setup.ts` — never reused by any other spec, so
+permanently deactivating it is safe), and a direct unauthorized removal
+denied with `permission_denied`.
+
+### Account / Security (Phase 24 Chunk 3)
+
+Re-verified the entire account/security candidate space directly against
+`main` before building anything (master prompt's contract-discovery-first
+rule) — reading every URL config, not just `accounts/urls.py`:
+
+- `backend/accounts/urls.py` exposes exactly `login/`, `refresh/`,
+  `logout/`, `me/`, `csrf/`. No profile update, no password-change, no
+  session list/revoke/logout-all endpoint exists anywhere.
+- No `django-allauth`/`dj-rest-auth` app is installed
+  (`config/settings.py INSTALLED_APPS`); `django.contrib.auth`'s own
+  built-in password-reset views exist in the framework but are never
+  `include()`-d into `config/urls.py` — genuinely unreachable, not merely
+  unused.
+- No MFA, email-verification, or account-disable/delete capability exists
+  anywhere in the backend.
+
+**Real capability**: `GET /api/v1/auth/me/` (`MeView`) — already fetched
+once at session bootstrap by `AuthProvider`, already consumed by
+`WorkspaceProvider`. Per the master prompt's "decide if a dedicated profile
+display view is warranted" question: yes — a real, safe, read-only Account
+page (`/app/settings/account`) was worth building because it costs zero
+marginal network requests (renders the exact data `AuthProvider` already
+holds) and completes the Settings nav family coherently. It shows the
+caller's own `display_name`/`email` and their real workspace-membership
+list (id/name/role per workspace, via the same `parseWorkspaceMemberships`
+narrowing `WorkspaceProvider` itself uses) — nothing else, and no mutation
+of any kind, because none exists to perform. `SettingsNav` is now
+data-driven (Members/Workspace/Account) rather than two hand-written
+links.
+
+**Explicitly N/A this chunk** (per the master prompt's own "do not invent"
+list, confirmed absent rather than assumed): profile update, password
+change, session list/revoke/logout-all, MFA, email verification, account
+disable/delete, billing/subscriptions, SSO/SAML, API-key management,
+audit-log UI, user impersonation, notification preferences, feature flags,
+usage quotas, plans/pricing, ownership-transfer UI (still deferred from
+Chunk 1/2), workspace deletion.
+
+**Privacy/content-safety**: no password field exists anywhere in this
+chunk's UI (there is no password-change capability to build one for) — no
+password value is ever read, logged, cached, or persisted by any code this
+chunk adds. The Account page renders only the same safe fields every other
+Phase 24 chunk already renders (email, display name, role).
+
+**Schema gap register — Phase 24 additions**: none this chunk. `Me`'s
+generated type is unchanged from what Chunk 1's `WorkspaceProvider`
+already narrows around (`workspaces: {[key: string]: unknown}[]` — see
+`features/workspace/types.ts`'s own doc comment); this chunk reuses that
+existing narrowing rather than introducing a new gap.
+
+**Testing**: `account-settings-page.test.tsx` covers real email/display-name
+rendering, every real workspace membership with its real role, the
+zero-membership empty state (a real, non-crashing answer at the component
+level — in the live app this state is actually pre-empted by the shared
+shell's own zero-workspace screen, documented honestly as such in the test
+itself rather than claimed as reachable), and the explicit absence of any
+password/session/MFA control. `e2e/account-settings.spec.ts` proves the
+same real contract end to end: the real account email and every real
+workspace/role pair, the same absence-of-credential-controls assertion
+against the real rendered page, and the Settings nav's three real,
+bookmarkable routes.
+
+### Final Acceptance Gate (Phase 24 Chunk 4)
+
+Closed the carried-forward open item from Chunk 2 first: a clean,
+uninterrupted full-suite Playwright confirmation run against the real
+backend now completes end to end — 376 passed, 1 skipped (the pre-existing,
+intentionally accepted `PHASE22-3-04` fixme), 0 failed.
+
+**New accessibility coverage**: `e2e/accessibility.spec.ts` gained an axe
+(`@axe-core/playwright`, `serious`/`critical` impact only) pass over all
+three Settings pages (Members, Workspace, Account) and their dialogs —
+read-only `support_agent` role rendering, the Add Member form, the
+grant-admin confirmation dialog, and the remove-member confirmation
+dialog (both dialogs scanned then closed via Escape rather than confirmed,
+so the shared E2E fixture data is never mutated by an accessibility pass).
+Keyboard coverage: Escape closes a `ConfirmDialog` and returns focus to its
+real trigger element; the Settings nav's three real routes expose
+`aria-current="page"` correctly as focus moves between them.
+
+**New responsive coverage**: `e2e/responsive.spec.ts` gained the same
+per-viewport treatment (375×812, 768×1024, 1280×800, 1440×900) already
+used for the Evaluations pages — a `SETTINGS_PAGES` loop asserting zero
+page-level horizontal overflow (`document.documentElement.scrollWidth` vs.
+`clientWidth`, the only check that catches overflow hidden by an
+`overflow-x-auto` wrapper) on all three Settings pages at every viewport,
+plus two dedicated mobile-width (375px) tests for the Add Member form and
+the remove-member confirmation dialog.
+
+**Real defect found and fixed by this coverage** (not present before,
+because no accessibility/responsive test had ever exercised these pages):
+the Members table used the browser default `table-layout: auto`, which let
+long, unbreakable member email strings expand the table past its own
+declared `min-width` regardless of its `overflow-x-auto` wrapper — a
+genuine page-level horizontal scroll, reproducible exactly at 768px tablet
+width. Fixed with `table-layout: fixed` on the table, a reduced
+`min-w-[420px]`, `break-all` on the email cell, and defensive
+`min-w-0 overflow-x-hidden` on the containing flex columns
+(`member-list-page.tsx`). A second, narrower overflow appeared only at
+375px mobile width with the Add Member form open simultaneously; fixed by
+adding `min-w-0 max-w-full overflow-x-hidden` to the form itself
+(`add-member-form.tsx`). Verified live via a temporary diagnostic spec
+(not committed) confirming `scrollWidth === clientWidth` at every viewport
+before considering the fix complete.
+
+**Final double-clean regression**: full Vitest (631/631), full Playwright
+(376 passed / 1 skipped / 0 failed), lint, typecheck, and production build
+all clean; `check:api-types` reports the committed API contract still
+matches the backend's OpenAPI schema (zero drift); `npm audit --omit=dev`
+reports 0 vulnerabilities; the full audit reports 2 pre-existing high
+findings, both in `js-yaml` via `@redocly/openapi-core` — a dev-only
+OpenAPI-tooling dependency never shipped in the production bundle.
+
+**Security re-scan of the workspace-admin domain**: no
+`dangerouslySetInnerHTML` anywhere in `features/workspace-admin`; no
+secret/credential value read, logged, or persisted anywhere in the domain;
+every mutation and read goes through a `{workspace_id}`-scoped endpoint
+(`api.ts`), and every query key is workspace-scoped (`query-keys.ts`) so a
+workspace switch can never serve another workspace's cached data; no
+client-side role-hierarchy shortcut exists anywhere — every role gate
+(`member-role-cell.tsx`, `remove-member-button.tsx`,
+`workspace-settings-page.tsx`) funnels through the same shared
+`canManageTargetRole`/`canManageMemberRow`/`canManageWorkspace` helpers
+from `types.ts`, mirroring the backend's own `can_manage_target_role` rule
+rather than re-deriving it; the backend remains authoritative for every
+permission decision regardless of what the UI shows or hides.
+
+**Consolidated defect ledger — Phase 24 (all chunks, referenced by ID,
+never rewritten)**:
+
+- `PHASE22-3-04` — pre-existing, intentionally accepted `fixme`, carried
+  through Phases 22-24 untouched.
+- `PHASE23-3-D01` — pre-existing backend defect class: `EvaluationResult`'s
+  self-referential `replay_of` FK collides with the partial unique
+  constraint `eval_result_one_initial_per_snapshot` during Django's
+  cascade-delete collector, surfacing as an `IntegrityError` in E2E
+  teardown (`global-teardown.ts`) whenever leftover orphaned E2E data
+  exists from an interrupted prior run — recurred several times across
+  Chunks 1, 2, and 4 of this phase; each time resolved with a scoped,
+  delete-only raw-SQL cleanup, never by updating the constrained column.
+  Still an open backend-side defect; out of scope for this frontend phase
+  to fix (no backend files were modified).
+- Chunk 1/2 environment incidents — a blanket `taskkill` by image name
+  during Chunk 2 cleanup killed unrelated real Chrome processes and
+  crashed Docker Desktop; corrected immediately, and every process kill
+  since has targeted a single confirmed PID. Chunk 2's full-suite
+  Playwright confirmation could not be completed that session due to the
+  resulting local environment instability — carried forward and formally
+  closed in this chunk (376 passed / 1 skipped / 0 failed, see above).
+- Chunk 4 (this chunk) — the Members-table horizontal-overflow defect
+  described above, found by this chunk's own new accessibility/responsive
+  coverage and fixed within the same chunk (`a08241b`).
+
+No new schema gaps were introduced in Chunk 4; the schema-gap register
+remains exactly as recorded in Chunks 1-2 (Chunk 3 added none) — three
+entries total: `GET .../members/`'s dead `ordering`/`search` params
+(Chunk 1), the add-member request body typed as the *read* shape instead
+of `MemberAddSerializer`'s real, narrower write shape (Chunk 1, closed in
+Chunk 2 via an explicit narrow cast in `addWorkspaceMember`), and the
+generic `"Invalid request."` top-level message on every dict-shaped
+`ValidationError` with the real reason only in `error.details` (Chunk 2,
+handled by `workspaceAdminErrorMessage()`).
+
 ## Scripts
 
 | Command                           | Purpose                                                               |

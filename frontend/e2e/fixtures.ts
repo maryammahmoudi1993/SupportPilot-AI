@@ -96,6 +96,23 @@ export interface E2EData {
   workspaceAWebhookDeliveryId: string;
   workspaceAWebhookEndpointDisabledId: string;
   workspaceAWebhookDeliveryFailedDisabledEndpointId: string;
+  /** Phase 24 Chunk 1: real WorkspaceMembership rows besides the primary user's own. */
+  workspaceAMembershipAdminId: string;
+  workspaceAMembershipAdminEmail: string;
+  /** Shares `primaryPassword` — every synthetic E2E user is created with the same fixed password (see global-setup.ts's `PASSWORD` constant). */
+  workspaceAMembershipAdmin2Id: string;
+  workspaceAMembershipAdmin2Email: string;
+  workspaceAMembershipViewerId: string;
+  workspaceAMembershipViewerEmail: string;
+  workspaceAMembershipOwnerId: string;
+  workspaceBMembershipOtherId: string;
+  workspaceBMembershipOtherEmail: string;
+  /** Phase 24 Chunk 2: a dedicated, disposable membership the real remove-member E2E deactivates. */
+  workspaceAMembershipRemovableId: string;
+  workspaceAMembershipRemovableEmail: string;
+  /** A real, active, already-existing account with zero memberships — the real add-member E2E adds it by email. */
+  workspaceAAddableEmail: string;
+  workspaceAAddableDisplayName: string;
 }
 
 let cached: E2EData | null = null;
