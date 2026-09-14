@@ -5,7 +5,9 @@ import { useId, useState } from "react";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import {
   ASSIGNABLE_ROLES,
+  canManageMemberRow,
   canManageTargetRole,
+  workspaceAdminErrorMessage,
   workspaceRoleLabel,
   type WorkspaceRoleValue,
 } from "@/features/workspace-admin/types";
@@ -50,7 +52,7 @@ export function MemberRoleCell({
   const selectId = useId();
   const [pendingRole, setPendingRole] = useState<Exclude<WorkspaceRoleValue, "owner"> | null>(null);
 
-  const canEdit = currentRole !== "owner" && canManageTargetRole(actorRole, currentRole) && !isSelf;
+  const canEdit = canManageMemberRow(actorRole, currentRole, isSelf);
 
   if (!canEdit) {
     return (
@@ -94,7 +96,7 @@ export function MemberRoleCell({
       </select>
       {error && (
         <p role="alert" className="text-danger-700 text-xs">
-          {error.message}
+          {workspaceAdminErrorMessage(error)}
         </p>
       )}
 

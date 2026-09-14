@@ -15,3 +15,8 @@ export const workspaceMemberKeys = {
   list: (workspaceId: string, params: WorkspaceMemberListParams) =>
     [...workspaceMemberKeys.lists(workspaceId), params] as const,
 };
+
+/** Phase 24 Chunk 2 — the workspace-settings (name/slug/etc.) detail query key. */
+export const workspaceSettingsKeys = {
+  detail: (workspaceId: string) => ["workspaces", workspaceId, "settings", "workspace"] as const,
+};

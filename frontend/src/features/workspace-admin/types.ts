@@ -1,27 +1,33 @@
 /**
- * Workspace administration domain types (Phase 24 Chunk 1 — Workspace
- * Members + Roles + Admin Foundation).
+ * Workspace administration domain types.
  *
+ * Phase 24 Chunk 1 — Workspace Members + Roles + Admin Foundation:
  * `WorkspaceMembership` and `MembershipUser` are the real, public entities
- * this chunk implements (backend/workspaces/models.py `WorkspaceMembership`,
- * serialized by backend/workspaces/serializers.py
- * `WorkspaceMembershipSerializer`/`MembershipUserSerializer`). The member
- * list/detail endpoints already existed on `main` before this phase
- * (backend/workspaces/urls.py `member-list`/`member-detail`) — Phase 24
- * Chunk 1 is the first frontend UI built against them.
+ * (backend/workspaces/models.py `WorkspaceMembership`, serialized by
+ * backend/workspaces/serializers.py `WorkspaceMembershipSerializer`/
+ * `MembershipUserSerializer`). The member list/detail endpoints already
+ * existed on `main` before this phase (backend/workspaces/urls.py
+ * `member-list`/`member-detail`) — Phase 24 Chunk 1 was the first frontend
+ * UI built against them (list + role update only).
  *
- * There is no separate "invitation" entity in the real backend contract:
- * `POST /members/` (backend/workspaces/services.py `add_workspace_member`)
- * adds an *already-existing, active* user directly and immediately by exact
- * email — there is no pending/accept lifecycle, no invite token, no
- * revoke/resend. Per the master prompt's explicit Chunk 1 scope (Part C
- * §15: "Defer to later chunks: invitation workflows; member removal unless
- * essential"), this chunk does not build add/remove-member UI — see
- * README.md, "Phase 24 — Workspace Administration" for the full
- * capability classification.
+ * Phase 24 Chunk 2 — Workspace Settings + Membership Lifecycle: adds
+ * `Workspace` (read/update — backend/workspaces/views.py
+ * `WorkspaceDetailView`), add-member (`POST /members/`, backend/workspaces/
+ * services.py `add_workspace_member`), and remove-member (`DELETE
+ * /members/{id}/`, `remove_workspace_member`) — all re-verified directly
+ * against `main` before this chunk, unchanged since Chunk 1's discovery.
+ *
+ * There is still no separate "invitation" entity in the real backend
+ * contract: `POST /members/` adds an *already-existing, active* user
+ * directly and immediately by exact email — there is no pending/accept
+ * lifecycle, no invite token, no revoke/resend. This chunk's add-member UI
+ * is labeled honestly as "Add member", never "Invite" — see README.md,
+ * "Phase 24 — Workspace Administration" for the full capability
+ * classification.
  */
 import type { components } from "@/types/api";
 
+export type Workspace = components["schemas"]["Workspace"];
 export type WorkspaceMembership = components["schemas"]["WorkspaceMembership"];
 export type MembershipUser = components["schemas"]["MembershipUser"];
 export type PaginatedWorkspaceMembershipList =
@@ -119,4 +125,93 @@ export function canManageTargetRole(actorRole: string | undefined, targetRole: s
     return targetRole !== "admin";
   }
   return false;
+}
+
+/**
+ * Shared row-level gate for both the role-edit control (Chunk 1) and the
+ * remove-member control (Chunk 2) — both real mutations enforce the exact
+ * same `can_manage_target_role` rule server-side (backend/workspaces/
+ * services.py `change_workspace_member_role` and `remove_workspace_member`
+ * both call it identically), so one frontend function decides whether
+ * *either* control renders for a given row. `isSelf` is included defensively
+ * (never actually changes the outcome, since an actor's own row's role
+ * already makes `canManageTargetRole` return false on its own — see that
+ * function's doc comment) so the intent stays explicit at every call site.
+ */
+export function canManageMemberRow(
+  actorRole: string | undefined,
+  targetRole: string,
+  isSelf: boolean,
+): boolean {
+  return !isSelf && canManageTargetRole(actorRole, targetRole);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 24 Chunk 2 — Workspace settings + add/remove member
+// ---------------------------------------------------------------------------
+
+/**
+ * The backend's real workspace-settings roles (backend/workspaces/
+ * permissions.py `CanManageWorkspace.WORKSPACE_SETTINGS_ROLES` — owner/
+ * admin, the identical set as `MEMBER_MANAGEMENT_ROLES`, but kept as its own
+ * named check since the two backend permission classes are declared
+ * separately and could diverge in a future backend change).
+ */
+const WORKSPACE_SETTINGS_ROLES: ReadonlySet<string> = new Set(["owner", "admin"]);
+
+export function canManageWorkspace(role: string | undefined): boolean {
+  return role !== undefined && WORKSPACE_SETTINGS_ROLES.has(role);
+}
+
+/** `PATCH /workspaces/{id}/` accepts only `name` (backend/workspaces/serializers.py `WorkspaceUpdateSerializer`). */
+export interface UpdateWorkspaceInput {
+  name: string;
+}
+
+/**
+ * `POST /members/` accepts an exact email plus one of the assignable roles
+ * (backend/workspaces/serializers.py `MemberAddSerializer` — same
+ * `ASSIGNABLE_ROLES` as role update; `owner` is never assignable here
+ * either). This is a direct "add an existing, active account" action, never
+ * an invitation — see this module's doc comment.
+ */
+export interface AddWorkspaceMemberInput {
+  email: string;
+  role: Exclude<WorkspaceRoleValue, "owner">;
+}
+
+/**
+ * Real discovery (verified empirically against the running backend, not
+ * assumed from reading the serializer alone): every `ValidationError`
+ * `workspaces/services.py` raises with a field-keyed dict — e.g.
+ * `ValidationError({"email": "This account could not be added to the
+ * workspace."})`, `{"role": "Ownership can only change via ownership
+ * transfer."}`, `{"membership": "The workspace owner cannot be removed."}` —
+ * hits DRF's *dict-shaped* exception path, which `common/exceptions.py
+ * custom_exception_handler` cannot distinguish from an ordinary serializer
+ * field-validation dict. The client-facing envelope's top-level `message` is
+ * therefore always the generic "Invalid request." for these — the real,
+ * specific, safe reason only exists in `error.details` (e.g.
+ * `{"email": "This account could not be added to the workspace."}`).
+ * `ConflictError`/`PermissionDenied` raised with a single string (not a
+ * dict) are unaffected — those already carry the real message at the top
+ * level.
+ *
+ * This helper renders the real, specific reason whenever one is available,
+ * rather than showing every workspace-admin validation failure as the same
+ * uninformative "Invalid request." — never invents wording, only unwraps
+ * what the server already sent.
+ */
+export function workspaceAdminErrorMessage(error: {
+  code: string;
+  message: string;
+  details: Record<string, unknown> | undefined;
+}): string {
+  if (error.code !== "validation_error" || !error.details) {
+    return error.message;
+  }
+  const detailMessages = Object.values(error.details).filter(
+    (value): value is string => typeof value === "string" && value.length > 0,
+  );
+  return detailMessages.length > 0 ? detailMessages.join(" ") : error.message;
 }

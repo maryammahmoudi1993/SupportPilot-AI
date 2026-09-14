@@ -1,10 +1,13 @@
 "use client";
 
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { Suspense } from "react";
+import { Suspense, useState } from "react";
 
 import { useAuth } from "@/features/auth/auth-provider";
-import { useUpdateWorkspaceMemberRoleMutation } from "@/features/workspace-admin/mutations";
+import {
+  useRemoveWorkspaceMemberMutation,
+  useUpdateWorkspaceMemberRoleMutation,
+} from "@/features/workspace-admin/mutations";
 import { useWorkspaceMemberListQuery } from "@/features/workspace-admin/queries";
 import {
   canManageMembers,
@@ -16,11 +19,15 @@ import {
   buildWorkspaceMemberListQueryString,
   parseWorkspaceMemberListParams,
 } from "@/features/workspace-admin/url-params";
+import { AddMemberForm } from "@/features/workspace-admin/components/add-member-form";
 import { MemberRoleCell } from "@/features/workspace-admin/components/member-role-cell";
+import { RemoveMemberButton } from "@/features/workspace-admin/components/remove-member-button";
+import { SettingsNav } from "@/features/workspace-admin/components/settings-nav";
 import { useWorkspace } from "@/features/workspace/workspace-provider";
 import { ListError } from "@/components/support/list-error";
 import { Pagination } from "@/components/support/pagination";
 import { Timestamp } from "@/components/support/timestamp";
+import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
@@ -48,11 +55,17 @@ function MemberRow({
   actorRole: string | undefined;
   currentUserId: number | undefined;
 }) {
-  const mutation = useUpdateWorkspaceMemberRoleMutation(workspaceId);
+  const roleMutation = useUpdateWorkspaceMemberRoleMutation(workspaceId);
+  const removeMutation = useRemoveWorkspaceMemberMutation(workspaceId);
   const isSelf = currentUserId !== undefined && member.user.id === currentUserId;
-  const rowError: ApiError | null =
-    mutation.isError && mutation.variables?.membershipId === member.id ? mutation.error : null;
-  const rowPending = mutation.isPending && mutation.variables?.membershipId === member.id;
+  const roleError: ApiError | null =
+    roleMutation.isError && roleMutation.variables?.membershipId === member.id
+      ? roleMutation.error
+      : null;
+  const rolePending = roleMutation.isPending && roleMutation.variables?.membershipId === member.id;
+  const removeError: ApiError | null =
+    removeMutation.isError && removeMutation.variables === member.id ? removeMutation.error : null;
+  const removePending = removeMutation.isPending && removeMutation.variables === member.id;
 
   return (
     <tr className="hover:bg-surface-2">
@@ -65,15 +78,26 @@ function MemberRow({
           currentRole={member.role}
           actorRole={actorRole}
           isSelf={isSelf}
-          isPending={rowPending}
-          error={rowError}
+          isPending={rolePending}
+          error={roleError}
           onChangeRole={(role: Exclude<WorkspaceRoleValue, "owner">) => {
-            mutation.mutate({ membershipId: member.id, role });
+            roleMutation.mutate({ membershipId: member.id, role });
           }}
         />
       </td>
       <td className="text-text-secondary px-4 py-2.5">
         <Timestamp value={member.created_at} />
+      </td>
+      <td className="px-4 py-2.5">
+        <RemoveMemberButton
+          memberDisplayName={member.user.display_name}
+          targetRole={member.role}
+          actorRole={actorRole}
+          isSelf={isSelf}
+          isPending={removePending}
+          error={removeError}
+          onRemove={() => removeMutation.mutate(member.id)}
+        />
       </td>
     </tr>
   );
@@ -94,6 +118,8 @@ function MembersListContent({
 }) {
   const router = useRouter();
   const query = useWorkspaceMemberListQuery(workspaceId, params);
+  const [showAddForm, setShowAddForm] = useState(false);
+  const canManage = canManageMembers(actorRole);
 
   function pushParams(next: WorkspaceMemberListParams) {
     router.replace(`${pathname}${buildWorkspaceMemberListQueryString(next)}`, { scroll: false });
@@ -101,6 +127,21 @@ function MembersListContent({
 
   return (
     <div className="flex flex-col gap-6">
+      {canManage && (
+        <div>
+          {showAddForm ? (
+            <AddMemberForm
+              workspaceId={workspaceId}
+              actorRole={actorRole}
+              onAdded={() => setShowAddForm(false)}
+              onCancel={() => setShowAddForm(false)}
+            />
+          ) : (
+            <Button onClick={() => setShowAddForm(true)}>Add member</Button>
+          )}
+        </div>
+      )}
+
       {query.isPending && <MembersListSkeleton />}
 
       {query.isError && (
@@ -132,6 +173,9 @@ function MembersListContent({
                   </th>
                   <th scope="col" className="px-4 py-2.5">
                     Joined
+                  </th>
+                  <th scope="col" className="px-4 py-2.5">
+                    <span className="sr-only">Actions</span>
                   </th>
                 </tr>
               </thead>
@@ -181,10 +225,12 @@ function MembersListInner() {
         <h1 className="text-text-primary text-xl font-semibold">Workspace members</h1>
         <p className="text-text-secondary text-sm">
           {canManageMembers(actorRole)
-            ? "Members of this workspace and their roles. Owner/admin can change a non-owner member's role."
+            ? "Members of this workspace and their roles. Owner/admin can add, remove, or change a non-owner member's role."
             : "Members of this workspace and their roles."}
         </p>
       </div>
+
+      <SettingsNav active="members" />
 
       {workspaceId === null ? (
         <MembersListSkeleton />
@@ -202,11 +248,11 @@ function MembersListInner() {
 }
 
 /**
- * The workspace Members page (`/app/settings/members`, Phase 24 Chunk 1).
- * Invitation/add-member and removal UI are deliberately out of scope for
- * this chunk (see types.ts's module doc comment) — this page only lists
- * real members and, where the signed-in caller has real permission, lets
- * them change a member's role.
+ * The workspace Members page (`/app/settings/members`). Phase 24 Chunk 1
+ * shipped list + role update; Chunk 2 adds add-member (labeled honestly —
+ * there is still no invitation concept, see types.ts's module doc comment)
+ * and remove-member, both gated by the same real, server-authoritative
+ * `can_manage_target_role` rule as role update.
  */
 export function MembersListPage() {
   const workspace = useWorkspace();
