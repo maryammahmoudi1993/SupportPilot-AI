@@ -71,7 +71,7 @@ function MemberRow({
     <tr className="hover:bg-surface-2">
       <td className="px-4 py-2.5 font-medium">
         {member.user.display_name}
-        <div className="text-text-secondary text-xs">{member.user.email}</div>
+        <div className="text-text-secondary text-xs break-all">{member.user.email}</div>
       </td>
       <td className="px-4 py-2.5">
         <MemberRoleCell
@@ -126,7 +126,7 @@ function MembersListContent({
   }
 
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex min-w-0 flex-col gap-6 overflow-x-hidden">
       {canManage && (
         <div>
           {showAddForm ? (
@@ -161,7 +161,7 @@ function MembersListContent({
       {query.isSuccess && query.data.results.length > 0 && (
         <>
           <div className="border-border-subtle overflow-x-auto rounded-lg border">
-            <table className="w-full min-w-[640px] text-left text-sm">
+            <table className="w-full min-w-[420px] table-fixed text-left text-sm">
               <caption className="sr-only">Members of this workspace and their roles</caption>
               <thead className="bg-surface-2 text-text-secondary text-xs font-medium uppercase">
                 <tr>
@@ -220,7 +220,7 @@ function MembersListInner() {
   const actorRole = workspace.activeWorkspace?.role;
 
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex min-w-0 flex-col gap-6 overflow-x-hidden">
       <div>
         <h1 className="text-text-primary text-xl font-semibold">Workspace members</h1>
         <p className="text-text-secondary text-sm">

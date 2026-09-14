@@ -66,7 +66,7 @@ export function AddMemberForm({
   return (
     <form
       onSubmit={handleSubmit}
-      className="border-border-subtle flex flex-col gap-4 rounded-lg border p-4"
+      className="border-border-subtle flex max-w-full min-w-0 flex-col gap-4 overflow-x-hidden rounded-lg border p-4"
       aria-label="Add workspace member"
     >
       <div>
