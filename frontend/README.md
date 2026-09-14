@@ -3076,6 +3076,107 @@ workspace/role pair, the same absence-of-credential-controls assertion
 against the real rendered page, and the Settings nav's three real,
 bookmarkable routes.
 
+### Final Acceptance Gate (Phase 24 Chunk 4)
+
+Closed the carried-forward open item from Chunk 2 first: a clean,
+uninterrupted full-suite Playwright confirmation run against the real
+backend now completes end to end — 376 passed, 1 skipped (the pre-existing,
+intentionally accepted `PHASE22-3-04` fixme), 0 failed.
+
+**New accessibility coverage**: `e2e/accessibility.spec.ts` gained an axe
+(`@axe-core/playwright`, `serious`/`critical` impact only) pass over all
+three Settings pages (Members, Workspace, Account) and their dialogs —
+read-only `support_agent` role rendering, the Add Member form, the
+grant-admin confirmation dialog, and the remove-member confirmation
+dialog (both dialogs scanned then closed via Escape rather than confirmed,
+so the shared E2E fixture data is never mutated by an accessibility pass).
+Keyboard coverage: Escape closes a `ConfirmDialog` and returns focus to its
+real trigger element; the Settings nav's three real routes expose
+`aria-current="page"` correctly as focus moves between them.
+
+**New responsive coverage**: `e2e/responsive.spec.ts` gained the same
+per-viewport treatment (375×812, 768×1024, 1280×800, 1440×900) already
+used for the Evaluations pages — a `SETTINGS_PAGES` loop asserting zero
+page-level horizontal overflow (`document.documentElement.scrollWidth` vs.
+`clientWidth`, the only check that catches overflow hidden by an
+`overflow-x-auto` wrapper) on all three Settings pages at every viewport,
+plus two dedicated mobile-width (375px) tests for the Add Member form and
+the remove-member confirmation dialog.
+
+**Real defect found and fixed by this coverage** (not present before,
+because no accessibility/responsive test had ever exercised these pages):
+the Members table used the browser default `table-layout: auto`, which let
+long, unbreakable member email strings expand the table past its own
+declared `min-width` regardless of its `overflow-x-auto` wrapper — a
+genuine page-level horizontal scroll, reproducible exactly at 768px tablet
+width. Fixed with `table-layout: fixed` on the table, a reduced
+`min-w-[420px]`, `break-all` on the email cell, and defensive
+`min-w-0 overflow-x-hidden` on the containing flex columns
+(`member-list-page.tsx`). A second, narrower overflow appeared only at
+375px mobile width with the Add Member form open simultaneously; fixed by
+adding `min-w-0 max-w-full overflow-x-hidden` to the form itself
+(`add-member-form.tsx`). Verified live via a temporary diagnostic spec
+(not committed) confirming `scrollWidth === clientWidth` at every viewport
+before considering the fix complete.
+
+**Final double-clean regression**: full Vitest (631/631), full Playwright
+(376 passed / 1 skipped / 0 failed), lint, typecheck, and production build
+all clean; `check:api-types` reports the committed API contract still
+matches the backend's OpenAPI schema (zero drift); `npm audit --omit=dev`
+reports 0 vulnerabilities; the full audit reports 2 pre-existing high
+findings, both in `js-yaml` via `@redocly/openapi-core` — a dev-only
+OpenAPI-tooling dependency never shipped in the production bundle.
+
+**Security re-scan of the workspace-admin domain**: no
+`dangerouslySetInnerHTML` anywhere in `features/workspace-admin`; no
+secret/credential value read, logged, or persisted anywhere in the domain;
+every mutation and read goes through a `{workspace_id}`-scoped endpoint
+(`api.ts`), and every query key is workspace-scoped (`query-keys.ts`) so a
+workspace switch can never serve another workspace's cached data; no
+client-side role-hierarchy shortcut exists anywhere — every role gate
+(`member-role-cell.tsx`, `remove-member-button.tsx`,
+`workspace-settings-page.tsx`) funnels through the same shared
+`canManageTargetRole`/`canManageMemberRow`/`canManageWorkspace` helpers
+from `types.ts`, mirroring the backend's own `can_manage_target_role` rule
+rather than re-deriving it; the backend remains authoritative for every
+permission decision regardless of what the UI shows or hides.
+
+**Consolidated defect ledger — Phase 24 (all chunks, referenced by ID,
+never rewritten)**:
+
+- `PHASE22-3-04` — pre-existing, intentionally accepted `fixme`, carried
+  through Phases 22-24 untouched.
+- `PHASE23-3-D01` — pre-existing backend defect class: `EvaluationResult`'s
+  self-referential `replay_of` FK collides with the partial unique
+  constraint `eval_result_one_initial_per_snapshot` during Django's
+  cascade-delete collector, surfacing as an `IntegrityError` in E2E
+  teardown (`global-teardown.ts`) whenever leftover orphaned E2E data
+  exists from an interrupted prior run — recurred several times across
+  Chunks 1, 2, and 4 of this phase; each time resolved with a scoped,
+  delete-only raw-SQL cleanup, never by updating the constrained column.
+  Still an open backend-side defect; out of scope for this frontend phase
+  to fix (no backend files were modified).
+- Chunk 1/2 environment incidents — a blanket `taskkill` by image name
+  during Chunk 2 cleanup killed unrelated real Chrome processes and
+  crashed Docker Desktop; corrected immediately, and every process kill
+  since has targeted a single confirmed PID. Chunk 2's full-suite
+  Playwright confirmation could not be completed that session due to the
+  resulting local environment instability — carried forward and formally
+  closed in this chunk (376 passed / 1 skipped / 0 failed, see above).
+- Chunk 4 (this chunk) — the Members-table horizontal-overflow defect
+  described above, found by this chunk's own new accessibility/responsive
+  coverage and fixed within the same chunk (`a08241b`).
+
+No new schema gaps were introduced in Chunk 4; the schema-gap register
+remains exactly as recorded in Chunks 1-2 (Chunk 3 added none) — three
+entries total: `GET .../members/`'s dead `ordering`/`search` params
+(Chunk 1), the add-member request body typed as the *read* shape instead
+of `MemberAddSerializer`'s real, narrower write shape (Chunk 1, closed in
+Chunk 2 via an explicit narrow cast in `addWorkspaceMember`), and the
+generic `"Invalid request."` top-level message on every dict-shaped
+`ValidationError` with the real reason only in `error.details` (Chunk 2,
+handled by `workspaceAdminErrorMessage()`).
+
 ## Scripts
 
 | Command                           | Purpose                                                               |
