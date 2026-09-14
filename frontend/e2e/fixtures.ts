@@ -107,6 +107,12 @@ export interface E2EData {
   workspaceAMembershipOwnerId: string;
   workspaceBMembershipOtherId: string;
   workspaceBMembershipOtherEmail: string;
+  /** Phase 24 Chunk 2: a dedicated, disposable membership the real remove-member E2E deactivates. */
+  workspaceAMembershipRemovableId: string;
+  workspaceAMembershipRemovableEmail: string;
+  /** A real, active, already-existing account with zero memberships — the real add-member E2E adds it by email. */
+  workspaceAAddableEmail: string;
+  workspaceAAddableDisplayName: string;
 }
 
 let cached: E2EData | null = null;

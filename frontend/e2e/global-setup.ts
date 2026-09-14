@@ -118,6 +118,27 @@ membership_b_other = WorkspaceMembership.objects.create(
     workspace=ws_b, user=e2e_ws_b_other_user, role=WorkspaceRole.VIEWER
 )
 
+# Phase 24 Chunk 2 — Workspace Settings + Membership Lifecycle. A dedicated,
+# disposable membership in Workspace A (never reused by any other spec, same
+# "dedicated fixture" pattern as the keyboard/mobile approval fixtures
+# below) that the real remove-member E2E actually deactivates — safe to
+# permanently remove since nothing else in the suite depends on this row
+# still being active afterward.
+e2e_ws_a_removable_user = make_user(
+    "e2e-ws-a-removable", "e2e-ws-a-removable@example.com", "E2E", "WsARemovable"
+)
+membership_a_removable = WorkspaceMembership.objects.create(
+    workspace=ws_a, user=e2e_ws_a_removable_user, role=WorkspaceRole.VIEWER
+)
+# A real, active, already-existing account with zero workspace memberships
+# of its own -- the real add-member E2E adds this exact account to
+# Workspace A by email; distinct from the "zero" (zero-workspace login)
+# fixture user so adding this one can never change what that other user's
+# own E2E assertions see.
+e2e_ws_a_addable_user = make_user(
+    "e2e-ws-a-addable", "e2e-ws-a-addable@example.com", "E2E", "WsAAddable"
+)
+
 # Customers domain (Phase 19 Chunk 1) — real cross-workspace data so the
 # real-backend smoke and later Phase 19 E2E specs can prove tenant
 # isolation, search, and pagination against the actual API, not a mock.
@@ -1069,6 +1090,10 @@ print(json.dumps({
     "workspaceAMembershipOwnerId": str(membership_a.id),
     "workspaceBMembershipOtherId": str(membership_b_other.id),
     "workspaceBMembershipOtherEmail": e2e_ws_b_other_user.email,
+    "workspaceAMembershipRemovableId": str(membership_a_removable.id),
+    "workspaceAMembershipRemovableEmail": e2e_ws_a_removable_user.email,
+    "workspaceAAddableEmail": e2e_ws_a_addable_user.email,
+    "workspaceAAddableDisplayName": e2e_ws_a_addable_user.get_full_name(),
 }))
 `;
 
